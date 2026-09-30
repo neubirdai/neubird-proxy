@@ -20,7 +20,7 @@ Effort figures are estimates, not sized by the owning team.
 | 6 | One static token opens everything | **Fixed in code; rollout open** | Per-connection tokens, a previous token for rotation, a 32-character minimum, optional mTLS. Open: item 6 |
 | 7 | Arbitrary client headers forwarded (APIM trace) | **Fixed** | Request header allowlist; trace, debug and credential headers can't be allowlisted. APIM-side hardening: item 10 |
 | 8 | Internal topology leaks (hostnames, paths) | **Open (config)** | Needs MetLife's domain and path patterns as custom rules, or `response_fields`. Item 16 |
-| 9 | No rate limits, concurrency limits or performance evidence | **Fixed; one follow-up** | Per-connection rate limits, a global concurrency cap, a buffered-body cap, benchmarks and a measured peak heap. Throughput is 11–16 MB/s. Open: items 9, 11, 18 |
+| 9 | No rate limits, concurrency limits or performance evidence | **Fixed; one follow-up** | Per-connection rate limits, a global concurrency cap, a buffered-body cap, benchmarks and a measured peak heap. Throughput is 11–16 MB/s, and Splunk exports stream, so the first result leaves in about 1 ms. Open: items 9, 11, 18 |
 | 10 | Audit can't attribute or reconstruct access | **Fixed in code; shipping open** | Request ID (echoed upstream and to the client), remote and forwarded address, query parameter names, config SHA-256 at startup. Open: item 7 |
 | 11 | ConfigMap edit can turn on passthrough | **Mitigated; process open** | Startup warnings, `-check` warnings, and the config hash in logs. Open: item 8 |
 | 12 | Unpinned build inputs, no signing | **Partly fixed** | Base image digests, Go toolchain 1.26.8 (govulncheck clean), and CI actions are all pinned. Open: item 5 |
@@ -146,10 +146,13 @@ the proxy's subscription as the global ceiling.
 
 **11. Throughput, if bodies are large.** *Owner: NeuBird engineering. 3–5
 days. Depends on item 1.*
-Throughput is 11–16 MB/s per response, so a 20 MiB Splunk export takes
-1.3–1.9 s. If item 1 shows large bodies are common, redact NDJSON documents
-in parallel and replace the `encoding/json` tokenizer with a scanner, with a
-target of 50 MB/s or more. Keep the fuzz and golden tests as the safety net.
+Splunk exports now stream: the first result leaves in about a millisecond,
+and when Splunk is slower than 11–16 MB/s (a running search), the proxy's
+cost is hidden. What remains is CPU per response: an 18 MB export that
+Splunk already holds takes 1.2–1.7 s to redact on one core. If item 1 shows
+this matters, redact documents in parallel across cores and replace the
+`encoding/json` tokenizer, targeting 50 MB/s or more. Keep the fuzz and
+golden tests as the safety net.
 
 **12. Patching and CVE response.** *Owner: NeuBird engineering (automation);
 NeuBird security and legal (SLA). About 1 day.*

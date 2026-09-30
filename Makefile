@@ -19,7 +19,7 @@ vuln:
 # Short fuzz pass over every target; CI runs this, run longer locally.
 FUZZTIME ?= 15s
 fuzz:
-	for f in FuzzStringMasksEmbeddedPII FuzzNormalize FuzzJSON FuzzSSE; do \
+	for f in FuzzStringMasksEmbeddedPII FuzzNormalize FuzzJSON FuzzJSONStream FuzzSSE; do \
 	  go test ./internal/redact -run '^$$' -fuzz "^$$f\$$" -fuzztime $(FUZZTIME) || exit 1; done
 
 bench:

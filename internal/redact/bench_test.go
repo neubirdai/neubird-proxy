@@ -1,7 +1,9 @@
 package redact
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -84,6 +86,25 @@ func BenchmarkJSONQuietExport(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, err := e.JSON(body, Stats{}); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkJSONStreamQuietExport(b *testing.B) {
+	body := quietExport(20 << 20)
+	e := benchEngine(b)
+	buf := make([]byte, 32<<10)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s, _, _, err := NewJSONStream(io.NopCloser(bytes.NewReader(body)), e, Stats{}, 20<<20, nil, -1)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for {
+			if _, err := s.Read(buf); err != nil {
+				break
+			}
 		}
 	}
 }

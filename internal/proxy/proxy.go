@@ -166,7 +166,9 @@ type reqState struct {
 	restRaw string // same, escaped as received
 	stats   redact.Stats
 	blocked string
-	sse     *redact.SSEReader
+	// stream is the redacting reader for a streamed body (SSE or
+	// multi-document JSON); its error explains a cut stream.
+	stream interface{ Err() error }
 }
 
 type stateKey struct{}
@@ -210,12 +212,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status := rec.status
 		if p != nil {
 			status = 0 // stream aborted mid-body
-			if st.sse != nil {
-				switch err := st.sse.Err(); {
+			if st.stream != nil {
+				switch err := st.stream.Err(); {
 				case errors.Is(err, redact.ErrEventTooLarge):
 					st.blocked = "sse_event_too_large"
 				case errors.Is(err, redact.ErrNotText):
 					st.blocked = "sse_not_text"
+				case errors.Is(err, redact.ErrDocTooLarge):
+					st.blocked = "json_doc_too_large"
+				case errors.Is(err, redact.ErrStreamNotJSON):
+					st.blocked = "json_stream_invalid"
 				}
 				if st.blocked != "" {
 					s.Metrics.Blocked.Inc(name, st.blocked)
@@ -551,6 +557,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return nil
 	}
 
+	gzipped := false
 	switch enc := strings.ToLower(strings.TrimSpace(h.Get("Content-Encoding"))); enc {
 	case "", "identity":
 	case "gzip", "x-gzip":
@@ -563,6 +570,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			io.Closer
 		}{zr, resp.Body}
 		h.Del("Content-Encoding")
+		gzipped = true
 	default:
 		return &blockError{"unsupported_content_encoding"}
 	}
@@ -570,8 +578,9 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	kind := classify(h.Get("Content-Type"))
 	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
-		st.sse = redact.NewSSEReader(resp.Body, s.engine, st.stats, s.cfg.MaxBodyBytes).WithFields(fields)
-		resp.Body = st.sse
+		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.cfg.MaxBodyBytes).WithFields(fields)
+		st.stream = sse
+		resp.Body = &dropTrailers{ReadCloser: sse, resp: resp}
 		resp.ContentLength = -1
 		h.Del("Content-Length")
 		return nil
@@ -593,6 +602,49 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		resp.Body.Close()
 		return resp.Request.Context().Err()
 	}
+
+	if kind == kindJSON {
+		// The first document is redacted here, before any header is sent,
+		// so a single-document body (ServiceNow, most APIs) is still
+		// all-or-nothing with an exact Content-Length. Further documents
+		// (Splunk export) stream: each is sent as soon as it is redacted.
+		// A length is only meaningful for the bytes we decode; gzip was
+		// unwrapped above, so its declared length no longer applies.
+		knownLen := resp.ContentLength
+		if gzipped {
+			knownLen = -1
+		}
+		js, single, raw, err := redact.NewJSONStream(resp.Body, s.engine, st.stats, s.cfg.MaxBodyBytes, fields, knownLen)
+		switch {
+		case errors.Is(err, redact.ErrDocTooLarge):
+			resp.Body.Close()
+			return &blockError{"body_too_large"}
+		case err != nil && fields != nil:
+			resp.Body.Close()
+			return &blockError{"not_json"}
+		case err != nil:
+			// Labeled JSON but isn't: the text path below re-reads what
+			// the decoder consumed, then the rest.
+			rest := resp.Body
+			resp.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.MultiReader(bytes.NewReader(raw), rest), rest}
+			kind = kindText
+		case single:
+			resp.Body.Close()
+			return setBody(resp, js.Bytes())
+		default:
+			st.stream = js
+			resp.Body = &dropTrailers{ReadCloser: js, resp: resp}
+			resp.ContentLength = -1
+			h.Del("Content-Length")
+			h.Del("Content-MD5")
+			h.Del("Digest")
+			return nil
+		}
+	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, s.cfg.MaxBodyBytes+1))
 	resp.Body.Close()
 	if err != nil {
@@ -606,25 +658,36 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return &blockError{"not_text"}
 	}
 	if len(body) > 0 {
-		var out []byte
-		if kind == kindJSON {
-			out, err = s.engine.JSONFields(body, st.stats, fields)
-			if err != nil && fields != nil {
-				return &blockError{"not_json"}
-			}
-		}
-		if kind == kindText || err != nil {
-			// Invalid JSON still gets value rules; only key rules are lost.
-			out = s.engine.Text(body, st.stats)
-		}
-		body = out
+		// Text, or JSON that did not parse: value rules still apply, only
+		// key rules are lost.
+		body = s.engine.Text(body, st.stats)
 	}
+	return setBody(resp, body)
+}
 
+// dropTrailers clears resp.Trailer when a streamed body ends. The
+// transport fills in trailers only once the upstream body hits EOF, after
+// modifyResponse has returned, and ReverseProxy forwards whatever is there
+// then; trailers would bypass header redaction.
+type dropTrailers struct {
+	io.ReadCloser
+	resp *http.Response
+}
+
+func (d *dropTrailers) Read(p []byte) (int, error) {
+	n, err := d.ReadCloser.Read(p)
+	if err != nil {
+		d.resp.Trailer = nil
+	}
+	return n, err
+}
+
+func setBody(resp *http.Response, body []byte) error {
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
-	h.Set("Content-Length", strconv.Itoa(len(body)))
-	h.Del("Content-MD5")
-	h.Del("Digest")
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	resp.Header.Del("Content-MD5")
+	resp.Header.Del("Digest")
 	return nil
 }
 

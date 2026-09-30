@@ -62,7 +62,8 @@ warning for it.
 ## Redaction
 
 - **JSON** is walked token by token, so key order and number precision
-  survive.
+  survive. A body of several concatenated documents (Splunk export) streams
+  one document at a time; see Latency and capacity.
   - Object keys get the value rules too, so a map keyed by email is masked.
     If two keys mask to the same label they collide, and parsers keep only
     one; `mask: hmac` avoids this.
@@ -98,9 +99,11 @@ The proxy refuses a response with
 - a 206 partial response
 - a protocol upgrade
 
-For SSE, the status line has already been sent. So an event over the cap, or
-one that isn't text, cuts the stream instead; the client sees a truncated
-read, and the audit line records the reason.
+For SSE and streamed JSON, the status line has already been sent. So an
+event or document over the cap, or one that can't be redacted, cuts the
+stream instead; the client sees a truncated read, and the audit line records
+the reason (`sse_event_too_large`, `sse_not_text`, `json_doc_too_large`,
+`json_stream_invalid`). Trailers are dropped from streamed responses too.
 
 ## Rules
 
@@ -189,7 +192,7 @@ variable, or the proxy refuses to start. Unknown YAML fields are errors.
 | `allow_http_upstreams` | `false` | Allow `http://` upstreams; otherwise only `https://` is accepted |
 | `client_token_env` | none | Env var with the default token, 32+ characters; required unless every connection sets its own |
 | `client_token_previous_env` | none | Also accepted during a rotation; remove it afterwards |
-| `max_body_bytes` | 20 MiB | Cap for request bodies, buffered response bodies and each SSE event |
+| `max_body_bytes` | 20 MiB | Cap for request bodies, buffered response bodies, each SSE event and each streamed JSON document |
 | `max_concurrent_requests` | 256 | In-flight requests before the proxy returns 503 |
 | `max_concurrent_buffered` | 4 | Response bodies buffered for redaction at once; others wait |
 | `upstream_defaults.headers` | none | Headers set on every upstream request; values may use `${VAR}` |
@@ -269,20 +272,48 @@ too. Every response carries `X-Request-Id`.
 - **Runtime:** stateless, no disk. Runs as two replicas with a read-only root
   filesystem, as non-root, with no capabilities.
 
-### Capacity
+### Latency and capacity
 
-These numbers come from `make bench` on one core (Apple M4 Max), using
-Splunk-export-shaped data:
+**Single-document JSON** (ServiceNow and most APIs), and any body with a
+declared `Content-Length` that holds one document, is redacted whole before
+the first byte is sent. It keeps an exact `Content-Length`, and a failure is
+a clean 502.
 
-| Body | Throughput | 20 MiB body |
-|---|---|---|
-| Operational logs, no PII | 16 MB/s | ~1.3 s |
-| PII in every event | 11 MB/s | ~1.9 s |
+**Multi-document JSON with no declared length** (Splunk export) streams.
+- Each document is redacted and sent as soon as it arrives, batched with any
+  others already received, and each is followed by a newline.
+- The first byte leaves as soon as the first result is redacted, and memory
+  is bounded by the largest document, not the body.
+- `max_body_bytes` caps each document, not the whole stream.
+- If a later document is over the cap or isn't valid JSON, the stream is
+  cut, because a 502 can no longer be sent. The audit line records
+  `json_doc_too_large` or `json_stream_invalid`.
 
-Peak heap is about 4.5× the body size, so 4 buffered 20 MiB bodies need about
-360 MiB. That's why `max_concurrent_buffered` defaults to 4 against the
-512 MiB memory limit. Raise both together. Redaction is single-threaded per
-response; see the plan for the throughput work.
+Measured end to end through the proxy on one core (Apple M4 Max), for a
+Splunk export of 50,000 results (about 18 MB). Medians of 3–7 runs:
+
+| Upstream | Proxy mode | First byte | Total | Added by proxy |
+|---|---|---|---|---|
+| Sends all at once | buffered (before streaming) | ~1.05–1.55 s | ~1.05–1.55 s | ~1.05–1.55 s |
+| Sends all at once | streaming | 0.2 ms | ~1.2–1.7 s | ~1.2–1.7 s |
+| Paced over ~2.4 s, like a running search | buffered (before streaming) | 3.4–4.1 s | 3.4–4.1 s | 1.1–1.6 s |
+| Paced over ~2.4 s, like a running search | streaming | ~1 ms | ~2.1 s | within noise |
+
+Ranges run from operational logs with no PII to PII in every event.
+- **Redaction speed:** 11–16 MB/s (`make bench`), about 20–35 ms per 1,000
+  Splunk results.
+- **When Splunk is slower than that** (the usual case, because the search is
+  still running), streaming hides the redaction entirely.
+- **When a whole export is already sitting in Splunk,** streaming costs
+  about 10–15% more total time than buffering did, in exchange for an
+  immediate first byte.
+
+Peak heap for a buffered body is about 4.5× its size, so 4 buffered 20 MiB
+bodies need about 360 MiB. That's why `max_concurrent_buffered` defaults to 4
+against the 512 MiB memory limit. Raise both together. Streamed responses
+hold one document at a time and count against the cap only while their first
+document is decoded. Redaction is single-threaded per response; see the plan
+for the throughput work.
 
 ## Deploy
 
