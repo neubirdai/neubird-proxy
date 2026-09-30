@@ -13,7 +13,10 @@ ACCOUNT=443370673207
 CTX=arn:aws:eks:us-west-2:443370673207:cluster/eks-htm-prod
 NS=neubird-proxy-test
 REPO=443370673207.dkr.ecr.us-west-2.amazonaws.com/neubird-proxy
-V=$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- cmd internal go.mod go.sum Dockerfile || echo -dirty)
+# Tag by the last commit that changed what goes into the image, so a
+# docs- or config-only commit reuses the existing image.
+SRC="cmd internal go.mod go.sum Dockerfile"
+V=$(git log -1 --format=%h -- $SRC)$(git diff --quiet HEAD -- $SRC || echo -dirty)
 
 if [ -z "${SKIP_BUILD:-}" ]; then
   case "$V" in *-dirty) echo "refusing to push a dirty tree ($V); commit first" >&2; exit 1;; esac
@@ -25,10 +28,15 @@ if [ -z "${SKIP_BUILD:-}" ]; then
     docker push "$REPO:$V"
   fi
 fi
-DIGEST=$(aws ecr describe-images --repository-name neubird-proxy --image-ids imageTag="${V%-dirty}" \
-  --query 'imageDetails[0].imageDigest' --output text)
-
 k() { kubectl --context "$CTX" "$@"; }
+
+if [ -n "${SKIP_BUILD:-}" ] && IMAGE=$(k -n "$NS" get deploy neubird-proxy -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null) && [ -n "$IMAGE" ]; then
+  echo "keeping deployed image $IMAGE"
+else
+  DIGEST=$(aws ecr describe-images --repository-name neubird-proxy --image-ids imageTag="${V%-dirty}" \
+    --query 'imageDetails[0].imageDigest' --output text)
+  IMAGE="$REPO@$DIGEST"
+fi
 k apply -f - <<<"$(sed -n '1,/^---$/p' deploy/test-eks/kubernetes.yaml | sed '$d')"   # namespace
 k -n "$NS" create configmap neubird-proxy --from-file=config.yaml=deploy/test-eks/config.yaml \
   --dry-run=client -o yaml | k apply -f -
@@ -36,7 +44,7 @@ if ! k -n "$NS" get secret neubird-proxy >/dev/null 2>&1; then
   echo "Secret $NS/neubird-proxy is missing; create it first (see deploy/test-eks/README.md)" >&2
   exit 1
 fi
-sed "s|image: IMAGE .*|image: $REPO@$DIGEST|" deploy/test-eks/kubernetes.yaml | k apply -f -
+sed "s|image: IMAGE .*|image: $IMAGE|" deploy/test-eks/kubernetes.yaml | k apply -f -
 # Config changes need a restart (no hot reload).
 k -n "$NS" rollout restart deploy/neubird-proxy
 k -n "$NS" rollout status deploy/neubird-proxy --timeout=120s
