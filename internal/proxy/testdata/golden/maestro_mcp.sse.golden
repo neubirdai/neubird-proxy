@@ -1,0 +1,10 @@
+event: message
+id: 1
+data: {"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"Job CLAIMS_NIGHTLY_03 failed on host [REDACTED:IPV4]. Owner: [REDACTED:EMAIL], escalation [REDACTED:PHONE_US]."}],"isError":false}}
+
+: keepalive
+
+event: message
+id: 2
+data: {"jsonrpc":"2.0","id":8,"result":{"structuredContent":{"jobs":[{"name":"MEMBER_EXTRACT","status":"ABEND","params":{"member":"[REDACTED:MEMBER_ID]","password":"[REDACTED:KEY]"}}]}}}
+

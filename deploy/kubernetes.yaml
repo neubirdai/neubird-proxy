@@ -1,0 +1,115 @@
+# neubird-proxy for MetLife AKS. Apply after creating the Secret and
+# ConfigMap (see README). Replace the image, namespace and CIDRs marked
+# CHANGE ME.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neubird-proxy
+  namespace: neubird          # CHANGE ME
+  labels: {app: neubird-proxy}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: neubird-proxy}
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: neubird-proxy}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: neubird-proxy}
+      containers:
+        - name: proxy
+          image: metlife.azurecr.io/neubird/neubird-proxy:v0.1.0   # CHANGE ME
+          args: ["-config", "/etc/neubird-proxy/config.yaml"]
+          ports:
+            - {name: proxy, containerPort: 8443}
+            - {name: admin, containerPort: 9090}
+          envFrom:
+            - secretRef: {name: neubird-proxy}
+          volumeMounts:
+            - {name: config, mountPath: /etc/neubird-proxy, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            # Headroom for a few concurrent max_body_bytes responses
+            # (each is buffered plus its redacted copy).
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: config
+          configMap: {name: neubird-proxy}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neubird-proxy
+  namespace: neubird          # CHANGE ME
+  labels: {app: neubird-proxy}
+spec:
+  selector: {app: neubird-proxy}
+  ports:
+    - {name: proxy, port: 443, targetPort: proxy}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: neubird-proxy
+  namespace: neubird          # CHANGE ME
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: neubird-proxy}
+---
+# Inbound: proxy port from the load balancer only (which itself admits only
+# NeuBird's egress IPs), admin port from monitoring. Outbound: APIM's
+# internal endpoint and DNS only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: neubird-proxy
+  namespace: neubird          # CHANGE ME
+spec:
+  podSelector:
+    matchLabels: {app: neubird-proxy}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{port: 8443, protocol: TCP}]
+      from:
+        - ipBlock: {cidr: 10.0.0.0/8}          # CHANGE ME: load balancer / ingress subnet
+    - ports: [{port: 9090, protocol: TCP}]
+      from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}   # CHANGE ME
+  egress:
+    - ports: [{port: 443, protocol: TCP}]
+      to:
+        - ipBlock: {cidr: 10.1.2.0/24}         # CHANGE ME: APIM internal endpoint
+    - ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+      to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}

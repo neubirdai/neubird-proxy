@@ -1,0 +1,47 @@
+# neubird-proxy configuration. Mounted from a ConfigMap; secrets are
+# referenced by environment variable name and come from a Kubernetes Secret.
+# Hostnames, API paths and the member_id pattern are placeholders that
+# MetLife supplies.
+
+listen: ":8443"          # NeuBird-facing listener (exposed via the load balancer)
+admin_listen: ":9090"    # /healthz, /readyz, /metrics (cluster-internal only)
+
+# Optional: terminate TLS in the pod. Omit if the load balancer terminates.
+# tls:
+#   cert_file: /etc/neubird-proxy/tls/tls.crt
+#   key_file: /etc/neubird-proxy/tls/tls.key
+
+# Optional: extra CA bundle for APIM's internal certificate.
+# upstream_ca_file: /etc/neubird-proxy/ca/ca.crt
+
+client_token_env: NEUBIRD_PROXY_TOKEN
+max_body_bytes: 20971520   # 20 MiB; larger bodies are refused (502), never passed through
+
+upstream_defaults:
+  headers:
+    Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY}
+
+connections:
+  - name: splunk
+    upstream: https://int.apis.metlife.com/splunk
+    client_auth: bearer
+  - name: servicenow
+    upstream: https://int.apis.metlife.com/servicenow
+    client_auth: basic
+  - name: maestro
+    upstream: https://int.apis.metlife.com/maestro-mcp
+    client_auth: bearer
+  # Fallback for a connector that cannot take a base URL with a path:
+  #   host: maestro.proxy.metlife.com
+  # Backend not fronted by APIM: inject its credential from the Secret.
+  #   upstream_basic_auth: {username_env: SN_USER, password_env: SN_PASSWORD}
+
+redaction:
+  # Omit builtins to enable all: email, us_ssn, credit_card, phone_us, ipv4, date_of_birth.
+  builtins: [email, us_ssn, credit_card, phone_us, ipv4, date_of_birth]
+  blocked_key_patterns: ["(?i).*ssn.*", "(?i).*password.*", "(?i).*dob.*"]
+  custom:
+    - name: member_id
+      regex: "\\bMET[0-9]{9}\\b"
+  allowed_values: ["(?i)[a-z0-9._-]+@metlife\\.com"]
+  mask: label   # or hmac, keyed by REDACTION_HMAC_KEY

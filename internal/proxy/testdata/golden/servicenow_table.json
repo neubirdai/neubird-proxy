@@ -1,0 +1,20 @@
+{
+  "result": [
+    {
+      "sys_id": "6816f79cc0a8016401c5a33be04be441",
+      "number": "INC0010042",
+      "short_description": "Member portal login fails for MET220019384",
+      "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) reports login loop since 09:10. DOB on file does not match.",
+      "caller_id": {"link": "https://metlife.service-now.com/api/now/table/sys_user/9ee1b13dc6112271007f9d0efdb69cd0", "value": "9ee1b13dc6112271007f9d0efdb69cd0"},
+      "u_member_ssn": "219099999",
+      "u_dob": "1984-03-17",
+      "priority": "2",
+      "opened_at": "2026-09-30 09:14:02",
+      "assignment_group": {"display_value": "Digital Identity L2"},
+      "work_notes": "Reset by svc-snow@metlife.com. Cardholder mentioned 5500 0000 0000 0004.",
+      "reopen_count": 0,
+      "active": true,
+      "close_notes": null
+    }
+  ]
+}
