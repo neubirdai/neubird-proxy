@@ -23,7 +23,18 @@ connections:
     # they would appear inside a tool call's arguments.
     request_deny_patterns:
       - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|dbxoutput|dbxquery|sendresults)\\b"
-    # mcp_tools: filled in after listing the server's tools (tools/list).
+    # From tools/list on Splunk_MCP_Server 1.2.1. Left out:
+    # splunk_get_user_list and splunk_get_user_info (people data an SRE
+    # agent does not need), and splunk_run_saved_search (runs SPL stored in
+    # Splunk, which request_deny_patterns cannot see).
+    mcp_tools:
+      - splunk_get_info
+      - splunk_get_indexes
+      - splunk_get_index_info
+      - splunk_run_query
+      - splunk_get_metadata
+      - splunk_get_kv_store_collections
+      - splunk_get_knowledge_objects
     rate_limit: {requests_per_second: 10, burst: 30}
 
 redaction:

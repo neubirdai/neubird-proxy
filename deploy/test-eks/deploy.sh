@@ -5,7 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-export AWS_PROFILE=${AWS_PROFILE:-hclpoc} AWS_REGION=us-west-2
+# Pinned: a profile already set in the shell may point at another account.
+export AWS_PROFILE=hclpoc AWS_REGION=us-west-2
+ACCOUNT=443370673207
+[ "$(aws sts get-caller-identity --query Account --output text)" = "$ACCOUNT" ] ||
+  { echo "AWS profile $AWS_PROFILE is not account $ACCOUNT; run: aws sso login --profile $AWS_PROFILE" >&2; exit 1; }
 CTX=arn:aws:eks:us-west-2:443370673207:cluster/eks-htm-prod
 NS=neubird-proxy-test
 REPO=443370673207.dkr.ecr.us-west-2.amazonaws.com/neubird-proxy
@@ -13,9 +17,13 @@ V=$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- cmd internal go.mod go
 
 if [ -z "${SKIP_BUILD:-}" ]; then
   case "$V" in *-dirty) echo "refusing to push a dirty tree ($V); commit first" >&2; exit 1;; esac
-  docker buildx build --platform linux/amd64 --build-arg VERSION="$V" -t "$REPO:$V" --load .
-  aws ecr get-login-password | docker login --username AWS --password-stdin "${REPO%%/*}"
-  docker push "$REPO:$V" 2>/dev/null || echo "tag $V already in ECR (immutable); using it"
+  if aws ecr describe-images --repository-name neubird-proxy --image-ids imageTag="$V" >/dev/null 2>&1; then
+    echo "tag $V already in ECR (tags are immutable); using it"
+  else
+    docker buildx build --platform linux/amd64 --build-arg VERSION="$V" -t "$REPO:$V" --load .
+    aws ecr get-login-password | docker login --username AWS --password-stdin "${REPO%%/*}"
+    docker push "$REPO:$V"
+  fi
 fi
 DIGEST=$(aws ecr describe-images --repository-name neubird-proxy --image-ids imageTag="${V%-dirty}" \
   --query 'imageDetails[0].imageDigest' --output text)
