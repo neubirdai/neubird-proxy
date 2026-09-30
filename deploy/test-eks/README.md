@@ -16,7 +16,7 @@ NeuBird ──(proxy token)──▶ https://neubird-proxy.htm.neubird.ai/splunk
 | Cluster | `eks-htm-prod`, us-west-2, account 443370673207 (AWS profile `hclpoc`) |
 | Namespace | `neubird-proxy-test` |
 | Image | ECR `neubird-proxy` in that account, tags immutable, scanned on push, deployed by digest |
-| Hostname | `neubird-proxy.htm.neubird.ai`, a Route53 CNAME to the cluster's nginx load balancer |
+| Hostname | `neubird-proxy.htm.neubird.ai`, a Route53 CNAME to the cluster's nginx load balancer. The zone that serves `htm.neubird.ai` is in account 810918113647 (profile `neubird`), not the cluster's account, which has an unused zone of the same name |
 | Config | `config.yaml` here, as the ConfigMap `neubird-proxy` |
 | Secret | `neubird-proxy`: `NEUBIRD_PROXY_TOKEN` and `SPLUNK_MCP_TOKEN`, created by hand |
 
@@ -25,6 +25,15 @@ NeuBird ──(proxy token)──▶ https://neubird-proxy.htm.neubird.ai/splunk
 - MCP URL: `https://neubird-proxy.htm.neubird.ai/splunk/services/mcp`
 - Bearer token: the proxy token, printed by
   `kubectl --context $CTX -n neubird-proxy-test get secret neubird-proxy -o jsonpath='{.data.NEUBIRD_PROXY_TOKEN}' | base64 -d`
+
+## Known limits of this environment
+
+- **Client IPs.** Audit lines record the load balancer's private address as
+  `forwarded_for`, not the caller's IP: the cluster's classic ELB does not
+  pass it through (no proxy protocol on ingress-nginx). Fixing that is a
+  cluster-wide ingress change, out of scope for this namespace.
+- **No ServiceNow yet.** The developer instance given for the test no longer
+  exists; add a `servicenow` connection once there is a live one.
 
 ## Operate
 
@@ -50,7 +59,7 @@ kubectl --context $CTX -n neubird-proxy-test logs -l app=neubird-proxy --tail=50
 
 ```bash
 kubectl --context $CTX delete namespace neubird-proxy-test
-AWS_PROFILE=hclpoc aws route53 change-resource-record-sets --hosted-zone-id Z0035718E9AOZ22QO38P \
+AWS_PROFILE=neubird aws route53 change-resource-record-sets --hosted-zone-id Z09670351IMMSN9X6HXH3 \
   --change-batch '{"Changes":[{"Action":"DELETE","ResourceRecordSet":{"Name":"neubird-proxy.htm.neubird.ai","Type":"CNAME","TTL":300,"ResourceRecords":[{"Value":"a789033f222a643cab5f7d254316891a-214940763.us-west-2.elb.amazonaws.com"}]}}]}'
 AWS_PROFILE=hclpoc aws ecr delete-repository --region us-west-2 --repository-name neubird-proxy --force
 ```
