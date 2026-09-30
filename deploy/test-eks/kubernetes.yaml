@@ -1,0 +1,96 @@
+# Test deployment on eks-htm-prod (NeuBird, us-west-2). Namespace-scoped;
+# nothing outside neubird-proxy-test is touched. The Secret is created by
+# hand (see README in this directory); the ConfigMap from config.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neubird-proxy-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neubird-proxy
+  namespace: neubird-proxy-test
+  labels: {app: neubird-proxy}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: neubird-proxy}
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: neubird-proxy}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: proxy
+          image: IMAGE   # set by deploy.sh
+          args: ["-config", "/etc/neubird-proxy/config.yaml"]
+          ports:
+            - {name: proxy, containerPort: 8443}
+            - {name: admin, containerPort: 9090}
+          envFrom:
+            - secretRef: {name: neubird-proxy}
+          volumeMounts:
+            - {name: config, mountPath: /etc/neubird-proxy, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: config
+          configMap: {name: neubird-proxy}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neubird-proxy
+  namespace: neubird-proxy-test
+spec:
+  selector: {app: neubird-proxy}
+  ports:
+    - {name: proxy, port: 80, targetPort: proxy}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: neubird-proxy
+  namespace: neubird-proxy-test
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    # MCP responses may stream (SSE); don't buffer, allow long reads.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+    # Optional source allowlist (NeuBird platform egress IPs):
+    # nginx.ingress.kubernetes.io/whitelist-source-range: "a.b.c.d/32,..."
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [neubird-proxy.htm.neubird.ai]
+      secretName: neubird-proxy-tls
+  rules:
+    - host: neubird-proxy.htm.neubird.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: neubird-proxy, port: {name: proxy}}
