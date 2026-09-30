@@ -19,16 +19,29 @@ NeuBird ──(one proxy token)──▶ neubird-proxy ──(APIM subscription 
   change). The proxy checks the token, removes it, and sends
   `Ocp-Apim-Subscription-Key` instead. For a backend that APIM does not front,
   `upstream_basic_auth` or `headers` inject its credential from the Secret.
-- **Redaction.** Responses only. JSON is walked token by token, so keys, key
-  order and number precision survive. Text, XML and CSV get whole-body regex.
-  `text/event-stream` (MCP) is redacted one event at a time and flushed
-  immediately. Gzip is decoded.
+- **Redaction.** Response bodies and response header values (for example
+  `Link` pagination URLs); requests are not redacted.
+  - JSON is walked token by token, so key order and number precision
+    survive. Object keys get the value rules too, so a map keyed by email is
+    masked. If two keys mask to the same label they collide, and parsers
+    keep only one.
+  - A string that holds JSON (MCP tool `text`, Splunk `_raw`) is walked as
+    JSON, so key rules apply inside it.
+  - JSON numbers are masked only under a blocked key.
+  - Text, XML and CSV get whole-body regex.
+  - `text/event-stream` (MCP) is redacted one event at a time, including
+    `event:` and `id:` lines, and each event is flushed immediately.
+  - Gzip is decoded.
 - **Fail closed.** Anything the proxy cannot redact is refused with
   `502 {"error":"redaction_blocked","reason":...}`: a body over
   `max_body_bytes`, a binary or unparseable content type, an unknown content
-  encoding, or a protocol upgrade (WebSocket). An SSE event over the cap cuts
-  the stream. `passthrough: true` turns all of this off for a connection
-  MetLife has cleared, such as Elastic.
+  encoding, a 206 partial response, or a protocol upgrade (WebSocket). `Range`
+  headers are stripped, because a value split across two partial bodies would
+  match in neither. An SSE event over the cap cuts the stream. Paths with `.`
+  or `..` segments, including encoded ones, are rejected, so a request can't
+  enter through one connection and be normalized upstream into another.
+  `passthrough: true` turns all of this off for a connection MetLife has
+  cleared, such as Elastic.
 
 ## Rules
 
@@ -36,7 +49,7 @@ NeuBird ──(one proxy token)──▶ neubird-proxy ──(APIM subscription 
 |---|---|
 | `email` | RFC-ish addresses |
 | `us_ssn` | `123-45-6789`, `123 45 6789`; rejects area 000/666/9xx, group 00, serial 0000 |
-| `credit_card` | 13–19 digits, optionally space or dash separated, Luhn-checked |
+| `credit_card` | 13–19 digits with a card-issuer prefix (2–6), optionally space or dash separated, Luhn-checked; a card next to other digit groups is still found |
 | `phone_us` | `(212) 555-0147`, `212-555-0147`, `+1 212.555.0147`; a separator is required, so epoch timestamps don't match |
 | `ipv4` | dotted quads |
 | `date_of_birth` | key rule: whole value under `dob`, `date_of_birth`, `birth_date`, `birthday`, `u_dob` |
@@ -45,8 +58,10 @@ Omit `builtins` to enable all of them; `builtins: []` disables them. Custom
 rules (`custom`) run after the builtins. `blocked_key_patterns` mask every
 scalar value under a matching JSON key. An `allowed_values` pattern exempts a
 match only if it covers the entire match. Where matches overlap, the earliest
-match wins, and on a tie the higher-precedence rule wins. Rules match against
-the original text, so a mask is never re-matched by a later rule.
+match's rule labels the mask (on a tie, the higher-precedence rule). The
+overlapping matches merge into one mask, so no part of either survives.
+Rules match against the original text, so a mask is never re-matched by a
+later rule.
 
 Masks are `[REDACTED:EMAIL]`, or with `mask: hmac`
 `[REDACTED:EMAIL:3f1c9a0b7d2e4f61]`. The HMAC form is an HMAC-SHA256 truncated
@@ -68,6 +83,52 @@ See [`deploy/config.example.yaml`](deploy/config.example.yaml). Secrets never
 appear in the file. Every `*_env` field and every `${VAR}` in a header value
 must resolve to a non-empty environment variable, or the proxy refuses to
 start. Unknown YAML fields are errors.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `listen` | `:8443` | NeuBird-facing listener |
+| `admin_listen` | `:9090` | Health and metrics listener |
+| `tls.cert_file`, `tls.key_file` | none | Terminate TLS in the pod; both are required if `tls` is set |
+| `upstream_ca_file` | system roots | Extra PEM CA bundle to trust for upstreams |
+| `client_token_env` | required | Env var holding the NeuBird proxy token |
+| `max_body_bytes` | 20 MiB | Cap for request bodies, buffered response bodies and each SSE event |
+| `upstream_defaults.headers` | none | Headers set on every upstream request; values may use `${VAR}` |
+| `connections[].name` | required | Path prefix; `[a-z0-9][a-z0-9_-]*`, not `healthz`, `readyz` or `metrics` |
+| `connections[].upstream` | required | Absolute http(s) base URL; no query string |
+| `connections[].host` | none | Also route requests for this `Host` to the connection, with no path prefix |
+| `connections[].client_auth` | `bearer` | `bearer`, `basic` (token as the password) or `header` |
+| `connections[].client_auth_header` | none | Header name when `client_auth: header` |
+| `connections[].headers` | none | Per-connection headers, overriding the defaults |
+| `connections[].upstream_basic_auth` | none | `{username_env, password_env}` injected as upstream Basic auth |
+| `connections[].passthrough` | `false` | Skip redaction and fail-closed checks for this connection |
+| `redaction.builtins` | all | Built-in rules, in precedence order |
+| `redaction.blocked_key_patterns` | none | RE2 patterns matched against JSON keys; every value under a matching key is masked |
+| `redaction.custom[]` | none | `{name, regex}` value rules, applied after the builtins |
+| `redaction.allowed_values` | none | RE2 patterns; a match is left unmasked when a pattern matches all of it |
+| `redaction.mask` | `label` | `label` or `hmac` |
+| `redaction.hmac_key_env` | `REDACTION_HMAC_KEY` | Env var holding the HMAC key when `mask: hmac` |
+
+## Responses the proxy generates
+
+Connectors see these in addition to upstream responses. Upstream error
+responses such as 4xx and 5xx pass through, and their bodies are redacted
+too.
+
+| Status | `error` | When |
+|---|---|---|
+| 401 | `unauthorized` | Missing or wrong proxy token, or the token sent in the wrong form for this connection |
+| 404 | `unknown_connection` | No connection matches the host or first path segment |
+| 400 | `invalid_path` | Path has a `.` or `..` segment, including percent-encoded or backslash forms |
+| 400 | `upgrade_not_supported` | WebSocket or another protocol upgrade on a redacting connection |
+| 413 | `request_too_large` | Request body over `max_body_bytes` |
+| 502 | `redaction_blocked` | Fail closed; `reason` is one of `body_too_large`, `unsupported_content_type`, `unsupported_content_encoding`, `bad_gzip`, `partial_content` |
+| 502 | `upstream_unavailable` | Upstream unreachable or the request to it failed; details are logged, not returned |
+
+Bodies are JSON, for example
+`{"error":"redaction_blocked","reason":"body_too_large"}`. An SSE event over
+the cap arrives after the 200, so the proxy cuts the connection instead. The
+client sees a truncated stream, and the audit line records
+`blocked: sse_event_too_large`.
 
 Validate before rolling out a ConfigMap change (v1 has no hot reload; restart
 the pods):

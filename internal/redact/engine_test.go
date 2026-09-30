@@ -31,6 +31,7 @@ func TestBuiltins(t *testing.T) {
 		{"ssn 219-09-9999.", "ssn [REDACTED:US_SSN]."},
 		{"ssn 219 09 9999", "ssn [REDACTED:US_SSN]"},
 		{"not an ssn 000-12-3456 or 666-12-3456 or 900-12-3456", "not an ssn 000-12-3456 or 666-12-3456 or 900-12-3456"},
+		{"not an ssn 219-00-9999 or 219-09-0000", "not an ssn 219-00-9999 or 219-09-0000"},
 		{"card 4111 1111 1111 1111 ok", "card [REDACTED:CREDIT_CARD] ok"},
 		{"card 4111-1111-1111-1111", "card [REDACTED:CREDIT_CARD]"},
 		{"card 4111111111111111", "card [REDACTED:CREDIT_CARD]"},
@@ -240,6 +241,116 @@ func TestSSEDataWithEOF(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := "data: [REDACTED:EMAIL]\n\ndata: [REDACTED:EMAIL]\n"; string(out) != want {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestSSECompleteEventTooLarge(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	in := "data: ok\n\ndata: " + strings.Repeat("x", 100) + "\n\ndata: after\n\n"
+	r := NewSSEReader(io.NopCloser(&dataEOFReader{[]byte(in)}), e, Stats{}, 50)
+	out, err := io.ReadAll(r)
+	if err != ErrEventTooLarge || string(out) != "data: ok\n\n" {
+		t.Fatalf("out %q err %v", out, err)
+	}
+}
+
+func TestJSONNumbersAndBlockedScalars(t *testing.T) {
+	e := engine(t, config.Redaction{BlockedKeyPatterns: []string{`(?i)^ssn$`}})
+	// Numbers are not value-scanned (a Luhn-valid timestamp would be
+	// masked and change type); under a blocked key they are masked.
+	in := `{"card":4111111111111111,"n":-1.5e3,"ssn":{"a":"","b":null,"c":true,"d":[1,"x"]}}`
+	out, err := e.JSON([]byte(in), Stats{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"card":4111111111111111,"n":-1.5e3,"ssn":{"a":"","b":null,"c":true,"d":["[REDACTED:KEY]","[REDACTED:KEY]"]}}`
+	if string(out) != want {
+		t.Fatalf("got  %s\nwant %s", out, want)
+	}
+}
+
+// Regression tests for the Sep 30 review findings.
+
+func TestJSONKeysAreRedacted(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	out, err := e.JSON([]byte(`{"john.doe@example.com":3,"host":"a"}`), Stats{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"[REDACTED:EMAIL]":3,"host":"a"}` {
+		t.Fatalf("got %s", out)
+	}
+}
+
+func TestNestedJSONInString(t *testing.T) {
+	e := engine(t, config.Redaction{BlockedKeyPatterns: []string{`(?i).*password.*`}})
+	in := `{"content":[{"type":"text","text":"{\"dob\": \"1980-01-02\", \"password\":\"hunter2\",\"mail\":\"a@b.io\"}"},` +
+		`{"type":"text","text":"[not json] a@b.io"}]}`
+	st := Stats{}
+	out, err := e.JSON([]byte(in), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"content":[{"type":"text","text":"{\"dob\":\"[REDACTED:DATE_OF_BIRTH]\",\"password\":\"[REDACTED:KEY]\",\"mail\":\"[REDACTED:EMAIL]\"}"},` +
+		`{"type":"text","text":"[not json] [REDACTED:EMAIL]"}]}`
+	if string(out) != want {
+		t.Fatalf("got  %s\nwant %s", out, want)
+	}
+	if st["email"] != 2 || st["date_of_birth"] != 1 || st["blocked_key"] != 1 {
+		t.Fatalf("stats %v", st)
+	}
+}
+
+func TestCardNextToOtherDigits(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for in, want := range map[string]string{
+		"card 4111111111111111 12 25":     "card [REDACTED:CREDIT_CARD] 12 25",
+		"exp 12 4111 1111 1111 1111":      "exp 12 [REDACTED:CREDIT_CARD]",
+		"id 34111111111111111 not a card": "id 34111111111111111 not a card", // never carved from a longer number
+	} {
+		if got := e.String(in, Stats{}); got != want {
+			t.Errorf("String(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestOverlappingMatchesMerge(t *testing.T) {
+	e := engine(t, config.Redaction{Custom: []config.CustomRule{{Name: "acct", Regex: `\b1234 5678\b`}}})
+	st := Stats{}
+	got := e.String("+1 212-555-1234 5678", st)
+	if got != "[REDACTED:PHONE_US]" {
+		t.Fatalf("got %q", got)
+	}
+	if st["phone_us"] != 1 || st["acct"] != 1 {
+		t.Fatalf("stats %v", st)
+	}
+}
+
+func TestEpochMillisNotCards(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	// 1700000000008 passes Luhn; the issuer prefix keeps it out.
+	for _, ts := range []string{"1700000000008", "1727700000123", "_time=1700000000008"} {
+		if got := e.String(ts, Stats{}); got != ts {
+			t.Errorf("timestamp %q masked: %q", ts, got)
+		}
+	}
+	for _, card := range []string{"378282246310005", "6011111111111117", "5555555555554444", "36227206271667", "3530111333300000"} {
+		if got := e.String(card, Stats{}); got != "[REDACTED:CREDIT_CARD]" {
+			t.Errorf("test card %s not masked: %q", card, got)
+		}
+	}
+}
+
+func TestSSEIDAndEventLinesRedacted(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	in := "event: alert for 219-09-9999\nid: user-jane@example.com-17\nretry: 3000\ndata: x\n\n"
+	out, err := io.ReadAll(NewSSEReader(io.NopCloser(strings.NewReader(in)), e, Stats{}, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "event: alert for [REDACTED:US_SSN]\nid: [REDACTED:EMAIL]-17\nretry: 3000\ndata: x\n\n"
+	if string(out) != want {
 		t.Fatalf("got %q", out)
 	}
 }

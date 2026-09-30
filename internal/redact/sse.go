@@ -39,9 +39,9 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 		}
 		n, err := r.src.Read(r.chunk)
 		r.in = append(r.in, r.chunk[:n]...)
-		r.drain()
+		tooLarge := r.drain()
 		switch {
-		case len(r.in) > r.max:
+		case tooLarge || len(r.in) > r.max:
 			// Complete events already in out are released; the oversized
 			// partial event never is.
 			r.in = nil
@@ -71,12 +71,17 @@ func (r *SSEReader) Err() error {
 	return r.err
 }
 
-// drain moves every complete event from in to out.
-func (r *SSEReader) drain() {
+// drain moves every complete event from in to out. It stops and reports
+// true at the first event over the cap, so the cap holds whether an event
+// arrives in pieces or in a single read.
+func (r *SSEReader) drain() (tooLarge bool) {
 	for {
 		end, next := eventEnd(r.in)
 		if end < 0 {
-			return
+			return false
+		}
+		if end > r.max {
+			return true
 		}
 		r.out = append(r.out, r.event(r.in[:end])...)
 		r.out = append(r.out, '\n')
@@ -138,12 +143,14 @@ func (r *SSEReader) event(ev []byte) []byte {
 				kept = append(kept, line{isData: true})
 			}
 			data = append(data, value)
-		case field == "event", field == "id", field == "retry":
+		case field == "retry":
 			kept = append(kept, line{text: l})
 		case field == "" && hasColon:
 			// Comment line; clients ignore it, but it still leaves MetLife.
 			kept = append(kept, line{text: ":" + r.e.String(l[1:], r.st)})
 		default:
+			// event, id and unknown fields. A redacted id breaks resumption
+			// via Last-Event-ID for that event, which is the safe failure.
 			kept = append(kept, line{text: r.e.String(l, r.st)})
 		}
 	}

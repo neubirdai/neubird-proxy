@@ -8,13 +8,22 @@ import (
 )
 
 // JSON masks string values inside one or more concatenated JSON documents
-// (Splunk export streams newline-delimited objects). Keys, key order,
-// structure and number precision are preserved; whitespace is not.
+// (Splunk export streams newline-delimited objects). Key order, structure
+// and number precision are preserved; whitespace is not.
 //
-// Under a blocked key every scalar leaf is masked, whatever its shape.
-// Numbers are checked against value rules too, and become a masked string
-// only if a rule matches. An error means the body was not valid JSON; the
-// caller decides whether to fall back to Text.
+// Object keys get value rules too, since maps keyed by user or email are
+// common (Splunk "chart ... by user"). Key rules match the original key.
+// Two keys masked to the same label collide; parsers then keep one.
+//
+// A string that itself holds JSON (MCP tool text, Splunk _raw) is walked as
+// JSON, so key rules apply inside it; its inner whitespace is compacted.
+//
+// Under a blocked key every string and number leaf is masked. Elsewhere
+// numbers are left alone: a 13-19 digit ID or timestamp would pass Luhn
+// one time in ten, and masking would change its JSON type.
+//
+// An error means the body was not valid JSON; the caller decides whether
+// to fall back to Text.
 func (e *Engine) JSON(body []byte, st Stats) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
@@ -79,7 +88,7 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 				if i > 0 {
 					w.out.WriteByte(',')
 				}
-				w.str(key)
+				w.str(w.e.String(key, w.st))
 				w.out.WriteByte(':')
 				child := blocked
 				if child == nil {
@@ -119,22 +128,23 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 			return fmt.Errorf("unexpected delimiter %v", t)
 		}
 	case string:
-		if blocked != nil {
+		switch {
+		case blocked != nil:
 			w.blocked(blocked, t)
-		} else {
+		case looksLikeJSON(t):
+			if inner, err := w.e.JSON([]byte(t), w.st); err == nil {
+				w.str(string(inner))
+				break
+			}
+			w.str(w.e.String(t, w.st))
+		default:
 			w.str(w.e.String(t, w.st))
 		}
 	case json.Number:
-		s := t.String()
-		switch {
-		case blocked != nil:
-			w.blocked(blocked, s)
-		default:
-			if r := w.e.String(s, w.st); r != s {
-				w.str(r)
-			} else {
-				w.out.WriteString(s)
-			}
+		if blocked != nil {
+			w.blocked(blocked, t.String())
+		} else {
+			w.out.WriteString(t.String())
 		}
 	case bool:
 		if t {
@@ -164,4 +174,17 @@ func (w *jsonWriter) str(s string) {
 	_ = w.enc.Encode(s) // cannot fail for a string
 	b := w.scratch.Bytes()
 	w.out.Write(b[:len(b)-1]) // drop Encode's trailing newline
+}
+
+func looksLikeJSON(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		}
+		return false
+	}
+	return false
 }

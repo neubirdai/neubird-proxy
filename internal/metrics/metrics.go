@@ -72,6 +72,10 @@ func (r *Registry) Write(w io.Writer) {
 	}
 }
 
+// labelEscaper applies the text format's label escaping, which differs
+// from Go's %q for control and non-ASCII characters.
+var labelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
 func (c *Counter) labelString(key string) string {
 	if len(c.labels) == 0 {
 		return ""
@@ -79,7 +83,7 @@ func (c *Counter) labelString(key string) string {
 	vals := strings.Split(key, "\xff")
 	parts := make([]string, len(c.labels))
 	for i, l := range c.labels {
-		parts[i] = fmt.Sprintf("%s=%q", l, vals[i])
+		parts[i] = l + `="` + labelEscaper.Replace(vals[i]) + `"`
 	}
 	return "{" + strings.Join(parts, ",") + "}"
 }

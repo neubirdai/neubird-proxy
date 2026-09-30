@@ -4,7 +4,7 @@ import "regexp"
 
 // Built-in patterns follow Presidio's predefined recognizers, restricted to
 // formatted identifiers so that IDs, epoch timestamps and counters in
-// Splunk and ServiceNow payloads do not trip them. All are RE2.
+// Splunk and ServiceNow payloads rarely trip them. All are RE2.
 
 type builtin struct {
 	value    *regexp.Regexp    // matches inside string values
@@ -24,7 +24,10 @@ var builtins = map[string]builtin{
 		value: regexp.MustCompile(`(?:\+?1[-. ])?(?:\([2-9]\d{2}\) ?|\b[2-9]\d{2}[-. ])[2-9]\d{2}[-. ]\d{4}\b`),
 	},
 	"credit_card": {
-		value:    regexp.MustCompile(`\b\d(?:[ -]?\d){12,18}\b`),
+		// Issuer prefixes (Visa, Mastercard, Amex, Discover, Diners, JCB)
+		// then 13-19 digits in all. Requiring a prefix keeps epoch-ms
+		// timestamps (leading 1) and most IDs out; Luhn does the rest.
+		value:    regexp.MustCompile(`\b(?:4\d|5[1-5]|2[2-7]|3[0-8]|6[045])(?:[ -]?\d){11,17}\b`),
 		validate: luhn,
 	},
 	"ipv4": {

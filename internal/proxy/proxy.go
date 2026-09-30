@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -143,6 +144,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &recorder{ResponseWriter: w}
 
+	if hasDotSegment(r.URL.Path) {
+		// /elastic/../splunk/... would be routed as elastic (passthrough)
+		// and then normalized by APIM to splunk, skipping redaction.
+		writeError(rec, http.StatusBadRequest, "invalid_path", "path must not contain . or .. segments")
+		s.Metrics.Requests.Inc("_invalid", "400")
+		return
+	}
+
 	st, ok := s.route(r)
 	if !ok {
 		writeError(rec, http.StatusNotFound, "unknown_connection", "no connection matches this host or path")
@@ -191,6 +200,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.rp.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), stateKey{}, st)))
+}
+
+// hasDotSegment reports whether the decoded path, or the path decoded once
+// more (for upstreams that double-decode), has a "." or ".." segment.
+// Backslashes count as separators, as some servers treat them so.
+func hasDotSegment(p string) bool {
+	check := func(p string) bool {
+		for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+			if seg == "." || seg == ".." {
+				return true
+			}
+		}
+		return false
+	}
+	if check(p) {
+		return true
+	}
+	if twice, err := url.PathUnescape(p); err == nil && twice != p {
+		return check(twice)
+	}
+	return false
 }
 
 func (s *Server) route(r *http.Request) (*reqState, bool) {
@@ -275,6 +305,9 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	if !c.Passthrough {
 		h.Del("Accept-Encoding")
 		h.Del("TE")
+		// A value split across two partial bodies matches in neither.
+		h.Del("Range")
+		h.Del("If-Range")
 	}
 	for k, v := range c.ResolvedHeaders {
 		h.Set(k, v)
@@ -299,6 +332,10 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		return &blockError{"upgrade_not_supported"}
 	}
+	if resp.StatusCode == http.StatusPartialContent {
+		return &blockError{"partial_content"}
+	}
+	s.redactHeaders(resp.Header, st.stats)
 	if resp.Body == nil || resp.Body == http.NoBody || resp.ContentLength == 0 ||
 		resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified ||
 		resp.Request.Method == http.MethodHead {
@@ -360,6 +397,18 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	h.Del("Content-MD5")
 	h.Del("Digest")
 	return nil
+}
+
+// redactHeaders applies value rules to every response header value. Link
+// headers carry pagination URLs with query filters (ServiceNow
+// sysparm_query=caller.email=...), and custom headers can carry anything.
+func (s *Server) redactHeaders(h http.Header, st redact.Stats) {
+	for k, vs := range h {
+		for i, v := range vs {
+			vs[i] = s.engine.String(v, st)
+		}
+		h[k] = vs
+	}
 }
 
 // rewriteLocation maps a redirect to the upstream back onto the proxy, so
@@ -438,7 +487,14 @@ func (s *Server) errorHandler(w http.ResponseWriter, r *http.Request, err error)
 		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds max_body_bytes")
 		return
 	}
-	s.log.Warn("upstream error", "connection", st.conn.Name, "error", err.Error())
+	// A *url.Error embeds the full upstream URL, query string included; log
+	// only the cause, and redact that too.
+	cause := err
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cause = ue.Err
+	}
+	s.log.Warn("upstream error", "connection", st.conn.Name, "error", s.engine.String(cause.Error(), redact.Stats{}))
 	writeError(w, http.StatusBadGateway, "upstream_unavailable", "upstream request failed")
 }
 

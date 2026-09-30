@@ -54,6 +54,7 @@ func newFixture(t *testing.T, yamlTmpl string, handler http.HandlerFunc) *fixtur
 			"APIM_SUBSCRIPTION_KEY": "apim-key",
 			"SN_USER":               "sn-user",
 			"SN_PASS":               "sn-pass",
+			"REDACTION_HMAC_KEY":    "hmac-key",
 		}[k]
 		return v, ok
 	})
