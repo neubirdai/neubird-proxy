@@ -25,9 +25,14 @@ import (
 // An error means the body was not valid JSON; the caller decides whether
 // to fall back to Text.
 func (e *Engine) JSON(body []byte, st Stats) ([]byte, error) {
+	return e.JSONFields(body, st, nil)
+}
+
+// JSONFields is JSON with a field allowlist; nil means no allowlist.
+func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
-	w := &jsonWriter{e: e, st: st}
+	w := &jsonWriter{e: e, st: st, fields: fields}
 	w.out.Grow(len(body))
 	w.enc = json.NewEncoder(&w.scratch)
 	w.enc.SetEscapeHTML(false)
@@ -65,6 +70,8 @@ func (e *Engine) JSON(body []byte, st Stats) ([]byte, error) {
 type jsonWriter struct {
 	e       *Engine
 	st      Stats
+	fields  *Fields
+	path    []string
 	out     bytes.Buffer
 	scratch bytes.Buffer
 	enc     *json.Encoder
@@ -98,7 +105,10 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 				if err != nil {
 					return err
 				}
-				if err := w.value(dec, vt, child); err != nil {
+				w.path = append(w.path, key)
+				err = w.value(dec, vt, child)
+				w.path = w.path[:len(w.path)-1]
+				if err != nil {
 					return err
 				}
 			}
@@ -129,6 +139,8 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 		}
 	case string:
 		switch {
+		case t != "" && w.fields != nil && !w.fields.allows(w.path):
+			w.fieldMask(t)
 		case blocked != nil:
 			w.blocked(blocked, t)
 		case looksLikeJSON(t):
@@ -141,7 +153,9 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 			w.str(w.e.String(t, w.st))
 		}
 	case json.Number:
-		if blocked != nil {
+		if w.fields != nil && !w.fields.allows(w.path) {
+			w.fieldMask(t.String())
+		} else if blocked != nil {
 			w.blocked(blocked, t.String())
 		} else {
 			w.out.WriteString(t.String())
@@ -167,6 +181,11 @@ func (w *jsonWriter) blocked(k *keyRule, v string) {
 	}
 	w.st[k.name]++
 	w.str(w.e.mask(k.label, v))
+}
+
+func (w *jsonWriter) fieldMask(v string) {
+	w.st["field_not_allowed"]++
+	w.str(w.e.mask("FIELD", v))
 }
 
 func (w *jsonWriter) str(s string) {

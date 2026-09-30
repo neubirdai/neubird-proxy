@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -18,9 +19,28 @@ import (
 )
 
 const (
-	DefaultMaxBodyBytes = 20 << 20
-	DefaultHMACKeyEnv   = "REDACTION_HMAC_KEY"
+	DefaultMaxBodyBytes          = 20 << 20
+	DefaultHMACKeyEnv            = "REDACTION_HMAC_KEY"
+	DefaultMaxConcurrentRequests = 256
+	DefaultMaxConcurrentBuffered = 4
+	// MinTokenLength is the shortest accepted proxy token. 32 characters of
+	// a random token is well past brute-force range at any request rate.
+	MinTokenLength = 32
 )
+
+// DefaultMethods is the method allowlist when a connection sets none:
+// read-only.
+var DefaultMethods = []string{"GET", "HEAD"}
+
+// DefaultRequestHeaders are the client request headers forwarded upstream.
+// Everything else (cookies, APIM trace and debug headers, X-Forwarded-*,
+// arbitrary X- headers) is dropped. Connections add to this list with
+// request_headers.
+var DefaultRequestHeaders = []string{
+	"Accept", "Accept-Language", "Content-Type", "User-Agent",
+	"If-None-Match", "If-Modified-Since", "Cache-Control",
+	"Last-Event-ID", "Mcp-Session-Id", "Mcp-Protocol-Version",
+}
 
 // Client auth modes: where the connector puts the NeuBird proxy token.
 const (
@@ -37,22 +57,29 @@ const (
 // Config is the file shape. Resolved values (secrets, parsed URLs) live on
 // the same structs in unexported-by-convention fields tagged yaml:"-".
 type Config struct {
-	Listen           string       `yaml:"listen"`
-	AdminListen      string       `yaml:"admin_listen"`
-	TLS              *TLS         `yaml:"tls"`
-	UpstreamCAFile   string       `yaml:"upstream_ca_file"`
-	ClientTokenEnv   string       `yaml:"client_token_env"`
-	MaxBodyBytes     int64        `yaml:"max_body_bytes"`
-	UpstreamDefaults Upstream     `yaml:"upstream_defaults"`
-	Connections      []Connection `yaml:"connections"`
-	Redaction        Redaction    `yaml:"redaction"`
-
-	ClientToken string `yaml:"-"`
+	Listen         string `yaml:"listen"`
+	AdminListen    string `yaml:"admin_listen"`
+	TLS            *TLS   `yaml:"tls"`
+	UpstreamCAFile string `yaml:"upstream_ca_file"`
+	ClientTokenEnv string `yaml:"client_token_env"`
+	// ClientTokenPreviousEnv is accepted alongside the current token, so a
+	// rotation needs no coordinated cutover. Unset it once rotation is done.
+	ClientTokenPreviousEnv string       `yaml:"client_token_previous_env"`
+	AllowHTTPUpstreams     bool         `yaml:"allow_http_upstreams"`
+	MaxBodyBytes           int64        `yaml:"max_body_bytes"`
+	MaxConcurrentRequests  int          `yaml:"max_concurrent_requests"`
+	MaxConcurrentBuffered  int          `yaml:"max_concurrent_buffered"`
+	UpstreamDefaults       Upstream     `yaml:"upstream_defaults"`
+	Connections            []Connection `yaml:"connections"`
+	Redaction              Redaction    `yaml:"redaction"`
 }
 
 type TLS struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
+	// ClientCAFile turns on mutual TLS: clients must present a certificate
+	// signed by a CA in this PEM bundle, in addition to the proxy token.
+	ClientCAFile string `yaml:"client_ca_file"`
 }
 
 type Upstream struct {
@@ -68,11 +95,41 @@ type Connection struct {
 	Passthrough      bool              `yaml:"passthrough"`
 	Headers          map[string]string `yaml:"headers"`
 	BasicAuth        *BasicAuth        `yaml:"upstream_basic_auth"`
+	// ClientTokenEnv scopes a token to this connection instead of the
+	// top-level one, so one leaked token does not open every backend.
+	ClientTokenEnv      string     `yaml:"client_token_env"`
+	Methods             []string   `yaml:"methods"`
+	Paths               []string   `yaml:"paths"`
+	RequestHeaders      []string   `yaml:"request_headers"`
+	RequestDenyPatterns []string   `yaml:"request_deny_patterns"`
+	RateLimit           *RateLimit `yaml:"rate_limit"`
+	// ResponseFields is a JSON field allowlist (see redact.Fields); every
+	// other string or number is masked, and non-JSON responses are refused.
+	ResponseFields []string `yaml:"response_fields"`
+	// MCPTools allowlists the tools a tools/call request may name.
+	MCPTools []string `yaml:"mcp_tools"`
 
 	UpstreamURL *url.URL `yaml:"-"`
+	// ClientTokens are the accepted tokens: this connection's own, or the
+	// top-level current and previous ones.
+	ClientTokens []string `yaml:"-"`
+	// PathRes match the whole path after the connection prefix. Empty
+	// means every path is allowed.
+	PathRes        []*regexp.Regexp `yaml:"-"`
+	RequestDenyRes []*regexp.Regexp `yaml:"-"`
+	MethodSet      map[string]bool  `yaml:"-"`
+	// HeaderSet holds canonical request header names forwarded upstream.
+	HeaderSet map[string]bool `yaml:"-"`
 	// ResolvedHeaders is upstream_defaults.headers overlaid with this
 	// connection's headers, with ${VAR} references expanded.
 	ResolvedHeaders map[string]string `yaml:"-"`
+}
+
+// RateLimit is a token bucket per connection and per pod, so the
+// effective limit is this times the replica count.
+type RateLimit struct {
+	RequestsPerSecond float64 `yaml:"requests_per_second"`
+	Burst             int     `yaml:"burst"`
 }
 
 // BasicAuth injects a static Basic credential upstream, for a backend
@@ -160,10 +217,33 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 	if c.MaxBodyBytes < 0 {
 		fail("max_body_bytes must be positive")
 	}
+	if c.MaxConcurrentRequests == 0 {
+		c.MaxConcurrentRequests = DefaultMaxConcurrentRequests
+	}
+	if c.MaxConcurrentBuffered == 0 {
+		c.MaxConcurrentBuffered = DefaultMaxConcurrentBuffered
+	}
+	if c.MaxConcurrentRequests < 0 || c.MaxConcurrentBuffered < 0 {
+		fail("max_concurrent_requests and max_concurrent_buffered must be positive")
+	}
 	if c.TLS != nil && (c.TLS.CertFile == "" || c.TLS.KeyFile == "") {
 		fail("tls: cert_file and key_file are both required")
 	}
-	c.ClientToken = env("client_token_env", c.ClientTokenEnv)
+
+	token := func(field, name string) string {
+		v := env(field, name)
+		if v != "" && len(v) < MinTokenLength {
+			fail("%s: token in %s is %d characters; at least %d are required", field, name, len(v), MinTokenLength)
+		}
+		return v
+	}
+	var defaultTokens []string
+	if c.ClientTokenEnv != "" {
+		defaultTokens = append(defaultTokens, token("client_token_env", c.ClientTokenEnv))
+	}
+	if c.ClientTokenPreviousEnv != "" {
+		defaultTokens = append(defaultTokens, token("client_token_previous_env", c.ClientTokenPreviousEnv))
+	}
 
 	if len(c.Connections) == 0 {
 		fail("connections: at least one connection is required")
@@ -192,9 +272,20 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			hosts[conn.Host] = true
 		}
 
+		switch {
+		case conn.ClientTokenEnv != "":
+			conn.ClientTokens = []string{token(where+": client_token_env", conn.ClientTokenEnv)}
+		case len(defaultTokens) > 0:
+			conn.ClientTokens = defaultTokens
+		default:
+			fail("%s: no client token; set client_token_env here or at the top level", where)
+		}
+
 		u, err := url.Parse(conn.Upstream)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 			fail("%s: upstream must be an absolute http(s) URL", where)
+		} else if u.Scheme == "http" && !c.AllowHTTPUpstreams {
+			fail("%s: upstream is plain http; use https or set allow_http_upstreams", where)
 		} else if u.RawQuery != "" || u.Fragment != "" {
 			fail("%s: upstream must not have a query or fragment", where)
 		} else {
@@ -236,9 +327,72 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			conn.BasicAuth.Username = env(where+": upstream_basic_auth.username_env", conn.BasicAuth.UsernameEnv)
 			conn.BasicAuth.Password = env(where+": upstream_basic_auth.password_env", conn.BasicAuth.PasswordEnv)
 		}
+
+		methods := conn.Methods
+		if len(methods) == 0 {
+			methods = DefaultMethods
+		}
+		conn.MethodSet = map[string]bool{}
+		for _, m := range methods {
+			m = strings.ToUpper(m)
+			switch m {
+			case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+				conn.MethodSet[m] = true
+			default:
+				fail("%s: methods: unsupported method %q", where, m)
+			}
+		}
+		conn.PathRes = nil
+		for j, p := range conn.Paths {
+			re, err := regexp.Compile(`^(?:` + p + `)$`)
+			if err != nil {
+				fail("%s: paths[%d]: %v", where, j, err)
+				continue
+			}
+			conn.PathRes = append(conn.PathRes, re)
+		}
+		conn.RequestDenyRes = nil
+		for j, p := range conn.RequestDenyPatterns {
+			re, err := regexp.Compile(p)
+			if err != nil {
+				fail("%s: request_deny_patterns[%d]: %v", where, j, err)
+				continue
+			}
+			conn.RequestDenyRes = append(conn.RequestDenyRes, re)
+		}
+		conn.HeaderSet = map[string]bool{}
+		for _, h := range append(append([]string{}, DefaultRequestHeaders...), conn.RequestHeaders...) {
+			ch := http.CanonicalHeaderKey(h)
+			switch ch {
+			case "Authorization", "Proxy-Authorization", "Cookie", "Ocp-Apim-Subscription-Key", "Ocp-Apim-Trace", "Apim-Debug-Authorization":
+				fail("%s: request_headers: %s cannot be forwarded", where, ch)
+			}
+			conn.HeaderSet[ch] = true
+		}
+		for j, p := range conn.ResponseFields {
+			for _, seg := range strings.Split(p, ".") {
+				if seg == "" {
+					fail("%s: response_fields[%d]: empty segment in %q", where, j, p)
+					break
+				}
+			}
+		}
+		if len(conn.MCPTools) > 0 && !conn.MethodSet["POST"] {
+			fail("%s: mcp_tools needs POST in methods", where)
+		}
+		if rl := conn.RateLimit; rl != nil && (rl.RequestsPerSecond <= 0 || rl.Burst <= 0) {
+			fail("%s: rate_limit needs positive requests_per_second and burst", where)
+		}
 	}
 
-	r := &c.Redaction
+	c.Redaction.resolve(env, fail)
+	// Regex compilation and builtin names are validated by the redact
+	// package when the engine is built, so there is one source of truth.
+
+	return errors.Join(errs...)
+}
+
+func (r *Redaction) resolve(env func(field, name string) string, fail func(string, ...any)) {
 	if r.Mask == "" {
 		r.Mask = MaskLabel
 	}
@@ -260,10 +414,33 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			fail("redaction.custom[%d] (%s): regex is required", i, cr.Name)
 		}
 	}
-	// Regex compilation and builtin names are validated by the redact
-	// package when the engine is built, so there is one source of truth.
+}
 
-	return errors.Join(errs...)
+// LoadRedaction reads only the redaction section of a config file, for
+// running the rules offline (neubird-proxy -redact) without connection
+// secrets.
+func LoadRedaction(path string, lookupEnv func(string) (string, bool)) (*Redaction, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var c Config
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	var errs []error
+	fail := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
+	env := func(field, name string) string {
+		v, ok := lookupEnv(name)
+		if !ok || v == "" {
+			fail("%s: environment variable %s is not set", field, name)
+		}
+		return v
+	}
+	c.Redaction.resolve(env, fail)
+	return &c.Redaction, errors.Join(errs...)
 }
 
 func expandEnv(s string, lookupEnv func(string) (string, bool), missing func(string)) string {

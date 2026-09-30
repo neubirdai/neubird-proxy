@@ -16,6 +16,7 @@ var update = flag.Bool("update", false, "rewrite golden files")
 // goldenConfig mirrors the proposal's example config, with every builtin on.
 const goldenConfig = `
 client_token_env: NEUBIRD_PROXY_TOKEN
+allow_http_upstreams: true
 upstream_defaults:
   headers:
     Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY}

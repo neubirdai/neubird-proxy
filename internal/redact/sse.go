@@ -12,15 +12,21 @@ import (
 // stream, not returning a 502.
 var ErrEventTooLarge = errors.New("redact: SSE event exceeds max_body_bytes")
 
+// ErrNotText ends a stream carrying bytes that are not UTF-8 text, such as
+// a compressed payload the upstream did not declare. Regex over compressed
+// bytes would pass the plaintext through.
+var ErrNotText = errors.New("redact: SSE stream is not UTF-8 text")
+
 // SSEReader redacts a text/event-stream body event by event. Each event is
 // buffered to its terminating blank line, its data payload is redacted (as
 // JSON when it parses, which covers MCP JSON-RPC messages, else as text),
 // and it is released to the reader immediately so streaming still streams.
 type SSEReader struct {
-	src io.ReadCloser
-	e   *Engine
-	st  Stats
-	max int
+	src    io.ReadCloser
+	e      *Engine
+	st     Stats
+	max    int
+	fields *Fields
 
 	in    []byte
 	out   []byte
@@ -32,6 +38,13 @@ func NewSSEReader(src io.ReadCloser, e *Engine, st Stats, maxEvent int64) *SSERe
 	return &SSEReader{src: src, e: e, st: st, max: int(maxEvent), chunk: make([]byte, 32<<10)}
 }
 
+// WithFields applies a field allowlist to JSON data payloads. A data
+// payload that is not JSON is masked whole, since it cannot be checked.
+func (r *SSEReader) WithFields(f *Fields) *SSEReader {
+	r.fields = f
+	return r
+}
+
 func (r *SSEReader) Read(p []byte) (int, error) {
 	for len(r.out) == 0 {
 		if r.err != nil {
@@ -39,15 +52,23 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 		}
 		n, err := r.src.Read(r.chunk)
 		r.in = append(r.in, r.chunk[:n]...)
-		tooLarge := r.drain()
+		derr := r.drain()
 		switch {
-		case tooLarge || len(r.in) > r.max:
-			// Complete events already in out are released; the oversized
-			// partial event never is.
+		case derr != nil:
+			// Complete events already in out are released; the offending
+			// event never is.
+			r.in = nil
+			r.err = derr
+		case len(r.in) > r.max:
 			r.in = nil
 			r.err = ErrEventTooLarge
 		case err == io.EOF:
 			if len(r.in) > 0 {
+				if !IsText(r.in) {
+					r.in = nil
+					r.err = ErrNotText
+					break
+				}
 				r.out = append(r.out, r.event(r.in)...)
 				r.in = nil
 			}
@@ -71,17 +92,20 @@ func (r *SSEReader) Err() error {
 	return r.err
 }
 
-// drain moves every complete event from in to out. It stops and reports
-// true at the first event over the cap, so the cap holds whether an event
+// drain moves every complete event from in to out. It stops at the first
+// event over the cap or not text, so the checks hold whether an event
 // arrives in pieces or in a single read.
-func (r *SSEReader) drain() (tooLarge bool) {
+func (r *SSEReader) drain() error {
 	for {
 		end, next := eventEnd(r.in)
 		if end < 0 {
-			return false
+			return nil
 		}
 		if end > r.max {
-			return true
+			return ErrEventTooLarge
+		}
+		if !IsText(r.in[:end]) {
+			return ErrNotText
 		}
 		r.out = append(r.out, r.event(r.in[:end])...)
 		r.out = append(r.out, '\n')
@@ -162,8 +186,13 @@ func (r *SSEReader) event(ev []byte) []byte {
 			continue
 		}
 		payload := strings.Join(data, "\n")
-		redacted, err := r.e.JSON([]byte(payload), r.st)
-		if err != nil {
+		redacted, err := r.e.JSONFields([]byte(payload), r.st, r.fields)
+		switch {
+		case err == nil:
+		case r.fields != nil:
+			r.st["field_not_allowed"]++
+			redacted = []byte(r.e.mask("FIELD", payload))
+		default:
 			redacted = []byte(r.e.String(payload, r.st))
 		}
 		for _, d := range strings.Split(string(redacted), "\n") {

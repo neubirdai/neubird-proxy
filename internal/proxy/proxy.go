@@ -12,10 +12,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,14 +40,19 @@ import (
 )
 
 type Server struct {
-	cfg     *config.Config
-	engine  *redact.Engine
-	log     *slog.Logger
-	rp      *httputil.ReverseProxy
-	byName  map[string]*config.Connection
-	byHost  map[string]*config.Connection
-	token   [32]byte
-	Metrics *Metrics
+	cfg      *config.Config
+	engine   *redact.Engine
+	log      *slog.Logger
+	rp       *httputil.ReverseProxy
+	byName   map[string]*config.Connection
+	byHost   map[string]*config.Connection
+	tokens   map[string][][32]byte // connection name -> accepted token hashes
+	limiters map[string]*bucket
+	fields   map[string]*redact.Fields // connection name -> response allowlist
+	tools    map[string]map[string]bool
+	inflight chan struct{} // max_concurrent_requests
+	buffered chan struct{} // max_concurrent_buffered
+	Metrics  *Metrics
 }
 
 type Metrics struct {
@@ -77,19 +85,43 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		transport = t
 	}
 	s := &Server{
-		cfg:     cfg,
-		engine:  engine,
-		log:     log,
-		byName:  map[string]*config.Connection{},
-		byHost:  map[string]*config.Connection{},
-		token:   sha256.Sum256([]byte(cfg.ClientToken)),
-		Metrics: newMetrics(),
+		cfg:      cfg,
+		engine:   engine,
+		log:      log,
+		byName:   map[string]*config.Connection{},
+		byHost:   map[string]*config.Connection{},
+		tokens:   map[string][][32]byte{},
+		limiters: map[string]*bucket{},
+		fields:   map[string]*redact.Fields{},
+		tools:    map[string]map[string]bool{},
+		inflight: make(chan struct{}, cfg.MaxConcurrentRequests),
+		buffered: make(chan struct{}, cfg.MaxConcurrentBuffered),
+		Metrics:  newMetrics(),
 	}
 	for i := range cfg.Connections {
 		c := &cfg.Connections[i]
 		s.byName[c.Name] = c
 		if c.Host != "" {
 			s.byHost[c.Host] = c
+		}
+		for _, t := range c.ClientTokens {
+			s.tokens[c.Name] = append(s.tokens[c.Name], sha256.Sum256([]byte(t)))
+		}
+		if c.RateLimit != nil {
+			s.limiters[c.Name] = newBucket(c.RateLimit.RequestsPerSecond, c.RateLimit.Burst)
+		}
+		if len(c.ResponseFields) > 0 {
+			f, err := redact.NewFields(c.ResponseFields)
+			if err != nil {
+				return nil, fmt.Errorf("connection %s: %w", c.Name, err)
+			}
+			s.fields[c.Name] = f
+		}
+		if len(c.MCPTools) > 0 {
+			s.tools[c.Name] = map[string]bool{}
+			for _, t := range c.MCPTools {
+				s.tools[c.Name][t] = true
+			}
 		}
 	}
 	s.rp = &httputil.ReverseProxy{
@@ -127,6 +159,7 @@ func newTransport(cfg *config.Config) (*http.Transport, error) {
 // reqState travels in the request context from ServeHTTP through the
 // ReverseProxy hooks, and feeds the audit line.
 type reqState struct {
+	id      string
 	conn    *config.Connection
 	prefix  string // "/splunk" for path routing, "" for host routing
 	rest    string // path after the prefix, decoded
@@ -144,6 +177,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &recorder{ResponseWriter: w}
 
+	select {
+	case s.inflight <- struct{}{}:
+		defer func() { <-s.inflight }()
+	default:
+		rec.Header().Set("Retry-After", "1")
+		writeError(rec, http.StatusServiceUnavailable, "overloaded", "too many concurrent requests")
+		s.Metrics.Requests.Inc("_overloaded", "503")
+		return
+	}
+
 	if hasDotSegment(r.URL.Path) {
 		// /elastic/../splunk/... would be routed as elastic (passthrough)
 		// and then normalized by APIM to splunk, skipping redaction.
@@ -159,15 +202,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := st.conn.Name
+	st.id = newRequestID()
+	rec.Header().Set("X-Request-Id", st.id)
 
 	defer func() {
 		p := recover()
 		status := rec.status
 		if p != nil {
 			status = 0 // stream aborted mid-body
-			if st.sse != nil && errors.Is(st.sse.Err(), redact.ErrEventTooLarge) {
-				st.blocked = "sse_event_too_large"
-				s.Metrics.Blocked.Inc(name, st.blocked)
+			if st.sse != nil {
+				switch err := st.sse.Err(); {
+				case errors.Is(err, redact.ErrEventTooLarge):
+					st.blocked = "sse_event_too_large"
+				case errors.Is(err, redact.ErrNotText):
+					st.blocked = "sse_not_text"
+				}
+				if st.blocked != "" {
+					s.Metrics.Blocked.Inc(name, st.blocked)
+				}
 			}
 		}
 		s.Metrics.Requests.Inc(name, strconv.Itoa(status))
@@ -188,6 +240,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
 		return
 	}
+	if !st.conn.MethodSet[r.Method] {
+		st.blocked = "method_not_allowed"
+		s.Metrics.Blocked.Inc(name, st.blocked)
+		rec.Header().Set("Allow", allowHeader(st.conn))
+		writeError(rec, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed on this connection")
+		return
+	}
+	if !pathAllowed(st.conn, st.rest) {
+		st.blocked = "path_not_allowed"
+		s.Metrics.Blocked.Inc(name, st.blocked)
+		writeError(rec, http.StatusForbidden, "path_not_allowed", "path not allowed on this connection")
+		return
+	}
+	if b := s.limiters[name]; b != nil && !b.allow() {
+		st.blocked = "rate_limited"
+		s.Metrics.Blocked.Inc(name, st.blocked)
+		rec.Header().Set("Retry-After", "1")
+		writeError(rec, http.StatusTooManyRequests, "rate_limited", "connection rate limit exceeded")
+		return
+	}
 	// Upgraded connections (WebSocket) bypass response redaction entirely.
 	if !st.conn.Passthrough && r.Header.Get("Upgrade") != "" {
 		st.blocked = "upgrade_not_supported"
@@ -197,6 +269,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(rec, r.Body, s.cfg.MaxBodyBytes)
+	}
+	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil {
+		reason, err := s.checkRequest(st.conn, r)
+		var mbe *http.MaxBytesError
+		switch {
+		case errors.As(err, &mbe):
+			writeError(rec, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds max_body_bytes")
+			return
+		case err != nil:
+			writeError(rec, http.StatusBadRequest, "bad_request", "could not read request body")
+			return
+		case reason != "":
+			st.blocked = "request_denied"
+			s.Metrics.Blocked.Inc(name, st.blocked)
+			writeError(rec, http.StatusForbidden, "request_denied", reason)
+			return
+		}
 	}
 
 	s.rp.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), stateKey{}, st)))
@@ -248,6 +337,103 @@ func (s *Server) route(r *http.Request) (*reqState, bool) {
 	return st, true
 }
 
+func allowHeader(c *config.Connection) string {
+	var ms []string
+	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+		if c.MethodSet[m] {
+			ms = append(ms, m)
+		}
+	}
+	return strings.Join(ms, ", ")
+}
+
+func pathAllowed(c *config.Connection, rest string) bool {
+	if len(c.PathRes) == 0 {
+		return true
+	}
+	if rest == "" {
+		rest = "/"
+	}
+	for _, re := range c.PathRes {
+		if re.MatchString(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkRequest applies request_deny_patterns and mcp_tools, returning a
+// reason to refuse the request, or "". Deny patterns match the query string
+// and body, raw and URL-decoded, since Splunk takes its search as a form
+// field. The body is buffered (it is already capped at max_body_bytes) and
+// restored for the upstream.
+func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, error) {
+	var body []byte
+	if r.Body != nil && r.Body != http.NoBody {
+		var err error
+		body, err = io.ReadAll(r.Body)
+		r.Body.Close()
+		if err != nil {
+			return "", err
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
+	if tools := s.tools[c.Name]; tools != nil && r.Method == http.MethodPost {
+		if reason := checkMCPTools(body, tools); reason != "" {
+			return reason, nil
+		}
+	}
+	candidates := []string{r.URL.RawQuery, string(body)}
+	for _, raw := range []string{r.URL.RawQuery, string(body)} {
+		if dec, err := url.QueryUnescape(raw); err == nil && dec != raw {
+			candidates = append(candidates, dec)
+		}
+	}
+	for i, re := range c.RequestDenyRes {
+		for _, cand := range candidates {
+			if re.MatchString(cand) {
+				return fmt.Sprintf("request matches request_deny_patterns[%d]", i), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// checkMCPTools refuses a JSON-RPC message or batch that calls a tool not
+// in the allowlist. A body that is not JSON-RPC is refused too: on an MCP
+// connection it cannot be checked.
+func checkMCPTools(body []byte, tools map[string]bool) string {
+	type msg struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	var msgs []msg
+	trimmed := bytes.TrimSpace(body)
+	switch {
+	case len(trimmed) == 0:
+		return ""
+	case trimmed[0] == '[':
+		if err := json.Unmarshal(trimmed, &msgs); err != nil {
+			return "body is not JSON-RPC"
+		}
+	default:
+		var m msg
+		if err := json.Unmarshal(trimmed, &m); err != nil {
+			return "body is not JSON-RPC"
+		}
+		msgs = []msg{m}
+	}
+	for _, m := range msgs {
+		if m.Method == "tools/call" && !tools[m.Params.Name] {
+			return fmt.Sprintf("MCP tool %q is not in mcp_tools", m.Params.Name)
+		}
+	}
+	return ""
+}
+
 func (s *Server) authenticate(c *config.Connection, r *http.Request) bool {
 	var presented string
 	switch c.ClientAuth {
@@ -269,9 +455,15 @@ func (s *Server) authenticate(c *config.Connection, r *http.Request) bool {
 	if presented == "" {
 		return false
 	}
-	// Hash both sides so the comparison is constant time regardless of length.
+	// Hash both sides so the comparison is constant time regardless of
+	// length, and check every accepted token so timing does not reveal
+	// which one matched.
 	sum := sha256.Sum256([]byte(presented))
-	return subtle.ConstantTimeCompare(sum[:], s.token[:]) == 1
+	ok := 0
+	for _, t := range s.tokens[c.Name] {
+		ok |= subtle.ConstantTimeCompare(sum[:], t[:])
+	}
+	return ok == 1
 }
 
 func (s *Server) rewrite(pr *httputil.ProxyRequest) {
@@ -290,25 +482,28 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	out.URL.RawQuery = pr.In.URL.RawQuery
 	out.Host = ""
 
-	// The NeuBird credential never goes upstream, and the client cannot
-	// supply its own APIM key or backend credential.
-	h := out.Header
-	h.Del("Authorization")
-	h.Del("Proxy-Authorization")
-	if c.ClientAuthHeader != "" {
-		h.Del(c.ClientAuthHeader)
+	// Only allowlisted client headers go upstream. That drops the NeuBird
+	// credential, cookies, and anything that steers APIM (Ocp-Apim-Trace,
+	// a client-supplied subscription key).
+	h := http.Header{}
+	for k, vs := range out.Header {
+		if c.HeaderSet[k] {
+			h[k] = vs
+		}
 	}
-	h.Del("Ocp-Apim-Subscription-Key")
-	for k := range c.ResolvedHeaders {
-		h.Del(k)
+	if c.Passthrough {
+		// Nothing is inspected, so compression and ranges are harmless.
+		for _, k := range []string{"Accept-Encoding", "Range", "If-Range"} {
+			if v, ok := out.Header[k]; ok {
+				h[k] = v
+			}
+		}
 	}
-	if !c.Passthrough {
-		h.Del("Accept-Encoding")
-		h.Del("TE")
-		// A value split across two partial bodies matches in neither.
-		h.Del("Range")
-		h.Del("If-Range")
-	}
+	h.Set("X-Request-Id", st.id)
+	out.Header = h
+	// Accept-Encoding, Range and If-Range are not in the allowlist for
+	// redacting connections: bodies must arrive whole and uncompressed, and
+	// a value split across two partial bodies matches in neither.
 	for k, v := range c.ResolvedHeaders {
 		h.Set(k, v)
 	}
@@ -326,9 +521,23 @@ func (e *blockError) Error() string { return "redaction blocked: " + e.reason }
 func (s *Server) modifyResponse(resp *http.Response) error {
 	st := state(resp.Request.Context())
 	s.rewriteLocation(resp, st)
+	// Backend session cookies would let the holder reach the backend
+	// without the proxy (a ServiceNow session works directly against the
+	// SaaS instance). APIM's own headers describe MetLife's gateway.
+	h := resp.Header
+	h.Del("Set-Cookie")
+	h.Del("Set-Cookie2")
+	for k := range h {
+		if strings.HasPrefix(k, "Ocp-Apim-") {
+			h.Del(k)
+		}
+	}
 	if st.conn.Passthrough {
 		return nil
 	}
+	// Trailers arrive after the body and would skip header redaction.
+	h.Del("Trailer")
+	resp.Trailer = nil
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		return &blockError{"upgrade_not_supported"}
 	}
@@ -341,7 +550,6 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		resp.Request.Method == http.MethodHead {
 		return nil
 	}
-	h := resp.Header
 
 	switch enc := strings.ToLower(strings.TrimSpace(h.Get("Content-Encoding"))); enc {
 	case "", "identity":
@@ -360,8 +568,9 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	}
 
 	kind := classify(h.Get("Content-Type"))
+	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
-		st.sse = redact.NewSSEReader(resp.Body, s.engine, st.stats, s.cfg.MaxBodyBytes)
+		st.sse = redact.NewSSEReader(resp.Body, s.engine, st.stats, s.cfg.MaxBodyBytes).WithFields(fields)
 		resp.Body = st.sse
 		resp.ContentLength = -1
 		h.Del("Content-Length")
@@ -370,7 +579,20 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	if kind == kindUnsupported {
 		return &blockError{"unsupported_content_type"}
 	}
+	if fields != nil && kind != kindJSON {
+		// A field allowlist can only be enforced on JSON.
+		return &blockError{"not_json"}
+	}
 
+	// Bound how many bodies are buffered at once, so memory stays under
+	// max_concurrent_buffered x max_body_bytes x a small factor.
+	select {
+	case s.buffered <- struct{}{}:
+		defer func() { <-s.buffered }()
+	case <-resp.Request.Context().Done():
+		resp.Body.Close()
+		return resp.Request.Context().Err()
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, s.cfg.MaxBodyBytes+1))
 	resp.Body.Close()
 	if err != nil {
@@ -379,10 +601,17 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	if int64(len(body)) > s.cfg.MaxBodyBytes {
 		return &blockError{"body_too_large"}
 	}
+	if len(body) > 0 && !redact.IsText(body) {
+		// e.g. gzip bytes labeled text/plain with no Content-Encoding.
+		return &blockError{"not_text"}
+	}
 	if len(body) > 0 {
 		var out []byte
 		if kind == kindJSON {
-			out, err = s.engine.JSON(body, st.stats)
+			out, err = s.engine.JSONFields(body, st.stats, fields)
+			if err != nil && fields != nil {
+				return &blockError{"not_json"}
+			}
 		}
 		if kind == kindText || err != nil {
 			// Invalid JSON still gets value rules; only key rules are lost.
@@ -503,13 +732,28 @@ func (s *Server) audit(r *http.Request, st *reqState, status, nbytes int, d time
 	// audit line gets the same value rules, counted separately.
 	path := s.engine.String(st.rest, redact.Stats{})
 	attrs := []any{
+		"request_id", st.id,
 		"connection", st.conn.Name,
+		"remote_addr", r.RemoteAddr,
 		"method", r.Method,
 		"path", path,
 		"status", status,
 		"bytes", nbytes,
 		"duration_ms", d.Milliseconds(),
 		"redactions", st.stats.Total(),
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		attrs = append(attrs, "forwarded_for", xff)
+	}
+	// Parameter names, not values: enough to see what was asked for
+	// (sysparm_query, search) without logging the data in the query.
+	if q := r.URL.Query(); len(q) > 0 {
+		keys := make([]string, 0, len(q))
+		for k := range q {
+			keys = append(keys, s.engine.String(k, redact.Stats{}))
+		}
+		sort.Strings(keys)
+		attrs = append(attrs, "query_keys", keys)
 	}
 	if len(st.stats) > 0 {
 		attrs = append(attrs, "rules", map[string]int(st.stats))
@@ -536,7 +780,13 @@ type recorder struct {
 }
 
 func (r *recorder) WriteHeader(code int) {
-	if r.status == 0 && code >= 200 {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		// ReverseProxy relays upstream 1xx responses (103 Early Hints) with
+		// their headers, before ModifyResponse can redact anything. Drop
+		// them; they are optional hints.
+		return
+	}
+	if r.status == 0 {
 		r.status = code
 	}
 	r.ResponseWriter.WriteHeader(code)
@@ -552,3 +802,32 @@ func (r *recorder) Write(b []byte) (int, error) {
 }
 
 func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+func newRequestID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// ServerTLSConfig builds the listener's TLS config: TLS 1.2 or later, and
+// with tls.client_ca_file, a required client certificate from that CA.
+func ServerTLSConfig(t *config.TLS) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("tls: %w", err)
+	}
+	c := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
+	if t.ClientCAFile != "" {
+		pem, err := os.ReadFile(t.ClientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("tls.client_ca_file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("tls.client_ca_file: no certificates found in %s", t.ClientCAFile)
+		}
+		c.ClientCAs = pool
+		c.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return c, nil
+}

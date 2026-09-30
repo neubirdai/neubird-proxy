@@ -7,6 +7,7 @@
 package redact
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,16 +16,35 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
 )
 
 type valueRule struct {
-	name     string
-	label    string
-	re       *regexp.Regexp
-	anchored *regexp.Regexp // re matching a whole string; set when validate is
-	validate func(string) bool
+	name      string
+	label     string
+	needles   []string // prefilter; see pattern
+	minDigits int
+	scope     scope
+	before    int
+	after     int
+	re        *regexp.Regexp
+	group     int            // submatch to mask; 0 is the whole match
+	anchored  *regexp.Regexp // re matching a whole string; for validated whole-match rules
+	validate  func(string) bool
+}
+
+func newValueRule(name string, p pattern) valueRule {
+	r := valueRule{name: name, label: strings.ToUpper(name), re: p.re, validate: p.validate, needles: p.needles, minDigits: p.minDigits, scope: p.scope, before: p.before, after: p.after}
+	re, validate := p.re, p.validate
+	if g := re.SubexpIndex("v"); g > 0 {
+		r.group = g
+	}
+	if validate != nil && r.group == 0 {
+		r.anchored = regexp.MustCompile(`^(?:` + re.String() + `)$`)
+	}
+	return r
 }
 
 type keyRule struct {
@@ -66,23 +86,19 @@ func New(cfg config.Redaction) (*Engine, error) {
 	for _, name := range names {
 		b, ok := builtins[name]
 		if !ok {
-			errs = append(errs, fmt.Errorf("redaction.builtins: unknown rule %q (known: %s)", name, strings.Join(builtinOrder, ", ")))
+			known := append(append([]string{}, builtinOrder...), optionalBuiltins...)
+			errs = append(errs, fmt.Errorf("redaction.builtins: unknown rule %q (known: %s)", name, strings.Join(known, ", ")))
 			continue
 		}
 		if seen[name] {
 			continue
 		}
 		seen[name] = true
-		label := strings.ToUpper(name)
-		if b.value != nil {
-			vr := valueRule{name: name, label: label, re: b.value, validate: b.validate}
-			if b.validate != nil {
-				vr.anchored = regexp.MustCompile(`^(?:` + b.value.String() + `)$`)
-			}
-			e.rules = append(e.rules, vr)
+		for _, p := range b.values {
+			e.rules = append(e.rules, newValueRule(name, p))
 		}
 		if b.key != nil {
-			e.keyRules = append(e.keyRules, keyRule{name: name, label: label, re: b.key})
+			e.keyRules = append(e.keyRules, keyRule{name: name, label: strings.ToUpper(name), re: b.key})
 		}
 	}
 
@@ -110,7 +126,7 @@ func New(cfg config.Redaction) (*Engine, error) {
 			errs = append(errs, fmt.Errorf("redaction.custom[%d] (%s): regex matches the empty string", i, c.Name))
 			continue
 		}
-		e.rules = append(e.rules, valueRule{name: c.Name, label: strings.ToUpper(c.Name), re: re})
+		e.rules = append(e.rules, newValueRule(c.Name, pattern{re: re}))
 	}
 
 	for i, p := range cfg.AllowedValues {
@@ -139,11 +155,18 @@ func New(cfg config.Redaction) (*Engine, error) {
 // RuleNames lists active rules in precedence order, for startup logging.
 func (e *Engine) RuleNames() []string {
 	var out []string
+	seen := map[string]bool{}
+	add := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
 	for _, r := range e.rules {
-		out = append(out, r.name)
+		add(r.name)
 	}
 	for _, k := range e.keyRules {
-		out = append(out, "key:"+k.name)
+		add("key:" + k.name)
 	}
 	return out
 }
@@ -152,35 +175,71 @@ type span struct {
 	start, end, rule int
 }
 
-// String masks every rule match in s. Matches are found against the
-// original text, so a mask is never re-matched by a later rule. Overlapping
-// matches merge into one mask, labeled by the earliest match (ties go to
-// the higher-precedence rule), so no part of either match survives.
-func (e *Engine) String(s string, st Stats) string {
-	if s == "" || len(e.rules) == 0 {
-		return s
+// String masks every rule match in s.
+//
+// Matching runs on a normalized view of s (see normalize), so
+// jane.doe%40example.com and full-width digits are caught; masks replace the
+// corresponding bytes of the original. Matches are found against the
+// unmasked text, so a mask is never re-matched by a later rule. Overlapping
+// matches merge into one mask, labeled by the earliest match (ties go to the
+// higher-precedence rule), so no part of either match survives.
+func (e *Engine) String(orig string, st Stats) string {
+	if orig == "" || len(e.rules) == 0 {
+		return orig
 	}
+	s, off := normalize(orig)
+	nDigits := countDigits(s)
+	var lower string
+	var clusters [][2]int
+	clustersDone := false
 	var spans []span
 	for i, r := range e.rules {
-		for _, loc := range r.re.FindAllStringIndex(s, -1) {
-			if loc[0] == loc[1] {
+		if nDigits < r.minDigits {
+			continue
+		}
+		if len(r.needles) > 0 {
+			if lower == "" {
+				lower = asciiLower(s)
+			}
+			if !containsAny(lower, r.needles) {
 				continue
 			}
-			m := s[loc[0]:loc[1]]
+		}
+		var regions [][2]int
+		switch r.scope {
+		case scopeDigits:
+			if !clustersDone {
+				clusters, clustersDone = digitClusters(s), true
+			}
+			regions = clusters
+		case scopeNeedles:
+			regions = needleWindows(s, lower, r.needles, r.before, r.after)
+		default:
+			regions = [][2]int{{0, len(s)}}
+		}
+		for _, loc := range findIn(r, s, regions) {
+			a, z := loc[2*r.group], loc[2*r.group+1]
+			if a < 0 || a == z {
+				continue
+			}
+			m := s[a:z]
 			if r.validate != nil && !r.validate(m) {
-				// The regex is greedy: "4111111111111111 12" fails Luhn as a
-				// whole but contains a valid card. Retry shorter candidates.
-				spans = e.subMatches(s, loc[0], loc[1], i, spans)
+				if r.anchored != nil {
+					// The regex is greedy: "4111111111111111 12" fails Luhn
+					// as a whole but contains a valid card. Retry shorter
+					// candidates.
+					spans = e.subMatches(s, a, z, i, spans)
+				}
 				continue
 			}
 			if e.isAllowed(m) {
 				continue
 			}
-			spans = append(spans, span{loc[0], loc[1], i})
+			spans = append(spans, span{a, z, i})
 		}
 	}
 	if len(spans) == 0 {
-		return s
+		return orig
 	}
 	sort.Slice(spans, func(a, b int) bool {
 		if spans[a].start != spans[b].start {
@@ -190,8 +249,8 @@ func (e *Engine) String(s string, st Stats) string {
 	})
 
 	var b strings.Builder
-	b.Grow(len(s))
-	pos := 0
+	b.Grow(len(orig))
+	pos := 0 // in orig
 	for i := 0; i < len(spans); {
 		first := spans[i]
 		end := first.end
@@ -203,12 +262,18 @@ func (e *Engine) String(s string, st Stats) string {
 				st[e.rules[spans[j].rule].name]++
 			}
 		}
-		b.WriteString(s[pos:first.start])
+		oa, oz := first.start, end
+		if off != nil {
+			oa, oz = off[first.start], off[end]
+		}
+		b.WriteString(orig[pos:oa])
+		// HMAC over the normalized value, so encoded and plain forms of the
+		// same value get the same token.
 		b.WriteString(e.mask(e.rules[first.rule].label, s[first.start:end]))
-		pos = end
+		pos = oz
 		i = j
 	}
-	b.WriteString(s[pos:])
+	b.WriteString(orig[pos:])
 	return b.String()
 }
 
@@ -252,6 +317,13 @@ func isWord(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'
 }
 
+// IsText reports whether b is UTF-8 with no NUL bytes. Anything else
+// (compressed, binary, or a legacy 8-bit encoding) cannot be redacted
+// reliably and must be refused, not scanned.
+func IsText(b []byte) bool {
+	return utf8.Valid(b) && bytes.IndexByte(b, 0) < 0
+}
+
 // Text applies value rules to a whole non-JSON body.
 func (e *Engine) Text(body []byte, st Stats) []byte {
 	return []byte(e.String(string(body), st))
@@ -285,4 +357,133 @@ func (e *Engine) mask(label, value string) string {
 	h := hmac.New(sha256.New, e.hmacKey)
 	h.Write([]byte(value))
 	return "[REDACTED:" + label + ":" + hex.EncodeToString(h.Sum(nil))[:16] + "]"
+}
+
+func countDigits(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			n++
+		}
+	}
+	return n
+}
+
+func containsAny(s string, needles []string) bool {
+	for _, n := range needles {
+		if strings.Contains(s, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// findIn runs r over each region of s and returns submatch indexes in s's
+// coordinates. Each region carries one byte of context on each side (when
+// there is one), so \b and similar assertions at its edges see the real
+// neighbors; matches are kept only if they start inside the region proper.
+func findIn(r valueRule, s string, regions [][2]int) [][]int {
+	if len(regions) == 1 && regions[0] == [2]int{0, len(s)} {
+		return r.re.FindAllStringSubmatchIndex(s, -1)
+	}
+	var out [][]int
+	for _, reg := range regions {
+		a, z := reg[0], reg[1]
+		ca, cz := max(0, a-1), min(len(s), z+1)
+		for _, loc := range r.re.FindAllStringSubmatchIndex(s[ca:cz], -1) {
+			if loc[0]+ca < a || loc[1]+ca > z {
+				continue
+			}
+			for k := range loc {
+				if loc[k] >= 0 {
+					loc[k] += ca
+				}
+			}
+			out = append(out, loc)
+		}
+	}
+	return out
+}
+
+func isDigitShape(c byte) bool {
+	return c >= '0' && c <= '9' || c == ' ' || c == '(' || c == ')' || c == '.' || c == '+' || c == '-'
+}
+
+// digitClusters returns maximal runs of digit-shape characters that hold
+// at least 4 digits (the fewest any digit-shape rule needs).
+func digitClusters(s string) [][2]int {
+	var out [][2]int
+	for i := 0; i < len(s); {
+		if !isDigitShape(s[i]) {
+			i++
+			continue
+		}
+		j, d := i, 0
+		for j < len(s) && isDigitShape(s[j]) {
+			if s[j] >= '0' && s[j] <= '9' {
+				d++
+			}
+			j++
+		}
+		if d >= 4 {
+			out = append(out, [2]int{i, j})
+		}
+		i = j
+	}
+	return out
+}
+
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+}
+
+// needleWindows returns merged windows around every needle occurrence:
+// before bytes ahead of it and after bytes past it, widened to whitespace
+// (or the string's ends) so no token is cut.
+func needleWindows(s, lower string, needles []string, before, after int) [][2]int {
+	var ws [][2]int
+	for _, n := range needles {
+		for from := 0; ; {
+			k := strings.Index(lower[from:], n)
+			if k < 0 {
+				break
+			}
+			p := from + k
+			a, z := max(0, p-before), min(len(s), p+len(n)+after)
+			for a > 0 && !isSpace(s[a-1]) {
+				a--
+			}
+			for z < len(s) && !isSpace(s[z]) {
+				z++
+			}
+			ws = append(ws, [2]int{a, z})
+			from = max(p+len(n), z-len(n)) // skip occurrences already inside this window
+		}
+	}
+	if len(ws) <= 1 {
+		return ws
+	}
+	sort.Slice(ws, func(i, j int) bool { return ws[i][0] < ws[j][0] })
+	merged := ws[:1]
+	for _, w := range ws[1:] {
+		last := &merged[len(merged)-1]
+		if w[0] <= last[1] {
+			last[1] = max(last[1], w[1])
+		} else {
+			merged = append(merged, w)
+		}
+	}
+	return merged
+}
+
+// asciiLower lowercases ASCII letters only, so byte offsets stay aligned
+// with s (strings.ToLower can change the length of non-ASCII text).
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return string(b)
 }

@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const tok = "0123456789abcdef0123456789abcdef"
+
 func env(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
 }
@@ -35,12 +37,12 @@ redaction:
 
 func TestParseValid(t *testing.T) {
 	c, err := Parse([]byte(valid), env(map[string]string{
-		"TOKEN": "t", "APIM_KEY": "k", "SUFFIX": "s", "SN_USER": "u", "SN_PASS": "p",
+		"TOKEN": tok, "APIM_KEY": "k", "SUFFIX": "s", "SN_USER": "u", "SN_PASS": "p",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != ":8443" || c.AdminListen != ":9090" || c.MaxBodyBytes != DefaultMaxBodyBytes || c.ClientToken != "t" {
+	if c.Listen != ":8443" || c.AdminListen != ":9090" || c.MaxBodyBytes != DefaultMaxBodyBytes || c.Connections[0].ClientTokens[0] != tok {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
 	sp := c.Connections[0]
@@ -60,7 +62,7 @@ func TestParseValid(t *testing.T) {
 }
 
 func TestParseErrors(t *testing.T) {
-	base := map[string]string{"TOKEN": "t", "APIM_KEY": "k", "SUFFIX": "s", "SN_USER": "u", "SN_PASS": "p"}
+	base := map[string]string{"TOKEN": tok, "APIM_KEY": "k", "SUFFIX": "s", "SN_USER": "u", "SN_PASS": "p"}
 	cases := map[string]struct {
 		yaml string
 		env  map[string]string

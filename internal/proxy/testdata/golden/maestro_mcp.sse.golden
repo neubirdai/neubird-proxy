@@ -6,5 +6,5 @@ data: {"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"Job CL
 
 event: message
 id: 2
-data: {"jsonrpc":"2.0","id":8,"result":{"structuredContent":{"jobs":[{"name":"MEMBER_EXTRACT","status":"ABEND","params":{"member":"[REDACTED:MEMBER_ID]","password":"[REDACTED:KEY]"}}]}}}
+data: {"jsonrpc":"2.0","id":8,"result":{"structuredContent":{"jobs":[{"name":"MEMBER_EXTRACT","status":"ABEND","params":{"member":"[REDACTED:MEMBER_ID]","password":"[REDACTED:SECRET_ASSIGNMENT]"}}]}}}
 

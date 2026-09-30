@@ -109,7 +109,8 @@ func TestHMACMaskIsStableAndKeyed(t *testing.T) {
 }
 
 func TestJSONPreservesShape(t *testing.T) {
-	e := engine(t, config.Redaction{BlockedKeyPatterns: []string{`(?i).*password.*`}})
+	pii := []string{"email", "us_ssn", "date_of_birth"}
+	e := engine(t, config.Redaction{Builtins: &pii, BlockedKeyPatterns: []string{`(?i).*password.*`}})
 	in := `{"z":1,"a":{"email":"jane@example.com","n":12345678901234567890,"ok":true,"nil":null},` +
 		`"list":["<b>219-09-9999</b>",2.50],"user_password":{"x":"hunter2","y":42,"z":false},"DOB":"1980-01-02","dob_empty":""}`
 	st := Stats{}
@@ -256,7 +257,8 @@ func TestSSECompleteEventTooLarge(t *testing.T) {
 }
 
 func TestJSONNumbersAndBlockedScalars(t *testing.T) {
-	e := engine(t, config.Redaction{BlockedKeyPatterns: []string{`(?i)^ssn$`}})
+	cards := []string{"credit_card"}
+	e := engine(t, config.Redaction{Builtins: &cards, BlockedKeyPatterns: []string{`(?i)^ssn$`}})
 	// Numbers are not value-scanned (a Luhn-valid timestamp would be
 	// masked and change type); under a blocked key they are masked.
 	in := `{"card":4111111111111111,"n":-1.5e3,"ssn":{"a":"","b":null,"c":true,"d":[1,"x"]}}`
@@ -284,7 +286,8 @@ func TestJSONKeysAreRedacted(t *testing.T) {
 }
 
 func TestNestedJSONInString(t *testing.T) {
-	e := engine(t, config.Redaction{BlockedKeyPatterns: []string{`(?i).*password.*`}})
+	pii := []string{"email", "date_of_birth"}
+	e := engine(t, config.Redaction{Builtins: &pii, BlockedKeyPatterns: []string{`(?i).*password.*`}})
 	in := `{"content":[{"type":"text","text":"{\"dob\": \"1980-01-02\", \"password\":\"hunter2\",\"mail\":\"a@b.io\"}"},` +
 		`{"type":"text","text":"[not json] a@b.io"}]}`
 	st := Stats{}
@@ -352,5 +355,168 @@ func TestSSEIDAndEventLinesRedacted(t *testing.T) {
 	want := "event: alert for [REDACTED:US_SSN]\nid: [REDACTED:EMAIL]-17\nretry: 3000\ndata: x\n\n"
 	if string(out) != want {
 		t.Fatalf("got %q", out)
+	}
+}
+
+// Regression tests for the MetLife-architect review (Sep 30).
+
+func TestEncodedAndObfuscatedPII(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	cases := map[string]string{
+		"GET /portal/login?user=jane.doe%40example.com HTTP/1.1": "GET /portal/login?user=[REDACTED:EMAIL] HTTP/1.1",
+		"<email>jane.doe&#64;example.com</email>":                "<email>[REDACTED:EMAIL]</email>",
+		"<email>jane.doe&commat;example&period;com</email>":      "<email>[REDACTED:EMAIL]</email>",
+		"ssn ２１９-０９-９９９９ ok":                                     "ssn [REDACTED:US_SSN] ok",
+		"mail jane.doe@exam\u200bple.com now":                    "mail [REDACTED:EMAIL] now",
+		"card 4111.1111.1111.1111":                               "card [REDACTED:CREDIT_CARD]",
+		"100% of 50%off stays":                                   "100% of 50%off stays",
+		"AT&T &amp; co":                                          "AT&T &amp; co",
+	}
+	for in, want := range cases {
+		if got := e.String(in, Stats{}); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+func TestContextRules(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	cases := map[string]string{
+		"ssn=219099999":                     "ssn=[REDACTED:US_SSN]",
+		"SSN: 219 09 9999":                  "SSN: [REDACTED:US_SSN]",
+		"Social Security Number 219099999.": "Social Security Number [REDACTED:US_SSN].",
+		"ssn=999999999":                     "ssn=999999999", // invalid area
+		"order=219099999":                   "order=219099999",
+		"phone=2125550147":                  "phone=[REDACTED:PHONE_US]",
+		"mobile: +12125550147":              "mobile: [REDACTED:PHONE_US]",
+		"DOB: 03/17/1984 name=Dana":         "DOB: [REDACTED:DATE_OF_BIRTH] name=Dana",
+		"born on March 17, 1984":            "born on [REDACTED:DATE_OF_BIRTH]",
+		"D.O.B. 17 Mar 1984":                "D.O.B. [REDACTED:DATE_OF_BIRTH]",
+		"created 03/17/1984":                "created 03/17/1984",
+	}
+	for in, want := range cases {
+		if got := e.String(in, Stats{}); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+func TestSecretRules(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	cases := map[string]string{
+		"Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqZG9lIn0.c2lnbmF0dXJl":                 "Authorization: Bearer [REDACTED:JWT]",
+		"Authorization: Bearer 3f9a8c7d6e5b4a3f2e1d":                                                  "Authorization: Bearer [REDACTED:BEARER_TOKEN]",
+		"aws_access_key_id=AKIAIOSFODNN7EXAMPLE":                                                      "aws_access_key_id=[REDACTED:AWS_ACCESS_KEY]",
+		"secret=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY":                                             "secret=[REDACTED:SECRET_ASSIGNMENT]",
+		"jdbc:postgresql://db01:5432/claims?user=svc&password=Winter2026!":                            "jdbc:postgresql://db01:5432/claims?user=svc&password=[REDACTED:SECRET_ASSIGNMENT]",
+		"db_password: \"hunter22\"":                                                                   "db_password: \"[REDACTED:SECRET_ASSIGNMENT]\"",
+		"amqp://svc:S3cr3t@mq01:5672/":                                                                "amqp://svc:[REDACTED:URL_CREDENTIALS]@mq01:5672/",
+		"DefaultEndpointsProtocol=https;AccountName=x;AccountKey=abcdEFGH1234abcdEFGH1234abcdEFGH==;": "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=[REDACTED:AZURE_KEY];",
+		"token ghp_0123456789abcdefghijABCDEFGHIJ012345 used":                                         "token [REDACTED:VENDOR_TOKEN] used",
+		"-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY----- done":                 "[REDACTED:PRIVATE_KEY] done",
+		"basic configuration applied, token expired":                                                  "basic configuration applied, token expired",
+	}
+	for in, want := range cases {
+		if got := e.String(in, Stats{}); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	out, err := e.JSON([]byte(`{"client_secret":"x","api_key":12345,"token_type":"Bearer","password_changed":true}`), Stats{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"client_secret":"[REDACTED:SECRET_ASSIGNMENT]","api_key":"[REDACTED:SECRET_ASSIGNMENT]","token_type":"Bearer","password_changed":true}`
+	if string(out) != want {
+		t.Fatalf("got  %s\nwant %s", out, want)
+	}
+}
+
+func TestOptionalWindowsAccount(t *testing.T) {
+	def := engine(t, config.Redaction{})
+	if got := def.String(`METLIFE\jdoe`, Stats{}); got != `METLIFE\jdoe` {
+		t.Fatalf("windows_account should be opt-in, got %q", got)
+	}
+	on := []string{"windows_account"}
+	e := engine(t, config.Redaction{Builtins: &on})
+	if got := e.String(`logon METLIFE\jdoe ok`, Stats{}); got != `logon METLIFE\[REDACTED:WINDOWS_ACCOUNT] ok` {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestHMACSameForEncodedForms(t *testing.T) {
+	e := engine(t, config.Redaction{Mask: config.MaskHMAC, HMACKey: []byte("k")})
+	if a, b := e.String("jane@example.com", Stats{}), e.String("jane%40example.com", Stats{}); a != b {
+		t.Fatalf("%q != %q", a, b)
+	}
+}
+
+func TestNormalizeOffsets(t *testing.T) {
+	in := "a%40b&#64;c\u200b２"
+	n, off := normalize(in)
+	if n != "a@b@c2" {
+		t.Fatalf("normalized %q", n)
+	}
+	if len(off) != len(n)+1 || off[len(n)] != len(in) {
+		t.Fatalf("off %v", off)
+	}
+	for i := 1; i < len(off); i++ {
+		if off[i] < off[i-1] {
+			t.Fatalf("offsets not monotonic: %v", off)
+		}
+	}
+}
+
+func TestFieldAllowlist(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	f, err := NewFields([]string{"result.number", "result.*.display_value", "result.priority", "meta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := `{"result":[{"number":"INC0010042","priority":2,"description":"Caller Dana Whitfield, 42 Elm St",` +
+		`"assignment_group":{"display_value":"Digital Identity L2","value":"abc"},"active":true,"note":"",` +
+		`"caller":{"display_value":"jane@example.com"}}],"meta":{"count":1}}`
+	st := Stats{}
+	out, err := e.JSONFields([]byte(in), st, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"result":[{"number":"INC0010042","priority":2,"description":"[REDACTED:FIELD]",` +
+		`"assignment_group":{"display_value":"Digital Identity L2","value":"[REDACTED:FIELD]"},"active":true,"note":"",` +
+		`"caller":{"display_value":"[REDACTED:EMAIL]"}}],"meta":{"count":1}}`
+	if string(out) != want {
+		t.Fatalf("got  %s\nwant %s", out, want)
+	}
+	if st["field_not_allowed"] != 2 || st["email"] != 1 {
+		t.Fatalf("stats %v", st)
+	}
+	if _, err := NewFields([]string{"a..b"}); err == nil {
+		t.Fatal("empty segment accepted")
+	}
+	if _, err := NewFields(nil); err == nil {
+		t.Fatal("empty allowlist accepted")
+	}
+}
+
+func TestSSEFieldAllowlist(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	f, _ := NewFields([]string{"jsonrpc", "id", "result.content.type", "result.isError"})
+	in := "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Maria Gonzalez, type 2 diabetes\"}],\"isError\":false}}\n\n" +
+		"data: not json at all\n\n"
+	r := NewSSEReader(io.NopCloser(strings.NewReader(in)), e, Stats{}, 1<<20).WithFields(f)
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"[REDACTED:FIELD]\"}],\"isError\":false}}\n\n" +
+		"data: [REDACTED:FIELD]\n\n"
+	if string(out) != want {
+		t.Fatalf("got  %q\nwant %q", out, want)
+	}
+}
+
+func TestCustomRuleValueGroup(t *testing.T) {
+	e := engine(t, config.Redaction{Builtins: &[]string{}, Custom: []config.CustomRule{{Name: "member", Regex: `(?i)member:\s*(?P<v>\d+)`}}})
+	if got := e.String("Member: 123456 ok", Stats{}); got != "Member: [REDACTED:MEMBER] ok" {
+		t.Fatalf("got %q", got)
 	}
 }

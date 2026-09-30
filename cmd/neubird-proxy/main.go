@@ -4,9 +4,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,9 +31,17 @@ var version = "dev"
 func main() {
 	configPath := flag.String("config", "/etc/neubird-proxy/config.yaml", "path to the YAML config")
 	check := flag.Bool("check", false, "validate the config and exit")
+	redactFile := flag.String("redact", "", "redact this file (- for stdin) with the config's rules, print it, and exit; per-rule counts go to stderr")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if *redactFile != "" {
+		if err := redactOffline(*configPath, *redactFile, os.Stdout, os.Stderr); err != nil {
+			log.Error("fatal", "error", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(*configPath, *check, log); err != nil {
 		log.Error("fatal", "error", err.Error())
 		os.Exit(1)
@@ -46,6 +59,9 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	}
 	if check {
 		fmt.Printf("config ok: %d connections, rules: %s\n", len(cfg.Connections), strings.Join(engine.RuleNames(), ", "))
+		for _, w := range warnings(cfg) {
+			fmt.Printf("warning: %s\n", w)
+		}
 		return nil
 	}
 
@@ -62,9 +78,13 @@ func run(configPath string, check bool, log *slog.Logger) error {
 		}
 		conns = append(conns, c.Name+"("+mode+")")
 	}
-	log.Info("starting", "version", version, "listen", cfg.Listen, "admin_listen", cfg.AdminListen,
+	log.Info("starting", "version", version, "config_sha256", configHash(configPath),
+		"listen", cfg.Listen, "admin_listen", cfg.AdminListen,
 		"tls", cfg.TLS != nil, "connections", conns, "rules", engine.RuleNames(),
 		"mask", cfg.Redaction.Mask, "max_body_bytes", cfg.MaxBodyBytes)
+	for _, w := range warnings(cfg) {
+		log.Warn("risky configuration", "detail", w)
+	}
 
 	var ready atomic.Bool
 	admin := http.NewServeMux()
@@ -78,7 +98,14 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	})
 	admin.Handle("GET /metrics", srv.Metrics.Registry.Handler())
 
+	var serverTLS *tls.Config
+	if cfg.TLS != nil {
+		if serverTLS, err = proxy.ServerTLSConfig(cfg.TLS); err != nil {
+			return err
+		}
+	}
 	proxySrv := &http.Server{
+		TLSConfig:         serverTLS,
 		Addr:              cfg.Listen,
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -91,7 +118,7 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	go func() {
 		var err error
 		if cfg.TLS != nil {
-			err = proxySrv.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+			err = proxySrv.ListenAndServeTLS("", "")
 		} else {
 			err = proxySrv.ListenAndServe()
 		}
@@ -117,5 +144,90 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
+	return nil
+}
+
+// configHash identifies the exact config a pod runs, so a ConfigMap change
+// shows up in the logs even if nobody announced it.
+func configHash(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// warnings lists settings that weaken the proxy's guarantees. They are
+// allowed, but every pod start says so.
+func warnings(cfg *config.Config) []string {
+	var out []string
+	if cfg.TLS == nil {
+		out = append(out, "tls is not set: the proxy listener is plain HTTP and relies on the load balancer for TLS")
+	} else if cfg.TLS.ClientCAFile == "" {
+		out = append(out, "tls.client_ca_file is not set: clients are authenticated by token only, not mTLS")
+	}
+	if cfg.AllowHTTPUpstreams {
+		out = append(out, "allow_http_upstreams is set: upstream traffic may be unencrypted")
+	}
+	if cfg.ClientTokenPreviousEnv != "" {
+		out = append(out, "client_token_previous_env is set: two tokens are accepted until rotation is finished")
+	}
+	for _, c := range cfg.Connections {
+		if c.Passthrough {
+			out = append(out, fmt.Sprintf("connection %s: passthrough, responses are NOT redacted", c.Name))
+		}
+		if len(c.PathRes) == 0 {
+			out = append(out, fmt.Sprintf("connection %s: no paths allowlist, every upstream path is reachable", c.Name))
+		}
+		var writes []string
+		for _, m := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+			if c.MethodSet[m] {
+				writes = append(writes, m)
+			}
+		}
+		if len(writes) > 0 && len(c.RequestDenyRes) == 0 && len(c.MCPTools) == 0 {
+			out = append(out, fmt.Sprintf("connection %s: allows %s with no request_deny_patterns or mcp_tools", c.Name, strings.Join(writes, ", ")))
+		}
+	}
+	return out
+}
+
+// redactOffline runs the redaction rules over a local file, so MetLife can
+// measure what the rules catch on their own data without it leaving their
+// network. JSON (including NDJSON) is redacted as JSON, anything else as
+// text; non-text input is refused, as the proxy would.
+func redactOffline(configPath, input string, stdout, stderr io.Writer) error {
+	rc, err := config.LoadRedaction(configPath, os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	engine, err := redact.New(*rc)
+	if err != nil {
+		return err
+	}
+	var body []byte
+	if input == "-" {
+		body, err = io.ReadAll(os.Stdin)
+	} else {
+		body, err = os.ReadFile(input)
+	}
+	if err != nil {
+		return err
+	}
+	if !redact.IsText(body) {
+		return fmt.Errorf("%s is not UTF-8 text; the proxy would refuse it (not_text)", input)
+	}
+	st := redact.Stats{}
+	out, err := engine.JSON(body, st)
+	if err != nil {
+		out = engine.Text(body, st)
+	}
+	if _, err := stdout.Write(out); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout)
+	counts, _ := json.Marshal(st)
+	fmt.Fprintf(stderr, "redactions: %d %s\n", st.Total(), counts)
 	return nil
 }

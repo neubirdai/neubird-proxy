@@ -17,7 +17,11 @@ import (
 	"github.com/neubirdai/neubird-proxy/internal/redact"
 )
 
-const token = "neubird-test-token"
+const (
+	token       = "neubird-test-token-0123456789abcdef"
+	scopedToken = "scoped-token-for-one-connection-0123"
+	oldToken    = "previous-token-being-rotated-out-01"
+)
 
 type fixture struct {
 	proxy *httptest.Server
@@ -55,6 +59,8 @@ func newFixture(t *testing.T, yamlTmpl string, handler http.HandlerFunc) *fixtur
 			"SN_USER":               "sn-user",
 			"SN_PASS":               "sn-pass",
 			"REDACTION_HMAC_KEY":    "hmac-key",
+			"SCOPED_TOKEN":          scopedToken,
+			"OLD_TOKEN":             oldToken,
 		}[k]
 		return v, ok
 	})
@@ -77,6 +83,7 @@ func newFixture(t *testing.T, yamlTmpl string, handler http.HandlerFunc) *fixtur
 
 const baseConfig = `
 client_token_env: NEUBIRD_PROXY_TOKEN
+allow_http_upstreams: true
 max_body_bytes: 4096
 upstream_defaults:
   headers:
@@ -85,6 +92,7 @@ connections:
   - name: splunk
     upstream: UPSTREAM/splunk-api
     client_auth: bearer
+    methods: [GET, HEAD, POST, DELETE]
   - name: servicenow
     upstream: UPSTREAM/servicenow
     client_auth: basic
@@ -93,6 +101,7 @@ connections:
     client_auth: header
     client_auth_header: X-NeuBird-Token
     host: maestro.proxy.test
+    methods: [GET, POST]
   - name: direct
     upstream: UPSTREAM
     upstream_basic_auth: {username_env: SN_USER, password_env: SN_PASS}
@@ -148,7 +157,7 @@ func TestRoutingAndCredentialSwap(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d: %s", resp.StatusCode, body)
 	}
-	want := `{"email":"[REDACTED:EMAIL]","svc":"svc@metlife.com","member":"[REDACTED:MEMBER_ID]","password":"[REDACTED:KEY]"}`
+	want := `{"email":"[REDACTED:EMAIL]","svc":"svc@metlife.com","member":"[REDACTED:MEMBER_ID]","password":"[REDACTED:SECRET_ASSIGNMENT]"}`
 	if body != want {
 		t.Fatalf("body\n got %s\nwant %s", body, want)
 	}

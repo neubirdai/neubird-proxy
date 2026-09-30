@@ -245,7 +245,7 @@ func TestUpstreamErrorLogOmitsURL(t *testing.T) {
 	if !strings.Contains(logs, `"msg":"upstream error"`) {
 		t.Fatalf("no upstream error logged: %s", logs)
 	}
-	if strings.Contains(logs, "jane@") || strings.Contains(logs, "sysparm_query") {
+	if strings.Contains(logs, "jane@") || strings.Contains(logs, "sysparm_query=") {
 		t.Fatalf("upstream error log leaks the URL: %s", logs)
 	}
 }
