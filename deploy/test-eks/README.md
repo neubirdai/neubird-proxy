@@ -32,7 +32,8 @@ NeuBird ──(proxy token)──▶ https://neubird-proxy.htm.neubird.ai/splunk
 CTX=arn:aws:eks:us-west-2:443370673207:cluster/eks-htm-prod
 
 # Create the Secret once (prompts for the Splunk token, generates the proxy token):
-read -rsp 'Splunk MCP token: ' SPLUNK_MCP_TOKEN; echo
+# (printf + read -rs works in both zsh and bash; zsh's read -p does not prompt)
+printf 'Splunk MCP token: '; read -rs SPLUNK_MCP_TOKEN; echo; echo "read ${#SPLUNK_MCP_TOKEN} characters"
 kubectl --context $CTX -n neubird-proxy-test create secret generic neubird-proxy \
   --from-literal=NEUBIRD_PROXY_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=SPLUNK_MCP_TOKEN="$SPLUNK_MCP_TOKEN"
