@@ -44,4 +44,7 @@ redaction:
   custom:
     - name: member_id
       regex: "\\bMET[0-9]{9}\\b"
-  mask: label
+  # HMAC tokens: the same value always maps to the same code, so the agent
+  # can correlate events without seeing the value. Key from the Secret.
+  mask: hmac
+  hmac_key_env: REDACTION_HMAC_KEY

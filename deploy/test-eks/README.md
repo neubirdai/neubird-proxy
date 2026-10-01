@@ -18,7 +18,7 @@ NeuBird ──(proxy token)──▶ https://neubird-proxy.htm.neubird.ai/splunk
 | Image | ECR `neubird-proxy` in that account, tags immutable, scanned on push, deployed by digest |
 | Hostname | `neubird-proxy.htm.neubird.ai`, a Route53 CNAME to the cluster's nginx load balancer. The zone that serves `htm.neubird.ai` is in account 810918113647 (profile `neubird`), not the cluster's account, which has an unused zone of the same name |
 | Config | `config.yaml` here, as the ConfigMap `neubird-proxy` |
-| Secret | `neubird-proxy`: `NEUBIRD_PROXY_TOKEN` and `SPLUNK_MCP_TOKEN`, created by hand |
+| Secret | `neubird-proxy`: `NEUBIRD_PROXY_TOKEN`, `SPLUNK_MCP_TOKEN` and `REDACTION_HMAC_KEY` (for `mask: hmac`), created by hand |
 
 ## NeuBird connection settings
 
@@ -45,8 +45,11 @@ CTX=arn:aws:eks:us-west-2:443370673207:cluster/eks-htm-prod
 printf 'Splunk MCP token: '; read -rs SPLUNK_MCP_TOKEN; echo; echo "read ${#SPLUNK_MCP_TOKEN} characters"
 kubectl --context $CTX -n neubird-proxy-test create secret generic neubird-proxy \
   --from-literal=NEUBIRD_PROXY_TOKEN="$(openssl rand -hex 32)" \
+  --from-literal=REDACTION_HMAC_KEY="$(openssl rand -hex 32)" \
   --from-literal=SPLUNK_MCP_TOKEN="$SPLUNK_MCP_TOKEN"
 unset SPLUNK_MCP_TOKEN
+# Changing REDACTION_HMAC_KEY changes every masked code; codes from before
+# and after a change no longer match.
 
 deploy/test-eks/deploy.sh               # build, push, apply, restart
 SKIP_BUILD=1 deploy/test-eks/deploy.sh  # config or manifest change only
