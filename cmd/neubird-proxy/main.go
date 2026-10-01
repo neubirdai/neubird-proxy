@@ -28,9 +28,42 @@ import (
 
 var version = "dev"
 
+// Subcommands run instead of the proxy. The same binary is in the image,
+// so `kubectl exec <pod> -- /neubird-proxy test` runs inside the pod, with
+// its secrets and network.
+var commands = map[string]struct {
+	run   func(args []string, stdout, stderr io.Writer) int
+	usage string
+}{
+	"validate": {cmdValidate, "check a config file, offline or with secrets"},
+	"test":     {cmdTest, "diagnose each connection: DNS, TCP, TLS, a request through the proxy"},
+	"preview":  {cmdPreview, "show a response next to what NeuBird would receive (terminal or HTML)"},
+	"token":    {cmdToken, "generate a random proxy token"},
+	"metrics":  {cmdMetrics, "summarize /metrics output from one or more pods"},
+}
+
+func usage(w io.Writer) {
+	fmt.Fprintf(w, "usage: neubird-proxy [-config path]            run the proxy\n")
+	fmt.Fprintf(w, "       neubird-proxy <command> [flags] [args]   run a tool\n\ncommands:\n")
+	for _, name := range []string{"validate", "test", "preview", "token", "metrics"} {
+		fmt.Fprintf(w, "  %-9s %s\n", name, commands[name].usage)
+	}
+	fmt.Fprintf(w, "\nrun 'neubird-proxy <command> -h' for its flags\n")
+}
+
 func main() {
+	if len(os.Args) > 1 {
+		if c, ok := commands[os.Args[1]]; ok {
+			os.Exit(c.run(os.Args[2:], os.Stdout, os.Stderr))
+		}
+		if a := os.Args[1]; a == "help" || a == "-h" || a == "--help" {
+			usage(os.Stdout)
+			return
+		}
+	}
+	flag.Usage = func() { usage(os.Stderr); fmt.Fprintln(os.Stderr, "\nflags:"); flag.PrintDefaults() }
 	configPath := flag.String("config", "/etc/neubird-proxy/config.yaml", "path to the YAML config")
-	check := flag.Bool("check", false, "validate the config and exit")
+	check := flag.Bool("check", false, "validate the config and exit (see also: neubird-proxy validate)")
 	redactFile := flag.String("redact", "", "redact this file (- for stdin) with the config's rules, print it, and exit; per-rule counts go to stderr")
 	flag.Parse()
 

@@ -219,12 +219,98 @@ variable, or the proxy refuses to start. Unknown YAML fields are errors.
 | `redaction.mask` | `label` | `label` or `hmac` |
 | `redaction.hmac_key_env` | `REDACTION_HMAC_KEY` | Env var holding the HMAC key when `mask: hmac` |
 
-Validate before rolling out a ConfigMap change (v1 has no hot reload; restart
-the pods). The check also prints the same warnings the pod logs at startup:
+Validate before rolling out a ConfigMap change (v1 has no hot reload, so
+restart the pods); see Tools.
+
+## Tools
+
+The proxy binary has subcommands for setting up and checking a deployment.
+They're in the image too, so inside a pod they run with that pod's secrets
+and network, and no credential has to be copied anywhere:
 
 ```bash
-make check-config CONFIG=path/to/config.yaml
-# or, with the real env: neubird-proxy -check -config config.yaml
+kubectl exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml
+```
+
+None of them prints a secret. Outside a pod, they read secrets from the
+environment or from `-env-file secrets.env` (`KEY=VALUE` lines).
+
+**`validate`: is this config right?** Runs every check the proxy runs at
+startup and reports all problems in one go, with the field each is in. It
+then summarizes each connection and prints the startup warnings. With
+`-offline` it needs no secrets: missing variables get placeholders and are
+listed.
+
+```
+$ neubird-proxy validate -offline -config config.yaml
+VALID config.yaml
+
+CONNECTION  UPSTREAM                                 AUTH    METHODS   PATHS  MCP TOOLS  FIELDS      MODE
+splunk      https://int.apis.metlife.com/splunk      bearer  GET,POST  3      -          all         redact
+servicenow  https://int.apis.metlife.com/servicenow  basic   GET,HEAD  2      -          14 allowed  redact
+...
+warnings:
+  - tls is not set: the proxy listener is plain HTTP and relies on the load balancer for TLS
+not checked (offline, placeholders used): APIM_SUBSCRIPTION_KEY, NEUBIRD_PROXY_TOKEN
+```
+
+**`test`: does each connection work?** Checks the network layer by layer
+(DNS, TCP, TLS with the certificate and its expiry), so a failure names
+where it broke. Then it sends a real request through the proxy's own
+handler, as NeuBird would.
+- **For MCP connections** it runs `initialize` and `tools/list`, and
+  compares the server's tools with `mcp_tools`: which are allowed, which are
+  blocked, and which are listed but not offered (a typo or a renamed tool).
+- **For other connections** it sends a GET to the first plain path in
+  `paths`, or `/`. Pick the probe with `-method`, `-path` and `-data`, and
+  see the redacted body with `-show`.
+- **Results** distinguish a refusal by the proxy's own policy from an
+  upstream that rejects its credentials. The exit status is non-zero if any
+  connection fails.
+
+```
+splunk -> https://splunk-e2e.tools.neubird.ai
+  ok    dns        splunk-e2e.tools.neubird.ai -> 20.120.243.98
+  ok    tcp        splunk-e2e.tools.neubird.ai:443 connected in 41ms
+  ok    tls        TLS 1.3, certificate "splunk-e2e.tools.neubird.ai" from "R11", expires in 61 days
+  ok    initialize HTTP 200, application/json, 1290 bytes, 151ms; redactions: none
+  info  server     Splunk_MCP_Server 1.2.1, protocol 2025-06-18
+  ok    tools/list HTTP 200, application/json, 21950 bytes, 234ms; redactions: none
+  ok    tools      9 of 10 server tools allowed: splunk_get_index_info, ...
+  info  tools      blocked by mcp_tools: splunk_run_saved_search
+```
+
+**`preview`: what will NeuBird see?** Shows a response next to what NeuBird
+would receive for it, line by line, with the rules that matched. The sample
+goes through the proxy's real handler, so the output is exactly what
+NeuBird gets, including a refusal (a binary body, say).
+- **The sample** is a file, or with `-live` a response captured through the
+  connection (`-path`, `-method`, `-data`).
+- **`-html report.html`** writes a side-by-side report for a security
+  review. `-html -` writes only the report to stdout, for
+  `kubectl exec … > report.html`.
+- **Both show the original data**, so treat the output as sensitive.
+
+```
+$ neubird-proxy preview -config config.yaml -connection servicenow sample.json
+redactions: field_not_allowed 7, member_id 1
+    6 -       "short_description": "Member portal login fails for MET220019384",
+      +       "short_description": "Member portal login fails for [REDACTED:MEMBER_ID]",
+    7 -       "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) ...",
+      +       "description": "[REDACTED:FIELD]",
+```
+
+**`token`** prints a new random 64-character token:
+`--from-literal=NEUBIRD_PROXY_TOKEN="$(neubird-proxy token)"`.
+
+**`metrics`** sums `/metrics` from one or more pods (URLs, files, or `-`)
+into per-connection tables of requests by status, redactions by rule,
+blocks by reason, and bytes:
+
+```bash
+for p in $(kubectl -n NS get pods -l app=neubird-proxy -o name); do
+  kubectl get --raw /api/v1/namespaces/NS/${p/pod\//pods/}:9090/proxy/metrics
+done | neubird-proxy metrics -
 ```
 
 ## Responses the proxy generates
