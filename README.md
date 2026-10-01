@@ -254,7 +254,8 @@ warnings:
 not checked (offline, placeholders used): APIM_SUBSCRIPTION_KEY, NEUBIRD_PROXY_TOKEN
 ```
 
-**`test`: does each connection work?** Checks the network layer by layer
+**`test`: does each connection work?** (Output below is from the test
+deployment, run in its pod.) Checks the network layer by layer
 (DNS, TCP, TLS with the certificate and its expiry), so a failure names
 where it broke. Then it sends a real request through the proxy's own
 handler, as NeuBird would.
@@ -271,13 +272,15 @@ handler, as NeuBird would.
 ```
 splunk -> https://splunk-e2e.tools.neubird.ai
   ok    dns        splunk-e2e.tools.neubird.ai -> 20.120.243.98
-  ok    tcp        splunk-e2e.tools.neubird.ai:443 connected in 41ms
-  ok    tls        TLS 1.3, certificate "splunk-e2e.tools.neubird.ai" from "R11", expires in 61 days
-  ok    initialize HTTP 200, application/json, 1290 bytes, 151ms; redactions: none
+  ok    tcp        splunk-e2e.tools.neubird.ai:443 connected in 18ms
+  ok    tls        TLS 1.3, certificate "*.tools.neubird.ai" from "Amazon RSA 2048 M01", expires in 106 days
+  ok    initialize HTTP 200, application/json, 154 bytes, 172ms; redactions: none
   info  server     Splunk_MCP_Server 1.2.1, protocol 2025-06-18
-  ok    tools/list HTTP 200, application/json, 21950 bytes, 234ms; redactions: none
-  ok    tools      9 of 10 server tools allowed: splunk_get_index_info, ...
+  ok    tools/list HTTP 200, application/json, 7228 bytes, 325ms; redactions: none
+  ok    tools      9 of 10 server tools allowed: splunk_get_index_info, splunk_get_indexes, ...
   info  tools      blocked by mcp_tools: splunk_run_saved_search
+
+all 1 connections OK
 ```
 
 **`preview`: what will NeuBird see?** Shows a response next to what NeuBird
