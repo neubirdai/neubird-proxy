@@ -360,7 +360,11 @@ func printPreview(w io.Writer, res *previewResult) {
 	if res.refused != "" {
 		fmt.Fprintf(w, "\nCUT: %s. NeuBird would receive the part shown below, then a broken stream.\n", res.refused)
 	}
-	fmt.Fprintf(w, "redactions: %s\n\n", res.rules)
+	fmt.Fprintf(w, "redactions: %s\n", res.rules)
+	if strings.Contains(res.rules, "field_not_allowed") {
+		fmt.Fprintln(w, "            (field_not_allowed: a field not in response_fields, masked whole as [REDACTED:FIELD] before any other rule)")
+	}
+	fmt.Fprint(w, "legend:     - returned by the system   + received by NeuBird\n\n")
 	rs := rows(res)
 	changed := 0
 	for _, r := range rs {

@@ -199,8 +199,12 @@ func TestPreviewSample(t *testing.T) {
 	for _, pat := range []string{
 		`2 -\s+"user": "jane@example\.com"`, `\+\s+"user": "\[REDACTED:EMAIL\]"`,
 		`redactions: email 1, us_ssn 1`, `report written`,
+		`legend:\s+- returned by the system\s+\+ received by NeuBird`,
 	} {
 		matches(t, out, pat)
+	}
+	if strings.Contains(out, "field_not_allowed:") {
+		t.Fatal("field allowlist note shown without a field allowlist")
 	}
 	html, _ := os.ReadFile(report)
 	if strings.Contains(string(html), "<script>alert(1)</script>") {
@@ -373,4 +377,10 @@ func TestPreviewHMACKeyNote(t *testing.T) {
 	if len(codes) != 3 || codes[0][1] != codes[1][1] || codes[0][1] == codes[2][1] {
 		t.Fatalf("codes %v:\n%s", codes, out)
 	}
+}
+
+func TestPreviewExplainsFieldMask(t *testing.T) {
+	cfg := writeFile(t, "config.yaml", "client_token_env: T\nconnections: [{name: api, upstream: 'https://x', response_fields: [id]}]\n")
+	_, out, _ := runCmd(t, cmdPreview, "-config", cfg, writeFile(t, "s.json", `{"id":1,"note":"jane@example.com"}`))
+	matches(t, out, `field_not_allowed: a field not in response_fields, masked whole`)
 }

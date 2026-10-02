@@ -105,7 +105,6 @@ redaction:
     - us_ssn
     - credit_card
     - phone_us
-    - ipv4
     - date_of_birth
   blocked_key_patterns: ["(?i).*ssn.*", "(?i).*password.*", "(?i).*dob.*"]
   custom:

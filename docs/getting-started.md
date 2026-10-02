@@ -140,6 +140,7 @@ receives below:
 
 ```
 redactions: email 1, member_id 1, phone_us 1
+legend:     - returned by the system   + received by NeuBird
 
   ...
     7         "priority": "2",
@@ -179,6 +180,8 @@ you listed still get every rule:
 
 ```
 redactions: field_not_allowed 1, member_id 1
+            (field_not_allowed: a field not in response_fields, masked whole as [REDACTED:FIELD] before any other rule)
+legend:     - returned by the system   + received by NeuBird
     8 -       "short_description": "Member portal login fails for MET220019384",
       +       "short_description": "Member portal login fails for [REDACTED:MEMBER_ID]",
     9 -       "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) reports a login loop since 09:10.",
@@ -225,6 +228,7 @@ With three incidents, two of them from the same caller
 
 ```
 redactions: email 4
+legend:     - returned by the system   + received by NeuBird
     5 -       "short_description": "Login loop for dana.whitfield@example.org",
       +       "short_description": "Login loop for [REDACTED:EMAIL:6dea5e828f9f227f]",
     6 -       "caller_email": "dana.whitfield@example.org"

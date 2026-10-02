@@ -339,6 +339,8 @@ NeuBird gets, including a refusal (a binary body, say).
 ```
 $ neubird-proxy preview -config config.yaml -connection servicenow sample.json
 redactions: field_not_allowed 7, member_id 1
+            (field_not_allowed: a field not in response_fields, masked whole as [REDACTED:FIELD] before any other rule)
+legend:     - returned by the system   + received by NeuBird
     6 -       "short_description": "Member portal login fails for MET220019384",
       +       "short_description": "Member portal login fails for [REDACTED:MEMBER_ID]",
     7 -       "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) ...",
