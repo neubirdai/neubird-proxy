@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const testToken = "tools-test-token-0123456789abcdef0123"
@@ -288,5 +290,68 @@ func matches(t *testing.T, out, pattern string) {
 	t.Helper()
 	if !regexp.MustCompile(pattern).MatchString(out) {
 		t.Errorf("no match for %s in:\n%s", pattern, out)
+	}
+}
+
+func TestNetpol(t *testing.T) {
+	cfg := writeFile(t, "config.yaml", `
+client_token_env: PROXY_TOKEN
+connections:
+  - {name: a, upstream: "https://api.example.com/x"}
+  - {name: b, upstream: "https://api.example.com:8443/y"}
+  - {name: c, upstream: "https://API.example.com/z"}
+  - {name: d, upstream: "https://10.1.2.3"}
+`)
+	code, out, _ := runCmd(t, cmdNetpol, "-config", cfg, "-format", "list")
+	if code != 0 || out != "10.1.2.3:443\napi.example.com:443\napi.example.com:8443\n" {
+		t.Fatalf("list: code %d %q", code, out)
+	}
+
+	code, out, _ = runCmd(t, cmdNetpol, "-config", cfg, "-namespace", "prox")
+	if code != 0 {
+		t.Fatalf("cilium: code %d", code)
+	}
+	var pol struct {
+		Kind     string
+		Metadata struct{ Namespace string }
+		Spec     struct {
+			EndpointSelector struct {
+				MatchLabels map[string]string `yaml:"matchLabels"`
+			} `yaml:"endpointSelector"`
+			Egress []struct {
+				ToFQDNs []struct {
+					MatchName string `yaml:"matchName"`
+				} `yaml:"toFQDNs"`
+				ToCIDR  []string `yaml:"toCIDR"`
+				ToPorts []struct {
+					Ports []struct{ Port, Protocol string }
+					Rules struct {
+						DNS []struct {
+							MatchName string `yaml:"matchName"`
+						} `yaml:"dns"`
+					}
+				} `yaml:"toPorts"`
+			}
+		}
+	}
+	if err := yaml.Unmarshal([]byte(out), &pol); err != nil {
+		t.Fatalf("cilium output is not YAML: %v\n%s", err, out)
+	}
+	if pol.Kind != "CiliumNetworkPolicy" || pol.Metadata.Namespace != "prox" || pol.Spec.EndpointSelector.MatchLabels["app"] != "neubird-proxy" {
+		t.Fatalf("header: %+v", pol)
+	}
+	e := pol.Spec.Egress
+	if len(e) != 4 {
+		t.Fatalf("want DNS + 3 destinations, got %d:\n%s", len(e), out)
+	}
+	if dns := e[0].ToPorts[0].Rules.DNS; len(dns) != 1 || dns[0].MatchName != "api.example.com" {
+		t.Fatalf("dns rules %+v (an IP upstream needs no lookup; names dedupe case-insensitively)", dns)
+	}
+	if e[1].ToCIDR[0] != "10.1.2.3/32" || e[2].ToFQDNs[0].MatchName != "api.example.com" || e[3].ToPorts[0].Ports[0].Port != "8443" {
+		t.Fatalf("destinations:\n%s", out)
+	}
+
+	if code, _, errOut := runCmd(t, cmdNetpol, "-config", cfg, "-format", "nope"); code != 2 || !strings.Contains(errOut, "unknown -format") {
+		t.Fatalf("bad format: %d %s", code, errOut)
 	}
 }

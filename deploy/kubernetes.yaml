@@ -1,6 +1,29 @@
 # neubird-proxy for MetLife AKS. Apply after creating the Secret and
 # ConfigMap (see README). Replace the image, namespace and CIDRs marked
-# CHANGE ME.
+# CHANGE ME. See README, Kubernetes hardening, for what each part enforces
+# and for hostname-level egress (neubird-proxy netpol).
+#
+# The proxy gets its own namespace: Pod Security "restricted" is enforced
+# there, and the default-deny policies at the end apply to everything in it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neubird               # CHANGE ME
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# No Role or RoleBinding references this account: the proxy never talks
+# to the Kubernetes API, and its token is not mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: neubird-proxy
+  namespace: neubird          # CHANGE ME
+automountServiceAccountToken: false
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +44,7 @@ spec:
         prometheus.io/port: "9090"
         prometheus.io/path: /metrics
     spec:
+      serviceAccountName: neubird-proxy
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -113,3 +137,14 @@ spec:
         - namespaceSelector: {}
           podSelector:
             matchLabels: {k8s-app: kube-dns}
+---
+# Default deny for the namespace: anything not allowed above (another pod
+# placed here later, a debug pod) gets no traffic in or out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: neubird          # CHANGE ME
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]

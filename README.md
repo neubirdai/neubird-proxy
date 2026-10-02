@@ -59,6 +59,45 @@ certificate from that CA before any of this runs (mutual TLS).
 connection MetLife has cleared, such as Elastic. Every pod start logs a
 warning for it.
 
+## What NeuBird can reach
+
+A request through the proxy can only reach URLs under a configured
+connection's base URL, and with `paths` set, only the paths listed. Three
+layers enforce this:
+
+1. **The destination never comes from the request.** Each connection's
+   upstream is a fixed base URL in the config. A request only picks a
+   connection by name: the first path segment, or a configured `host:`. An
+   unknown name gets `404 unknown_connection` and nothing is sent anywhere.
+   A full URL in the request line, the `Host` header, or `X-Forwarded-Host`
+   (stripped) never changes the host, port or scheme. So the proxy can't be
+   used to reach other internal systems.
+2. **A request can't leave its connection's base path.** The rest of the
+   path is appended to the base URL. `.` and `..` segments are refused with
+   `400 invalid_path`, including percent-encoded, double-encoded and
+   backslash forms. Without that, `/splunk/../servicenow/` could be resolved
+   by APIM into a different API. Upstream redirects (`Location`) are
+   rewritten to point back through the proxy.
+3. **`paths`, `methods` and `mcp_tools` restrict what's allowed within the
+   connection.**
+   - `paths` patterns must match the whole path after the prefix (they're
+     anchored), or the request gets `403 path_not_allowed`.
+   - `methods` defaults to GET and HEAD.
+   - `mcp_tools` limits which tools a `tools/call` may name.
+
+**Without `paths`, every URL under the base URL is reachable**, with the
+allowed methods. Take a Splunk connection with base
+`https://apim/splunk` and no `paths`: it can read any Splunk REST endpoint
+behind that APIM route, not just search results. The pod logs a warning for
+this at every start, and `neubird-proxy validate` shows it. Production
+configs should list `paths` from an inventory of what each connector calls
+(see the security plan, item 1).
+
+**The network should enforce this too.** The proxy decides which paths,
+methods and tools are allowed. Which hosts the pod can reach at all should
+also be enforced below it, so a fault in one layer is still contained by
+the other. See Kubernetes hardening.
+
 ## Redaction
 
 - **JSON** is walked token by token, so key order and number precision
@@ -306,6 +345,10 @@ redactions: field_not_allowed 7, member_id 1
 **`token`** prints a new random 64-character token:
 `--from-literal=NEUBIRD_PROXY_TOKEN="$(neubird-proxy token)"`.
 
+**`netpol`** generates egress rules that allow only the configured
+upstreams: a CiliumNetworkPolicy, a NetworkPolicy, or a host list for a
+firewall. See Kubernetes hardening.
+
 **`metrics`** sums `/metrics` from one or more pods (URLs, files, or `-`)
 into per-connection tables of requests by status, redactions by rule,
 blocks by reason, and bytes:
@@ -403,6 +446,55 @@ against the 512 MiB memory limit. Raise both together. Streamed responses
 hold one document at a time and count against the cap only while their first
 document is decoded. Redaction is single-threaded per response; see the plan
 for the throughput work.
+
+## Kubernetes hardening
+
+`deploy/kubernetes.yaml` enforces these at the cluster level, independently
+of the proxy's own checks:
+
+| Control | What it enforces |
+|---|---|
+| Own namespace, Pod Security `restricted` | The cluster rejects any pod there that runs as root, escalates privileges, keeps Linux capabilities, mounts host paths or skips seccomp |
+| Pod security context | Non-root user 65532, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp |
+| Service account | A dedicated one with no Role bindings, and its token isn't mounted: the proxy can't talk to the Kubernetes API |
+| `default-deny` NetworkPolicy | Nothing in the namespace sends or receives traffic unless another policy allows it |
+| `neubird-proxy` NetworkPolicy | In: the proxy port from the load balancer's range only, the admin port (health, metrics) from monitoring only. Out: the APIM range on 443, plus DNS |
+| Resources | A 512 MiB memory limit, matched to `max_concurrent_buffered` (see Latency and capacity) |
+
+**Restricting egress by hostname.** A standard NetworkPolicy matches IP
+ranges and ports, not hostnames. The policy above allows the APIM CIDR,
+which may be wider than the hosts the proxy needs. To allow exactly the
+configured upstream hosts, generate the rules from the config:
+
+```bash
+neubird-proxy netpol -config config.yaml -namespace neubird                    # CiliumNetworkPolicy (default)
+neubird-proxy netpol -config config.yaml -namespace neubird -format kubernetes # NetworkPolicy with the hosts' current IPs
+neubird-proxy netpol -config config.yaml -format list                          # host:port lines for a firewall
+```
+
+- **Cilium**, including Azure CNI powered by Cilium: the generated policy
+  allows only the upstream hostnames and ports. It also lets the pod
+  *resolve* only those names, so a lookup of anything else fails.
+- **No FQDN-aware CNI:** `-format kubernetes` resolves the hosts now and
+  allows their current addresses. That suits a private APIM endpoint with
+  stable IPs. Regenerate it when they change; for anything behind a CDN,
+  use hostname rules instead.
+- **Azure Firewall application rules, AWS Network Firewall, or Route 53
+  Resolver DNS Firewall:** `-format list` prints what to allow.
+
+Regenerate the policy whenever connections change, so the network and the
+proxy agree on what's reachable.
+
+**Paths stay with the proxy.** The upstreams are HTTPS, so the network
+can't see request paths without breaking TLS to inspect it. So the network
+enforces which hosts the pod can reach, and the proxy enforces which paths,
+methods and MCP tools are allowed on them (see What NeuBird can reach).
+Either layer still contains the other if one is misconfigured.
+
+**Image admission.** Deploy by digest, not tag. Enforce signed images, or
+images from MetLife's own registry, with their admission policy (for
+example Kyverno, Gatekeeper, or Azure Policy for AKS); see the security
+plan, item 5.
 
 ## Deploy
 

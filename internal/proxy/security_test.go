@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -310,6 +312,44 @@ func TestConfigRejectsWeakSettings(t *testing.T) {
 			_, err := config.Parse([]byte(c.yaml), envs)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+// The destination comes from the config only: an absolute URL in the
+// request line, a forged Host or X-Forwarded-Host must not move it.
+func TestRequestCannotChooseDestination(t *testing.T) {
+	f := newFixture(t, baseConfig, jsonHandler(`{}`))
+	addr := strings.TrimPrefix(f.proxy.URL, "http://")
+	for name, raw := range map[string]string{
+		"absolute url": "GET http://evil.example/splunk/x HTTP/1.1\r\nHost: evil.example\r\n",
+		"forged host":  "GET /splunk/x HTTP/1.1\r\nHost: 169.254.169.254\r\n",
+		"xfh":          "GET /splunk/x HTTP/1.1\r\nHost: " + addr + "\r\nX-Forwarded-Host: evil.example\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			io.WriteString(conn, raw+"Authorization: Bearer "+token+"\r\nConnection: close\r\n\r\n")
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			up := f.lastReq()
+			if up.URL.Path != "/splunk-api/x" || up.Header.Get("X-Forwarded-Host") != "" {
+				t.Fatalf("upstream got path %q, X-Forwarded-Host %q", up.URL.Path, up.Header.Get("X-Forwarded-Host"))
+			}
+			// The fixture's upstream is the only server that could have
+			// answered; its Host is the configured upstream's.
+			if strings.Contains(up.Host, "evil") || strings.Contains(up.Host, "169.254") {
+				t.Fatalf("upstream Host %q", up.Host)
 			}
 		})
 	}

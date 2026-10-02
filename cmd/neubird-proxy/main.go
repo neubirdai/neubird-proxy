@@ -40,12 +40,13 @@ var commands = map[string]struct {
 	"preview":  {cmdPreview, "show a response next to what NeuBird would receive (terminal or HTML)"},
 	"token":    {cmdToken, "generate a random proxy token"},
 	"metrics":  {cmdMetrics, "summarize /metrics output from one or more pods"},
+	"netpol":   {cmdNetpol, "generate egress network rules allowing only the configured upstreams"},
 }
 
 func usage(w io.Writer) {
 	fmt.Fprintf(w, "usage: neubird-proxy [-config path]            run the proxy\n")
 	fmt.Fprintf(w, "       neubird-proxy <command> [flags] [args]   run a tool\n\ncommands:\n")
-	for _, name := range []string{"validate", "test", "preview", "token", "metrics"} {
+	for _, name := range []string{"validate", "test", "preview", "token", "metrics", "netpol"} {
 		fmt.Fprintf(w, "  %-9s %s\n", name, commands[name].usage)
 	}
 	fmt.Fprintf(w, "\nrun 'neubird-proxy <command> -h' for its flags\n")
