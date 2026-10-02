@@ -6,6 +6,9 @@ for, and masks PII and secrets in every response before the data leaves
 MetLife. Design: *MetLife Redaction Proxy: Engineering Proposal* (Sep 30,
 2026). Open security work: [docs/security-plan.md](docs/security-plan.md).
 
+**New here? Start with [docs/getting-started.md](docs/getting-started.md)**:
+config, deploy, test and check the masking, in about an hour.
+
 ```
 NeuBird ──(proxy token)──▶ neubird-proxy ──(APIM subscription key)──▶ APIM (internal) ──(Key Vault creds)──▶ Splunk / Maestro / ServiceNow
                              │ allowlists requests, redacts responses
