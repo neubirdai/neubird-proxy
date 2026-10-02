@@ -106,7 +106,7 @@ func cmdPreview(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	res.source, res.connection, res.mask = source, conn.Name, cfg.Redaction.Mask
-	if cfg.Redaction.Mask == config.MaskHMAC && len(sec.missingNames()) > 0 {
+	if cfg.Redaction.Mask == config.MaskHMAC && sec.missing[cfg.Redaction.HMACKeyEnv] {
 		res.notes = append(res.notes, "mask: hmac with a placeholder key: codes differ from production (pass the real key with -env-file)")
 	}
 

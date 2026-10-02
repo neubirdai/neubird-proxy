@@ -355,3 +355,22 @@ connections:
 		t.Fatalf("bad format: %d %s", code, errOut)
 	}
 }
+
+func TestPreviewHMACKeyNote(t *testing.T) {
+	cfg := writeFile(t, "config.yaml", "client_token_env: PROXY_TOKEN\nconnections: [{name: api, upstream: 'https://x'}]\n"+
+		"redaction: {mask: hmac, hmac_key_env: HMAC_KEY}\n")
+	sample := writeFile(t, "s.json", `{"a":"jane@example.com","b":"jane@example.com","c":"bob@example.com"}`)
+	_, out, _ := runCmd(t, cmdPreview, "-config", cfg, sample)
+	if !strings.Contains(out, "placeholder key") {
+		t.Fatalf("no note without the key:\n%s", out)
+	}
+	// Key supplied, token still missing: no note, and stable codes.
+	_, out, _ = runCmd(t, cmdPreview, "-config", cfg, "-env-file", writeFile(t, "k.env", "HMAC_KEY=k1\n"), sample)
+	if strings.Contains(out, "placeholder key") {
+		t.Fatalf("note despite the key:\n%s", out)
+	}
+	codes := regexp.MustCompile(`\[REDACTED:EMAIL:([0-9a-f]{16})\]`).FindAllStringSubmatch(out, -1)
+	if len(codes) != 3 || codes[0][1] != codes[1][1] || codes[0][1] == codes[2][1] {
+		t.Fatalf("codes %v:\n%s", codes, out)
+	}
+}

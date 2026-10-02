@@ -182,6 +182,71 @@ redactions: field_not_allowed 1, member_id 1
 
 Repeat until the output is what you're comfortable sending to NeuBird.
 
+### Optional: keep masked values linkable (HMAC)
+
+By default every masked value becomes the same label: every email is
+`[REDACTED:EMAIL]`. That hides who's involved, but also whether two events
+involve the *same* person, host or account, which often matters for finding
+a root cause. "The same user hit this error five times" and "five users hit
+it once" call for different fixes.
+
+HMAC masking keeps that link without revealing the value. Each value is
+replaced by a code derived from the value and a secret key that stays in
+your cluster:
+- **The same value always gets the same code,** in every response, on
+  every pod, and across restarts, as long as the key doesn't change.
+- **Different values get different codes.**
+- **Encoded forms of a value get its code too.** An email inside a
+  URL-encoded log line gets the same code as the plain address.
+
+Turn it on in `redaction`:
+
+```yaml
+redaction:
+  mask: hmac
+  hmac_key_env: REDACTION_HMAC_KEY
+```
+
+To preview with the real codes, put the key in an env file. Without it,
+`preview` uses a placeholder key and says so:
+
+```bash
+printf 'REDACTION_HMAC_KEY=%s\n' "$(np token)" > hmac.env   # keep this file safe; step 4 stores the key
+np preview -config config.yaml -env-file hmac.env -connection servicenow incidents.json
+```
+
+With three incidents, two of them from the same caller:
+
+```
+redactions: email 4
+    5 -       "short_description": "Login loop for dana.whitfield@example.org",
+      +       "short_description": "Login loop for [REDACTED:EMAIL:6dea5e828f9f227f]",
+    6 -       "caller_email": "dana.whitfield@example.org"
+      +       "caller_email": "[REDACTED:EMAIL:6dea5e828f9f227f]"
+  ...
+   11 -       "caller_email": "bob.lee@example.org"
+      +       "caller_email": "[REDACTED:EMAIL:6e6200bcd74a1314]"
+  ...
+   16 -       "caller_email": "dana.whitfield@example.org"
+      +       "caller_email": "[REDACTED:EMAIL:6dea5e828f9f227f]"
+```
+
+The agent can see that INC0010042 and INC0010051 come from the same
+person, and that INC0010043 is someone else, without learning who either
+is.
+
+Before choosing it, know its limits:
+
+| Limit | What it means |
+|---|---|
+| **The key is as sensitive as the data** | Anyone with the key and the codes can test guesses. For values with few possibilities, such as a 9-digit SSN or a phone number, that means recovering them by trying every one. Keep the key in your secret store, never send it to NeuBird, and restrict who can read the Secret |
+| **It's pseudonymization, not anonymization** | Under many privacy policies, HMAC-masked data still counts as personal data. Check with your privacy team |
+| **Changing the key changes every code** | Codes from before and after a rotation don't match, so the agent loses the link across that point. Rotate deliberately |
+| **Codes are 16 hex characters (64 bits)** | Two different values sharing a code is vanishingly unlikely at any realistic data volume |
+
+If the agent doesn't need to tell values apart, keep the default,
+`mask: label`.
+
 ## 4. Create the secrets
 
 Create the namespace (set your own name), then one Secret holding the proxy
@@ -200,6 +265,18 @@ kubectl -n $NS create secret generic neubird-proxy \
   --from-literal=SN_PASSWORD="$SNPW"
 unset SPLUNK SNPW
 ```
+
+If you chose HMAC masking, add the key from `hmac.env` too, then delete
+the file:
+
+```bash
+kubectl -n $NS patch secret neubird-proxy --type merge \
+  -p "{\"stringData\":{\"REDACTION_HMAC_KEY\":\"$(sed -n 's/^REDACTION_HMAC_KEY=//p' hmac.env)\"}}"
+rm hmac.env
+```
+
+The proxy refuses to start with `mask: hmac` and no key, so a missing key
+shows up immediately rather than as wrong codes.
 
 `np token` generates the proxy token, so nobody types it. `read -rs` keeps
 the credentials off the screen and out of your shell history.
@@ -354,7 +431,7 @@ done | np metrics -
   doesn't need to leave.
 - **Lock down egress by hostname** with `np netpol` (README, Kubernetes
   hardening).
-- **Correlate without revealing values:** set `mask: hmac` (README,
-  Redaction), so the same email always gets the same code.
+- **Correlate without revealing values:** if you skipped it in step 3,
+  see the HMAC section there.
 - **Rotate the token** without downtime: set `client_token_previous_env` to
   the old token's variable while NeuBird switches over (README, Deploy).
