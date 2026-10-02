@@ -38,7 +38,11 @@ for amd64 only.
 
 ## 1. Write the config
 
-Create `config.yaml`:
+To follow along without your own systems' data, use the files in
+[`docs/examples`](examples/): the config below, and the sample responses
+used in step 3. Run the commands from that directory.
+
+Create `config.yaml` (or start from `docs/examples/config.yaml`):
 
 ```yaml
 listen: ":8443"          # the port NeuBird reaches, behind your load balancer
@@ -124,7 +128,8 @@ in. Fix them and run it again.
 ## 3. See what NeuBird would receive
 
 You can check the masking before anything is deployed. Save a typical
-response from one of your systems as `sample.json`, then:
+response from one of your systems as `sample.json`, or use the synthetic
+ServiceNow incident in `docs/examples/sample.json`, then:
 
 ```bash
 np preview -config config.yaml -connection servicenow sample.json
@@ -215,7 +220,8 @@ printf 'REDACTION_HMAC_KEY=%s\n' "$(np token)" > hmac.env   # keep this file saf
 np preview -config config.yaml -env-file hmac.env -connection servicenow incidents.json
 ```
 
-With three incidents, two of them from the same caller:
+With three incidents, two of them from the same caller
+(`docs/examples/incidents.json`):
 
 ```
 redactions: email 4

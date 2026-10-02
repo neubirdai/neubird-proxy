@@ -1,0 +1,15 @@
+{
+  "result": [
+    {
+      "sys_id": "6816f79cc0a8016401c5a33be04be441",
+      "number": "INC0010042",
+      "state": "2",
+      "priority": "2",
+      "short_description": "Member portal login fails for MET220019384",
+      "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) reports a login loop since 09:10.",
+      "assignment_group": {
+        "display_value": "Digital Identity L2"
+      }
+    }
+  ]
+}

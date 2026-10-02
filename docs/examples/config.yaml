@@ -1,0 +1,34 @@
+listen: ":8443"          # the port NeuBird reaches, behind your load balancer
+admin_listen: ":9090"    # health and metrics, cluster-internal only
+
+# The token NeuBird sends. Secrets never go in this file: the proxy reads
+# them from environment variables, which come from a Kubernetes Secret.
+client_token_env: NEUBIRD_PROXY_TOKEN
+
+connections:
+  # NeuBird calls https://<proxy>/splunk/services/mcp
+  - name: splunk
+    upstream: https://splunk.example.com
+    client_auth: bearer
+    methods: [POST, DELETE]            # MCP uses POST for every call
+    paths: [/services/mcp]             # nothing else on this host is reachable
+    headers:
+      Authorization: Bearer ${SPLUNK_MCP_TOKEN}   # sent to Splunk, never to NeuBird
+
+  # NeuBird calls https://<proxy>/servicenow/api/now/table/incident...
+  - name: servicenow
+    upstream: https://yourinstance.service-now.com
+    client_auth: basic                 # NeuBird sends its token as a Basic password
+    paths:                             # GET and HEAD only, by default
+      - /api/now/table/(incident|problem|change_request)(/[0-9a-f]{32})?
+    upstream_basic_auth:
+      username_env: SN_USER
+      password_env: SN_PASSWORD
+
+redaction:
+  # All built-in rules are on by default: emails, SSNs, phones, cards, IP
+  # addresses, dates of birth, and secrets such as JWTs and API keys.
+  # Add your own identifier formats:
+  custom:
+    - name: member_id
+      regex: "\\bMET[0-9]{9}\\b"

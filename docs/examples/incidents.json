@@ -1,0 +1,19 @@
+{
+  "result": [
+    {
+      "number": "INC0010042",
+      "short_description": "Login loop for dana.whitfield@example.org",
+      "caller_email": "dana.whitfield@example.org"
+    },
+    {
+      "number": "INC0010043",
+      "short_description": "Password reset requested",
+      "caller_email": "bob.lee@example.org"
+    },
+    {
+      "number": "INC0010051",
+      "short_description": "Login loop again, see INC0010042",
+      "caller_email": "dana.whitfield@example.org"
+    }
+  ]
+}
