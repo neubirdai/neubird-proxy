@@ -95,6 +95,7 @@ type Connection struct {
 	Passthrough      bool              `yaml:"passthrough"`
 	Headers          map[string]string `yaml:"headers"`
 	BasicAuth        *BasicAuth        `yaml:"upstream_basic_auth"`
+	OAuth2           *OAuth2           `yaml:"upstream_oauth2"`
 	// ClientTokenEnv scopes a token to this connection instead of the
 	// top-level one, so one leaked token does not open every backend.
 	ClientTokenEnv      string     `yaml:"client_token_env"`
@@ -140,6 +141,39 @@ type BasicAuth struct {
 
 	Username string `yaml:"-"`
 	Password string `yaml:"-"`
+}
+
+// OAuth2 gets the upstream credential with the OAuth 2.0 client credentials
+// grant (RFC 6749 section 4.4), for a backend that takes short-lived bearer
+// tokens rather than a static key. The proxy holds the client secret; NeuBird
+// never sees it or the tokens minted from it.
+type OAuth2 struct {
+	TokenURL        string   `yaml:"token_url"`
+	ClientIDEnv     string   `yaml:"client_id_env"`
+	ClientSecretEnv string   `yaml:"client_secret_env"`
+	Scopes          []string `yaml:"scopes"`
+	// Params are extra form fields for the token request, such as audience
+	// (Auth0, Okta) or resource (Azure AD v1, RFC 8707).
+	Params map[string]string `yaml:"params"`
+	// AuthStyle is how the client authenticates to the token endpoint:
+	// basic (client_secret_basic, the RFC's default) or body
+	// (client_secret_post), for providers that accept only one.
+	AuthStyle string `yaml:"auth_style"`
+
+	ClientID       string   `yaml:"-"`
+	ClientSecret   string   `yaml:"-"`
+	TokenURLParsed *url.URL `yaml:"-"`
+}
+
+const (
+	OAuth2AuthBasic = "basic"
+	OAuth2AuthBody  = "body"
+)
+
+// oauth2ReservedParams are the token request's own fields, which params must
+// not override.
+var oauth2ReservedParams = map[string]bool{
+	"grant_type": true, "client_id": true, "client_secret": true, "scope": true,
 }
 
 type Redaction struct {
@@ -326,6 +360,42 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		if conn.BasicAuth != nil {
 			conn.BasicAuth.Username = env(where+": upstream_basic_auth.username_env", conn.BasicAuth.UsernameEnv)
 			conn.BasicAuth.Password = env(where+": upstream_basic_auth.password_env", conn.BasicAuth.PasswordEnv)
+		}
+
+		if o := conn.OAuth2; o != nil {
+			if conn.BasicAuth != nil {
+				fail("%s: upstream_oauth2 and upstream_basic_auth both set the upstream Authorization header; use one", where)
+			}
+			for k := range conn.ResolvedHeaders {
+				if http.CanonicalHeaderKey(k) == "Authorization" {
+					fail("%s: upstream_oauth2 sets the upstream Authorization header; remove it from headers", where)
+				}
+			}
+			tu, err := url.Parse(o.TokenURL)
+			switch {
+			case o.TokenURL == "":
+				fail("%s: upstream_oauth2.token_url is required", where)
+			case err != nil || (tu.Scheme != "https" && tu.Scheme != "http") || tu.Host == "":
+				fail("%s: upstream_oauth2.token_url must be an absolute http(s) URL", where)
+			case tu.Scheme == "http" && !c.AllowHTTPUpstreams:
+				// The client secret travels in this request.
+				fail("%s: upstream_oauth2.token_url is plain http; use https or set allow_http_upstreams", where)
+			default:
+				o.TokenURLParsed = tu
+			}
+			o.ClientID = env(where+": upstream_oauth2.client_id_env", o.ClientIDEnv)
+			o.ClientSecret = env(where+": upstream_oauth2.client_secret_env", o.ClientSecretEnv)
+			if o.AuthStyle == "" {
+				o.AuthStyle = OAuth2AuthBasic
+			}
+			if o.AuthStyle != OAuth2AuthBasic && o.AuthStyle != OAuth2AuthBody {
+				fail("%s: upstream_oauth2.auth_style must be basic or body", where)
+			}
+			for k := range o.Params {
+				if oauth2ReservedParams[k] {
+					fail("%s: upstream_oauth2.params: %s is set by the proxy", where, k)
+				}
+			}
 		}
 
 		methods := conn.Methods

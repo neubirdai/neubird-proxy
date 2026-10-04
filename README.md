@@ -253,6 +253,12 @@ variable, or the proxy refuses to start. Unknown YAML fields are errors.
 | `connections[].mcp_tools` | none | Tools a `tools/call` may name; needs `POST` in `methods` |
 | `connections[].headers` | none | Per-connection upstream headers, overriding the defaults |
 | `connections[].upstream_basic_auth` | none | `{username_env, password_env}` injected as upstream Basic auth |
+| `connections[].upstream_oauth2` | none | Get the upstream credential with the OAuth 2.0 client credentials grant; see Upstream OAuth |
+| `connections[].upstream_oauth2.token_url` | required | The provider's token endpoint; https unless `allow_http_upstreams` |
+| `connections[].upstream_oauth2.client_id_env`, `client_secret_env` | required | Env vars with the client ID and secret |
+| `connections[].upstream_oauth2.scopes` | none | Sent as the space-separated `scope` |
+| `connections[].upstream_oauth2.params` | none | Extra token request fields, such as `audience` or `resource` |
+| `connections[].upstream_oauth2.auth_style` | `basic` | `basic` (client_secret_basic) or `body` (client_secret_post) |
 | `connections[].passthrough` | `false` | Skip redaction and fail-closed checks for this connection |
 | `redaction.builtins` | default set | Built-in rules, in precedence order |
 | `redaction.blocked_key_patterns` | none | RE2 patterns matched against JSON keys; every value under a matching key is masked |
@@ -364,6 +370,46 @@ for p in $(kubectl -n NS get pods -l app=neubird-proxy -o name); do
 done | neubird-proxy metrics -
 ```
 
+## Upstream OAuth
+
+For a backend that takes short-lived OAuth tokens instead of a static key,
+`upstream_oauth2` has the proxy get them itself with the client credentials
+grant. The client secret stays in the proxy's Secret, and NeuBird never sees
+it or the tokens.
+
+```yaml
+  - name: servicenow
+    upstream: https://acme.service-now.com
+    upstream_oauth2:
+      token_url: https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token
+      client_id_env: SN_CLIENT_ID
+      client_secret_env: SN_CLIENT_SECRET
+      scopes: [https://acme.service-now.com/.default]
+      # params: {audience: https://api.example.com}   # Auth0, Okta
+      # auth_style: body                             # if the provider rejects Basic
+```
+
+- **Caching:** each connection's token is cached and renewed 60 seconds
+  before `expires_in` (halfway, for lifetimes of two minutes or less, and
+  after 5 minutes when no `expires_in` is given). Concurrent requests wait
+  for one fetch.
+- **401 retry:** if the upstream answers 401 to a cached token (revoked,
+  or expired early), the proxy gets a new one and resends the request
+  once, body included. A 401 to a token just fetched is passed on, since
+  that is a scope or permission problem.
+- **Failures:** if no token can be obtained, NeuBird gets
+  `502 upstream_auth_failed`. Neither the response nor the log carries the
+  provider's `error_description`, which some providers fill with the
+  request's credentials.
+- **Validation and egress:** `validate` names each connection's token
+  endpoint, and `netpol` includes its host, so the egress policy lets the
+  pod reach it.
+- **Exclusive:** it replaces `upstream_basic_auth` and any `Authorization`
+  in `headers`; setting both is a config error.
+- **Not covered:** grants with a user (authorization code, device code)
+  need a consent flow and refresh-token storage, which the proxy doesn't
+  have.
+
 ## Responses the proxy generates
 
 Connectors see these in addition to upstream responses. Upstream error
@@ -382,6 +428,7 @@ too. Every response carries `X-Request-Id`.
 | 413 | `request_too_large` | Request body over `max_body_bytes` |
 | 429 | `rate_limited` | Connection rate limit exceeded; `Retry-After: 1` |
 | 502 | `redaction_blocked` | Fail closed; `reason` is one of `body_too_large`, `not_text`, `unsupported_content_type`, `unsupported_content_encoding`, `bad_gzip`, `partial_content`, `upgrade_not_supported`, `not_json` (with `response_fields`) |
+| 502 | `upstream_auth_failed` | An `upstream_oauth2` token could not be obtained; `reason` gives the token endpoint's HTTP status and OAuth error code, never a credential |
 | 502 | `upstream_unavailable` | Upstream unreachable or the request to it failed; the cause is logged, not returned |
 | 503 | `overloaded` | `max_concurrent_requests` reached; `Retry-After: 1` |
 

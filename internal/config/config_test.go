@@ -93,6 +93,66 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
+const oauthConn = `
+client_token_env: TOKEN
+connections:
+  - name: api
+    upstream: https://api.example.com
+    upstream_oauth2:
+      token_url: TOKEN_URL
+      client_id_env: OAUTH_ID
+      client_secret_env: OAUTH_SECRET
+      scopes: [a, b]
+      params: {audience: x}
+EXTRA`
+
+func oauthYAML(tokenURL, extra string) string {
+	return strings.NewReplacer("TOKEN_URL", tokenURL, "EXTRA", extra).Replace(oauthConn)
+}
+
+func TestParseOAuth2(t *testing.T) {
+	c, err := Parse([]byte(oauthYAML("https://login.example.com/oauth2/token", "")), env(map[string]string{
+		"TOKEN": tok, "OAUTH_ID": "id", "OAUTH_SECRET": "secret",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := c.Connections[0].OAuth2
+	if o.ClientID != "id" || o.ClientSecret != "secret" || o.AuthStyle != OAuth2AuthBasic ||
+		o.TokenURLParsed.Host != "login.example.com" || len(o.Scopes) != 2 || o.Params["audience"] != "x" {
+		t.Fatalf("oauth2: %+v", o)
+	}
+}
+
+func TestParseOAuth2Errors(t *testing.T) {
+	base := map[string]string{"TOKEN": tok, "OAUTH_ID": "id", "OAUTH_SECRET": "secret", "SN_USER": "u", "SN_PASS": "p"}
+	const tu = "https://login.example.com/token"
+	cases := map[string]struct {
+		yaml string
+		env  map[string]string
+		want string
+	}{
+		"missing token url":  {oauthYAML("", ""), base, "token_url is required"},
+		"relative token url": {oauthYAML("/token", ""), base, "token_url must be an absolute"},
+		"http token url":     {oauthYAML("http://login.example.com/token", ""), base, "token_url is plain http"},
+		"missing secret env": {oauthYAML(tu, ""), without(base, "OAUTH_SECRET"), "OAUTH_SECRET is not set"},
+		"bad auth style":     {strings.Replace(oauthYAML(tu, ""), "      scopes:", "      auth_style: jwt\n      scopes:", 1), base, "auth_style must be basic or body"},
+		"reserved param":     {strings.Replace(oauthYAML(tu, ""), "{audience: x}", "{grant_type: password}", 1), base, "grant_type is set by the proxy"},
+		"with basic auth": {oauthYAML(tu, "    upstream_basic_auth: {username_env: SN_USER, password_env: SN_PASS}\n"), base,
+			"upstream_oauth2 and upstream_basic_auth"},
+		"with authorization header": {oauthYAML(tu, "    headers: {authorization: Bearer static}\n"), base,
+			"remove it from headers"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(c.yaml), env(c.env))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want containing %q", err, c.want)
+			}
+		})
+	}
+}
+
 func without(m map[string]string, k string) map[string]string {
 	out := map[string]string{}
 	for kk, v := range m {

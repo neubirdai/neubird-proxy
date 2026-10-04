@@ -89,6 +89,13 @@ connections:
   #   host: maestro.proxy.metlife.com
   # Backend not fronted by APIM: inject its credential from the Secret.
   #   upstream_basic_auth: {username_env: SN_USER, password_env: SN_PASSWORD}
+  # Or, for a backend that takes OAuth tokens, get them with the client
+  # credentials grant (see README, Upstream OAuth):
+  #   upstream_oauth2:
+  #     token_url: https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token
+  #     client_id_env: SN_CLIENT_ID
+  #     client_secret_env: SN_CLIENT_SECRET
+  #     scopes: [https://<instance>.service-now.com/.default]
 
 redaction:
   # Omit builtins to enable the full default set. windows_account is opt-in.

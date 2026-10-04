@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -77,8 +78,7 @@ type destination struct {
 // connections that use it.
 func destinations(cfg *config.Config) []destination {
 	byKey := map[string]*destination{}
-	for _, c := range cfg.Connections {
-		u := c.UpstreamURL
+	add := func(u *url.URL, conn string) {
 		port := u.Port()
 		if port == "" {
 			port = map[string]string{"https": "443", "http": "80"}[u.Scheme]
@@ -88,7 +88,14 @@ func destinations(cfg *config.Config) []destination {
 		if byKey[k] == nil {
 			byKey[k] = &destination{host: host, port: port, ip: net.ParseIP(host) != nil}
 		}
-		byKey[k].conns = append(byKey[k].conns, c.Name)
+		byKey[k].conns = append(byKey[k].conns, conn)
+	}
+	for _, c := range cfg.Connections {
+		add(c.UpstreamURL, c.Name)
+		// The pod must also reach the token endpoint, usually another host.
+		if c.OAuth2 != nil && c.OAuth2.TokenURLParsed != nil {
+			add(c.OAuth2.TokenURLParsed, c.Name+" (oauth2 token)")
+		}
 	}
 	var out []destination
 	for _, d := range byKey {

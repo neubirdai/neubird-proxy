@@ -82,6 +82,16 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, c.Upstream, c.ClientAuth, methods, paths, tools, fields, mode)
 	}
 	tw.Flush()
+	for _, c := range cfg.Connections {
+		if o := c.OAuth2; o != nil && o.TokenURLParsed != nil {
+			scopes := "none"
+			if len(o.Scopes) > 0 {
+				scopes = strings.Join(o.Scopes, " ")
+			}
+			fmt.Fprintf(stdout, "\nupstream oauth2: %s gets tokens from %s (client credentials, auth_style %s, scopes: %s)",
+				c.Name, o.TokenURLParsed.Host, o.AuthStyle, scopes)
+		}
+	}
 	fmt.Fprintf(stdout, "\nredaction: mask=%s, rules: %s\n", cfg.Redaction.Mask, strings.Join(engine.RuleNames(), ", "))
 
 	if ws := warnings(cfg); len(ws) > 0 {
