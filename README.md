@@ -62,6 +62,50 @@ certificate from that CA before any of this runs (mutual TLS).
 connection MetLife has cleared, such as Elastic. Every pod start logs a
 warning for it.
 
+## Outbound tunnel (optional)
+
+With a `tunnel:` section, the proxy also connects *out* to NeuBird relays
+over mutual TLS, and NeuBird's requests arrive over those connections. With
+`listen: "off"`, nothing is exposed inbound at all; the customer opens one
+outbound port to the relay hostnames.
+
+Requests that arrive through the tunnel go through exactly the same path as
+inbound ones: token, allowlists, redaction, audit (marked `via: tunnel`).
+Protocol: [docs/tunnel-protocol.md](docs/tunnel-protocol.md). Design:
+[docs/outbound-tunnel-design.md](docs/outbound-tunnel-design.md).
+
+```yaml
+listen: "off"                 # tunnel only: no inbound listener
+tunnel:
+  relays: [tunnel-0.neubird.ai:443, tunnel-1.neubird.ai:443]
+  cert_file: /etc/neubird-proxy/tunnel/tls.crt      # signed by NeuBird
+  key_file: /etc/neubird-proxy/tunnel/tls.key       # generated here, never sent
+  ca_file: /etc/neubird-proxy/tunnel/relay-ca.crt   # pins the relays' CA
+  connections_per_relay: 1
+```
+
+Getting the certificate:
+1. Run `neubird-proxy csr -tenant <tenant> -proxy <name>`. It writes
+   `tunnel.key`, which stays with you, and `tunnel.csr`.
+2. Send NeuBird the CSR. NeuBird returns the signed certificate and the
+   relay CA.
+3. Put all three in the proxy's Secret.
+
+`validate` checks the files and shows the tunnel identity and certificate
+expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
+`netpol` includes the relays in the egress rules.
+
+**Behavior:**
+- Each pod keeps `connections_per_relay` tunnels to every relay.
+- A dropped tunnel reconnects with exponential backoff (1 s to 60 s, with
+  jitter).
+- An outbound HTTP proxy from `HTTPS_PROXY` or `NO_PROXY` is used with
+  `CONNECT`.
+- Shutdown stops new requests and lets in-flight ones finish.
+- Metrics: `neubird_proxy_tunnels{relay}` (connected now),
+  `neubird_proxy_tunnel_connects_total{relay,result}`, and
+  `neubird_proxy_tunnel_cert_expiry_days`.
+
 ## What NeuBird can reach
 
 A request through the proxy can only reach URLs under a configured
@@ -226,7 +270,7 @@ variable, or the proxy refuses to start. Unknown YAML fields are errors.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `listen` | `:8443` | NeuBird-facing listener |
+| `listen` | `:8443` | NeuBird-facing listener; `off` for tunnel only |
 | `admin_listen` | `:9090` | Health and metrics listener |
 | `tls.cert_file`, `tls.key_file` | none | Terminate TLS in the pod; both are required if `tls` is set |
 | `tls.client_ca_file` | none | Require client certificates from this PEM CA bundle (mutual TLS) |
@@ -254,6 +298,10 @@ variable, or the proxy refuses to start. Unknown YAML fields are errors.
 | `connections[].headers` | none | Per-connection upstream headers, overriding the defaults |
 | `connections[].upstream_basic_auth` | none | `{username_env, password_env}` injected as upstream Basic auth |
 | `connections[].passthrough` | `false` | Skip redaction and fail-closed checks for this connection |
+| `tunnel.relays` | none | Relay `host:port` addresses; setting `tunnel` enables the outbound tunnel |
+| `tunnel.cert_file`, `tunnel.key_file` | required with `tunnel` | Tunnel client certificate (signed by NeuBird) and its key (from `neubird-proxy csr`) |
+| `tunnel.ca_file` | required with `tunnel` | CA that signs the relays' certificates, pinned |
+| `tunnel.connections_per_relay` | 1 | Tunnels each pod keeps to each relay (1 to 8) |
 | `redaction.builtins` | default set | Built-in rules, in precedence order |
 | `redaction.blocked_key_patterns` | none | RE2 patterns matched against JSON keys; every value under a matching key is masked |
 | `redaction.custom[]` | none | `{name, regex}` value rules, applied after the builtins |
@@ -346,6 +394,9 @@ legend:     - returned by the system   + received by NeuBird
     7 -       "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) ...",
       +       "description": "[REDACTED:FIELD]",
 ```
+
+**`csr`** generates the tunnel's private key and a certificate signing
+request for NeuBird to sign (see Outbound tunnel).
 
 **`token`** prints a new random 64-character token:
 `--from-literal=NEUBIRD_PROXY_TOKEN="$(neubird-proxy token)"`.
@@ -527,7 +578,9 @@ To rotate a token:
 - CI (`.github/workflows/ci.yml`) runs lint, race tests, `govulncheck`, a
   fuzz pass, the example-config check, the image build, and the SBOM. Its
   actions are pinned by commit SHA.
-- Dependencies are the Go standard library and `gopkg.in/yaml.v3`.
+- Dependencies are the Go standard library, `gopkg.in/yaml.v3`, and
+  `golang.org/x/net` (from the Go team; HTTP/2 and outbound proxy settings
+  for the tunnel).
 - Image signing and a MetLife-side build are in the plan.
 
 ## Develop

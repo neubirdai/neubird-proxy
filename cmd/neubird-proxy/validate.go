@@ -11,6 +11,7 @@ import (
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/redact"
+	"github.com/neubirdai/neubird-proxy/internal/tunnel"
 )
 
 func contains(list []string, s string) bool { return slices.Contains(list, s) }
@@ -83,6 +84,24 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	tw.Flush()
 	fmt.Fprintf(stdout, "\nredaction: mask=%s, rules: %s\n", cfg.Redaction.Mask, strings.Join(engine.RuleNames(), ", "))
+	if t := cfg.Tunnel; t != nil {
+		inbound := "inbound listener on " + cfg.Listen
+		if cfg.Listen == config.ListenOff {
+			inbound = "no inbound listener"
+		}
+		fmt.Fprintf(stdout, "\ntunnel: %d relay(s) x %d connection(s), %s\n", len(t.Relays), t.ConnectionsPerRelay, inbound)
+		if *offline {
+			fmt.Fprintln(stdout, "  certificate, key and CA files not checked (offline)")
+		} else if id, err := tunnel.Load(t); err != nil {
+			fmt.Fprintf(stdout, "INVALID tunnel: %v\n", err)
+			return 1
+		} else {
+			fmt.Fprintf(stdout, "  identity: tenant %s, proxy %s; certificate expires in %d days\n", id.Tenant, id.Proxy, int(id.DaysLeft()))
+			if id.DaysLeft() < 30 {
+				fmt.Fprintln(stdout, "  warning: renew the tunnel certificate soon")
+			}
+		}
+	}
 
 	if ws := warnings(cfg); len(ws) > 0 {
 		fmt.Fprintln(stdout, "\nwarnings:")

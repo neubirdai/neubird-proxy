@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -72,7 +73,38 @@ type Config struct {
 	UpstreamDefaults       Upstream     `yaml:"upstream_defaults"`
 	Connections            []Connection `yaml:"connections"`
 	Redaction              Redaction    `yaml:"redaction"`
+	// Tunnel, when set, makes the proxy also (or, with listen: "off",
+	// only) serve NeuBird through outbound connections to a NeuBird relay.
+	// See docs/tunnel-protocol.md.
+	Tunnel *Tunnel `yaml:"tunnel"`
 }
+
+// ListenOff turns the inbound listener off, for a proxy reached only
+// through its tunnel.
+const ListenOff = "off"
+
+// Tunnel configures outbound connections to a NeuBird relay. The files are
+// read and checked by the tunnel package when the proxy starts (and by
+// `validate` unless -offline), not here, so a config can be checked on a
+// machine that doesn't hold them.
+type Tunnel struct {
+	// Relays are host:port addresses; every pod keeps tunnels to each.
+	Relays []string `yaml:"relays"`
+	// CertFile and KeyFile are the proxy's client certificate (signed by
+	// NeuBird's tenant CA) and its private key (generated here with
+	// `neubird-proxy csr`; it never leaves the cluster).
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	// CAFile pins the CA that signs the relays' server certificates.
+	CAFile string `yaml:"ca_file"`
+	// ConnectionsPerRelay is how many tunnels each pod keeps to each relay.
+	ConnectionsPerRelay int `yaml:"connections_per_relay"`
+}
+
+const (
+	DefaultTunnelConnectionsPerRelay = 1
+	MaxTunnelConnectionsPerRelay     = 8
+)
 
 type TLS struct {
 	CertFile string `yaml:"cert_file"`
@@ -245,6 +277,34 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		defaultTokens = append(defaultTokens, token("client_token_previous_env", c.ClientTokenPreviousEnv))
 	}
 
+	if t := c.Tunnel; t != nil {
+		if len(t.Relays) == 0 {
+			fail("tunnel.relays: at least one relay is required")
+		}
+		for i, r := range t.Relays {
+			host, port, err := net.SplitHostPort(r)
+			if err != nil || host == "" || port == "" {
+				fail("tunnel.relays[%d]: %q is not host:port", i, r)
+			}
+		}
+		if t.CertFile == "" || t.KeyFile == "" || t.CAFile == "" {
+			fail("tunnel: cert_file, key_file and ca_file are all required")
+		}
+		if t.ConnectionsPerRelay == 0 {
+			t.ConnectionsPerRelay = DefaultTunnelConnectionsPerRelay
+		}
+		if t.ConnectionsPerRelay < 1 || t.ConnectionsPerRelay > MaxTunnelConnectionsPerRelay {
+			fail("tunnel.connections_per_relay must be 1 to %d", MaxTunnelConnectionsPerRelay)
+		}
+	}
+	if c.Listen == ListenOff {
+		if c.Tunnel == nil {
+			fail("listen: off needs a tunnel section; otherwise nothing would reach the proxy")
+		}
+		if c.TLS != nil {
+			fail("tls configures the inbound listener, which listen: off turns off")
+		}
+	}
 	if len(c.Connections) == 0 {
 		fail("connections: at least one connection is required")
 	}

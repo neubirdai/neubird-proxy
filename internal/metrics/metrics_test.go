@@ -45,3 +45,15 @@ func TestWrongLabelCountPanics(t *testing.T) {
 	}()
 	(&Registry{}).Counter("x", "x", "a").Inc()
 }
+
+func TestGauge(t *testing.T) {
+	r := &Registry{}
+	g := r.Gauge("tunnels", "Tunnels up.", "relay")
+	g.Set(2, "r1")
+	g.Add(-1, "r1")
+	var b strings.Builder
+	r.Write(&b)
+	if !strings.Contains(b.String(), "# TYPE tunnels gauge\ntunnels{relay=\"r1\"} 1\n") {
+		t.Fatalf("got:\n%s", b.String())
+	}
+}

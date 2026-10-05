@@ -102,3 +102,31 @@ func without(m map[string]string, k string) map[string]string {
 	}
 	return out
 }
+
+func TestTunnelConfig(t *testing.T) {
+	lookup := env(map[string]string{"TOKEN": tok})
+	ok := "client_token_env: TOKEN\nlisten: \"off\"\nconnections: [{name: a, upstream: 'https://x'}]\n" +
+		"tunnel: {relays: [tunnel-0.neubird.ai:443], cert_file: c, key_file: k, ca_file: ca}\n"
+	c, err := Parse([]byte(ok), lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ListenOff || c.Tunnel.ConnectionsPerRelay != 1 {
+		t.Fatalf("%+v", c.Tunnel)
+	}
+	for name, tc := range map[string]struct{ yaml, want string }{
+		"off without tunnel": {"client_token_env: TOKEN\nlisten: \"off\"\nconnections: [{name: a, upstream: 'https://x'}]\n", "needs a tunnel"},
+		"no relays":          {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {cert_file: c, key_file: k, ca_file: ca}\n", "at least one relay"},
+		"bad relay":          {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: [tunnel.neubird.ai], cert_file: c, key_file: k, ca_file: ca}\n", "not host:port"},
+		"missing files":      {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443']}\n", "all required"},
+		"too many":           {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443'], cert_file: c, key_file: k, ca_file: ca, connections_per_relay: 9}\n", "1 to 8"},
+		"off with tls":       {"client_token_env: TOKEN\nlisten: \"off\"\ntls: {cert_file: a, key_file: b}\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443'], cert_file: c, key_file: k, ca_file: ca}\n", "listen: off turns off"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.yaml), lookup)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
