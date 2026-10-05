@@ -97,3 +97,16 @@ func TestRedactOffline(t *testing.T) {
 		t.Fatalf("binary input: %v", err)
 	}
 }
+
+func TestNoInboundTLSWarningWhenListenOff(t *testing.T) {
+	t.Setenv("T", strings.Repeat("x", 32))
+	p := writeConfig(t, "client_token_env: T\nlisten: \"off\"\nconnections: [{name: a, upstream: 'https://x', paths: ['/a']}]\n"+
+		"tunnel: {relays: ['r:443'], cert_file: c, key_file: k, ca_file: ca}\n")
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := strings.Join(warnings(cfg), "\n"); strings.Contains(w, "tls") {
+		t.Fatalf("TLS warning with no inbound listener:\n%s", w)
+	}
+}

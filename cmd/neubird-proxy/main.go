@@ -222,7 +222,9 @@ func configHash(path string) string {
 // allowed, but every pod start says so.
 func warnings(cfg *config.Config) []string {
 	var out []string
-	if cfg.TLS == nil {
+	if cfg.Listen == config.ListenOff {
+		// No inbound listener, so no inbound TLS to warn about.
+	} else if cfg.TLS == nil {
 		out = append(out, "tls is not set: the proxy listener is plain HTTP and relies on the load balancer for TLS")
 	} else if cfg.TLS.ClientCAFile == "" {
 		out = append(out, "tls.client_ca_file is not set: clients are authenticated by token only, not mTLS")
