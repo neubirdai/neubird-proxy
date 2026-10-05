@@ -1,6 +1,6 @@
 // Package metrics is a minimal Prometheus text exporter for labeled
-// counters. It avoids the client library to keep the dependency list, and
-// MetLife's image scan, to the standard library plus a YAML parser.
+// counters and gauges. It avoids the client library to keep the dependency
+// list, and customers' image scans, short.
 package metrics
 
 import (
@@ -15,6 +15,7 @@ import (
 type Counter struct {
 	name   string
 	help   string
+	kind   string // "counter" or "gauge"
 	labels []string
 
 	mu     sync.Mutex
@@ -27,11 +28,30 @@ type Registry struct {
 }
 
 func (r *Registry) Counter(name, help string, labels ...string) *Counter {
-	c := &Counter{name: name, help: help, labels: labels, values: map[string]float64{}}
+	return r.add(&Counter{name: name, help: help, kind: "counter", labels: labels, values: map[string]float64{}})
+}
+
+// Gauge is a value that goes up and down (tunnels connected, days until a
+// certificate expires). It shares Counter's methods; Set replaces a value.
+func (r *Registry) Gauge(name, help string, labels ...string) *Counter {
+	return r.add(&Counter{name: name, help: help, kind: "gauge", labels: labels, values: map[string]float64{}})
+}
+
+func (r *Registry) add(c *Counter) *Counter {
 	r.mu.Lock()
 	r.counters = append(r.counters, c)
 	r.mu.Unlock()
 	return c
+}
+
+// Set replaces a gauge's value.
+func (c *Counter) Set(v float64, labelValues ...string) {
+	if len(labelValues) != len(c.labels) {
+		panic(fmt.Sprintf("metrics: %s wants %d labels, got %d", c.name, len(c.labels), len(labelValues)))
+	}
+	c.mu.Lock()
+	c.values[strings.Join(labelValues, "\xff")] = v
+	c.mu.Unlock()
 }
 
 func (c *Counter) Add(v float64, labelValues ...string) {
@@ -58,7 +78,7 @@ func (r *Registry) Write(w io.Writer) {
 	counters := append([]*Counter(nil), r.counters...)
 	r.mu.Unlock()
 	for _, c := range counters {
-		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", c.name, c.help, c.name)
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", c.name, c.help, c.name, c.kind)
 		c.mu.Lock()
 		keys := make([]string, 0, len(c.values))
 		for k := range c.values {

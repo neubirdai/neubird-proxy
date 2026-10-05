@@ -90,6 +90,17 @@ func destinations(cfg *config.Config) []destination {
 		}
 		byKey[k].conns = append(byKey[k].conns, c.Name)
 	}
+	if cfg.Tunnel != nil {
+		for _, r := range cfg.Tunnel.Relays {
+			host, port, _ := net.SplitHostPort(r)
+			host = strings.ToLower(host)
+			k := host + ":" + port
+			if byKey[k] == nil {
+				byKey[k] = &destination{host: host, port: port, ip: net.ParseIP(host) != nil}
+			}
+			byKey[k].conns = append(byKey[k].conns, "tunnel relay")
+		}
+	}
 	var out []destination
 	for _, d := range byKey {
 		out = append(out, *d)

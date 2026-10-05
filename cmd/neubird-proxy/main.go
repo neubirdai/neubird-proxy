@@ -24,6 +24,7 @@ import (
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/proxy"
 	"github.com/neubirdai/neubird-proxy/internal/redact"
+	"github.com/neubirdai/neubird-proxy/internal/tunnel"
 )
 
 var version = "dev"
@@ -41,12 +42,13 @@ var commands = map[string]struct {
 	"token":    {cmdToken, "generate a random proxy token"},
 	"metrics":  {cmdMetrics, "summarize /metrics output from one or more pods"},
 	"netpol":   {cmdNetpol, "generate egress network rules allowing only the configured upstreams"},
+	"csr":      {cmdCSR, "generate the tunnel key and a certificate signing request for NeuBird"},
 }
 
 func usage(w io.Writer) {
 	fmt.Fprintf(w, "usage: neubird-proxy [-config path]            run the proxy\n")
 	fmt.Fprintf(w, "       neubird-proxy <command> [flags] [args]   run a tool\n\ncommands:\n")
-	for _, name := range []string{"validate", "test", "preview", "token", "metrics", "netpol"} {
+	for _, name := range []string{"validate", "test", "preview", "token", "metrics", "netpol", "csr"} {
 		fmt.Fprintf(w, "  %-9s %s\n", name, commands[name].usage)
 	}
 	fmt.Fprintf(w, "\nrun 'neubird-proxy <command> -h' for its flags\n")
@@ -113,7 +115,7 @@ func run(configPath string, check bool, log *slog.Logger) error {
 		conns = append(conns, c.Name+"("+mode+")")
 	}
 	log.Info("starting", "version", version, "config_sha256", configHash(configPath),
-		"listen", cfg.Listen, "admin_listen", cfg.AdminListen,
+		"listen", cfg.Listen, "admin_listen", cfg.AdminListen, "tunnel", cfg.Tunnel != nil,
 		"tls", cfg.TLS != nil, "connections", conns, "rules", engine.RuleNames(),
 		"mask", cfg.Redaction.Mask, "max_body_bytes", cfg.MaxBodyBytes)
 	for _, w := range warnings(cfg) {
@@ -149,16 +151,33 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	adminSrv := &http.Server{Addr: cfg.AdminListen, Handler: admin, ReadHeaderTimeout: 5 * time.Second}
 
 	errc := make(chan error, 2)
-	go func() {
-		var err error
-		if cfg.TLS != nil {
-			err = proxySrv.ListenAndServeTLS("", "")
-		} else {
-			err = proxySrv.ListenAndServe()
-		}
-		errc <- fmt.Errorf("proxy listener: %w", err)
-	}()
+	if cfg.Listen != config.ListenOff {
+		go func() {
+			var err error
+			if cfg.TLS != nil {
+				err = proxySrv.ListenAndServeTLS("", "")
+			} else {
+				err = proxySrv.ListenAndServe()
+			}
+			errc <- fmt.Errorf("proxy listener: %w", err)
+		}()
+	}
 	go func() { errc <- fmt.Errorf("admin listener: %w", adminSrv.ListenAndServe()) }()
+
+	// Tunnel requests run on runCtx, which outlives the shutdown signal so
+	// in-flight requests can finish; it's cancelled only once shutdown is
+	// complete.
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	var tc *tunnel.Client
+	if cfg.Tunnel != nil {
+		id, err := tunnel.Load(cfg.Tunnel)
+		if err != nil {
+			return err
+		}
+		tc = tunnel.New(cfg.Tunnel, id, srv, log, srv.Metrics.Registry)
+		tc.Start(runCtx)
+	}
 	ready.Store(true)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -173,7 +192,14 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	ready.Store(false)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	err = proxySrv.Shutdown(shutdownCtx)
+	if tc != nil {
+		if err := tc.Shutdown(shutdownCtx); err != nil {
+			log.Warn("tunnel shutdown incomplete", "error", err.Error())
+		}
+	}
+	if cfg.Listen != config.ListenOff {
+		err = proxySrv.Shutdown(shutdownCtx)
+	}
 	_ = adminSrv.Shutdown(shutdownCtx)
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err

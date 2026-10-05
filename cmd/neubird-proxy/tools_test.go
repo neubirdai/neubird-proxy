@@ -170,7 +170,7 @@ func TestTestCommandNetworkFailures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := toolsConfig(t, c.upstream)
 			code, out, _ := runCmd(t, cmdTest, "-config", cfg, "-env-file", envFile(t, "k"), "api")
-			if code != 1 || !strings.Contains(out, c.want) || !strings.Contains(out, "1 of 1 connections FAILED") {
+			if code != 1 || !strings.Contains(out, c.want) || !strings.Contains(out, "1 check(s) FAILED") {
 				t.Fatalf("code %d:\n%s", code, out)
 			}
 		})

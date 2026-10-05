@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
+	"github.com/neubirdai/neubird-proxy/internal/metrics"
+	"github.com/neubirdai/neubird-proxy/internal/tunnel"
 )
 
 // cmdTest diagnoses each connection in the order things fail: name
@@ -82,6 +84,12 @@ func cmdTest(args []string, stdout, stderr io.Writer) int {
 
 	t := &tester{cfg: cfg, p: p, out: stdout, timeout: *timeout, show: *show}
 	failed := 0
+	if cfg.Tunnel != nil && fs.NArg() == 0 {
+		if !t.tunnel() {
+			failed++
+		}
+		fmt.Fprintln(stdout)
+	}
 	for _, c := range conns {
 		probe := probeSpec{method: *method, path: *path, data: *data, contentType: *contentType}
 		if !t.connection(c, probe) {
@@ -90,7 +98,7 @@ func cmdTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout)
 	}
 	if failed > 0 {
-		fmt.Fprintf(stdout, "%d of %d connections FAILED\n", failed, len(conns))
+		fmt.Fprintf(stdout, "%d check(s) FAILED\n", failed)
 		return 1
 	}
 	fmt.Fprintf(stdout, "all %d connections OK\n", len(conns))
@@ -431,4 +439,48 @@ func tlsVersion(v uint16) string {
 		return "TLS 1.2"
 	}
 	return fmt.Sprintf("TLS 0x%x", v)
+}
+
+// tunnel checks the tunnel identity, then DNS, TCP and the mutual-TLS
+// handshake to each relay.
+func (t *tester) tunnel() bool {
+	t.ok = true
+	tc := t.cfg.Tunnel
+	fmt.Fprintf(t.out, "tunnel -> %s\n", strings.Join(tc.Relays, ", "))
+	id, err := tunnel.Load(tc)
+	if err != nil {
+		t.line("FAIL", "identity", "%v", err)
+		return false
+	}
+	status := "ok"
+	if id.DaysLeft() < 30 {
+		status = "warn"
+	}
+	t.line(status, "identity", "tenant %s, proxy %s; certificate expires in %d days", id.Tenant, id.Proxy, int(id.DaysLeft()))
+	client := tunnel.New(tc, id, http.NotFoundHandler(), discardLog, &metrics.Registry{})
+	for _, relay := range tc.Relays {
+		host, port, _ := net.SplitHostPort(relay)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if proxyEnv("https") == "" {
+			if addrs, err := net.DefaultResolver.LookupHost(ctx, host); err != nil {
+				t.line("FAIL", "dns", "%s: %v", host, err)
+				cancel()
+				continue
+			} else {
+				t.line("ok", "dns", "%s -> %s", host, strings.Join(addrs, ", "))
+			}
+		}
+		start := time.Now()
+		state, err := client.Check(ctx, relay)
+		cancel()
+		if err != nil {
+			t.line("FAIL", "relay", "%s:%s: %v", host, port, err)
+			continue
+		}
+		cert := state.PeerCertificates[0]
+		t.line("ok", "relay", "%s: mutual TLS and %s in %s; relay certificate %q expires in %d days", relay,
+			state.NegotiatedProtocol, time.Since(start).Round(time.Millisecond), cert.Subject.CommonName,
+			int(time.Until(cert.NotAfter).Hours()/24))
+	}
+	return t.ok
 }

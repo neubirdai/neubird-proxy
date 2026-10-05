@@ -37,6 +37,7 @@ import (
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/metrics"
 	"github.com/neubirdai/neubird-proxy/internal/redact"
+	"github.com/neubirdai/neubird-proxy/internal/tunnel"
 )
 
 type Server struct {
@@ -804,6 +805,9 @@ func (s *Server) audit(r *http.Request, st *reqState, status, nbytes int, d time
 		"bytes", nbytes,
 		"duration_ms", d.Milliseconds(),
 		"redactions", st.stats.Total(),
+	}
+	if via := tunnel.Via(r.Context()); via != "" {
+		attrs = append(attrs, "via", via)
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		attrs = append(attrs, "forwarded_for", xff)
