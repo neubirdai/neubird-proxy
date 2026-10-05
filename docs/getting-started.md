@@ -14,9 +14,10 @@ ServiceNow REST API. Swap in your own systems as you go. The
 You need:
 
 - `kubectl` access to the cluster, with rights to create a namespace.
-- The proxy image, `<registry>/neubird-proxy:<version>`. NeuBird gives you
-  the image, or you build it from this repository with `make image` and push
-  it to your registry.
+- The proxy image, `neubirdai/neubird-proxy:v0.1.0` on Docker Hub, digest
+  `sha256:07447eb97140035d97d9b8a4c247ca9a73455803236b3caceef63a0a738ab44f`.
+  Pull it directly, or mirror it to your registry and keep the digest. You
+  can also build it from this repository with `make image`.
 - Docker on your machine, to run the proxy's tools before anything is
   deployed. Every tool is a subcommand of the same image, so the version you
   check with is the version you deploy.
@@ -26,14 +27,14 @@ You need:
 Set a shortcut for running the tools:
 
 ```bash
-IMAGE=<registry>/neubird-proxy:<version>
+IMAGE=neubirdai/neubird-proxy:v0.1.0
 np() { docker run --rm -i -v "$PWD":/work -w /work "$IMAGE" "$@"; }
 np help
 ```
 
 Run the commands from a directory under your home directory: Docker
 Desktop and Colima only share that with containers. On an Apple Silicon
-Mac, add `--platform linux/amd64` after `docker run` if the image is built
+Mac, add `--platform linux/amd64` after `docker run`: the image is built
 for amd64 only.
 
 ## 1. Write the config
@@ -303,7 +304,7 @@ Copy `deploy/kubernetes.yaml` from this repository and edit the lines marked
 | Setting | Set it to |
 |---|---|
 | `namespace:` (every object) and the Namespace's `name:` | `$NS` |
-| `image:` | your image, ideally by digest: `<registry>/neubird-proxy@sha256:...` |
+| `image:` | already set to the published image, pinned by digest; change the registry part only if you mirror it |
 | Ingress `ipBlock` | the range your load balancer or ingress controller connects from |
 | Egress `ipBlock` | the range your systems (or your API gateway) are in |
 | Monitoring namespace | where your Prometheus runs, if anything scrapes `/metrics` |

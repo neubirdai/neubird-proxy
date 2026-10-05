@@ -1,7 +1,8 @@
 # neubird-proxy for MetLife AKS. Apply after creating the Secret and
-# ConfigMap (see README). Replace the image, namespace and CIDRs marked
-# CHANGE ME. See README, Kubernetes hardening, for what each part enforces
-# and for hostname-level egress (neubird-proxy netpol).
+# ConfigMap (see README). Replace the namespace and CIDRs marked CHANGE
+# ME, and the image's registry if you mirror it. See README, Kubernetes
+# hardening, for what each part enforces and for hostname-level egress
+# (neubird-proxy netpol).
 #
 # The proxy gets its own namespace: Pod Security "restricted" is enforced
 # there, and the default-deny policies at the end apply to everything in it.
@@ -59,7 +60,9 @@ spec:
             matchLabels: {app: neubird-proxy}
       containers:
         - name: proxy
-          image: metlife.azurecr.io/neubird/neubird-proxy:v0.1.0   # CHANGE ME
+          # Pinned by digest. If you mirror it to your registry, change the
+          # registry part and keep the digest.
+          image: docker.io/neubirdai/neubird-proxy:v0.1.0@sha256:07447eb97140035d97d9b8a4c247ca9a73455803236b3caceef63a0a738ab44f
           args: ["-config", "/etc/neubird-proxy/config.yaml"]
           ports:
             - {name: proxy, containerPort: 8443}
