@@ -48,3 +48,11 @@ redaction:
   # can correlate events without seeing the value. Key from the Secret.
   mask: hmac
   hmac_key_env: REDACTION_HMAC_KEY
+
+# Outbound tunnel to the test relay in neubird-relay-test (same cluster).
+# The inbound listener stays on, so the public URL keeps working too.
+tunnel:
+  relays: ["neubird-relay.neubird-relay-test.svc:8443"]
+  cert_file: /etc/neubird-proxy-tunnel/tls.crt
+  key_file: /etc/neubird-proxy-tunnel/tls.key
+  ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt

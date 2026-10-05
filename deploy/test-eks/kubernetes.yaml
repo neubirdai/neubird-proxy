@@ -27,6 +27,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532   # Secret files get this group, so 0440 lets the proxy read its key
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: proxy
@@ -39,6 +40,7 @@ spec:
             - secretRef: {name: neubird-proxy}
           volumeMounts:
             - {name: config, mountPath: /etc/neubird-proxy, readOnly: true}
+            - {name: tunnel, mountPath: /etc/neubird-proxy-tunnel, readOnly: true}
           readinessProbe:
             httpGet: {path: /readyz, port: admin}
             periodSeconds: 5
@@ -55,6 +57,8 @@ spec:
       volumes:
         - name: config
           configMap: {name: neubird-proxy}
+        - name: tunnel
+          secret: {secretName: neubird-proxy-tunnel, defaultMode: 0440}
 ---
 apiVersion: v1
 kind: Service

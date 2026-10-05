@@ -2,6 +2,7 @@
 # Build, push and deploy the proxy to the eks-htm-prod test namespace.
 # Usage: deploy/test-eks/deploy.sh            (build + push + apply)
 #        SKIP_BUILD=1 deploy/test-eks/deploy.sh   (re-apply config/manifests only)
+#        IMAGE_TAG=v0.1.1 deploy/test-eks/deploy.sh (deploy a released image as is)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -17,8 +18,13 @@ REPO=443370673207.dkr.ecr.us-west-2.amazonaws.com/neubird-proxy
 # docs- or config-only commit reuses the existing image.
 SRC="cmd internal go.mod go.sum Dockerfile"
 V=$(git log -1 --format=%h -- $SRC)$(git diff --quiet HEAD -- $SRC || echo -dirty)
-
-if [ -z "${SKIP_BUILD:-}" ]; then
+export DOCKER_CONTEXT=${DOCKER_CONTEXT:-colima}
+if [ -n "${IMAGE_TAG:-}" ]; then
+  V=$IMAGE_TAG   # a released tag: never built here
+  SKIP_BUILD=
+  aws ecr describe-images --repository-name neubird-proxy --image-ids imageTag="$V" >/dev/null ||
+    { echo "no image tagged $V in ECR" >&2; exit 1; }
+elif [ -z "${SKIP_BUILD:-}" ]; then
   case "$V" in *-dirty) echo "refusing to push a dirty tree ($V); commit first" >&2; exit 1;; esac
   if aws ecr describe-images --repository-name neubird-proxy --image-ids imageTag="$V" >/dev/null 2>&1; then
     echo "tag $V already in ECR (tags are immutable); using it"
