@@ -69,8 +69,12 @@ a query or fragment.
   drop the connection when no answer arrives within 10 s.
 - **Proxy shutdown** sends GOAWAY: the relay stops sending new requests on
   that connection, and in-flight ones finish.
-- **Relay restarts and revocations** close the connection; the proxy
-  reconnects with exponential backoff (1 s doubling to 60 s, with jitter).
+- **Relay restarts** send GOAWAY: in-flight requests finish, then the
+  connection closes. The relay stops accepting tunnels first, so the
+  proxy's reconnect reaches another replica.
+- **Reconnects** use exponential backoff (1 s doubling to 60 s, with full
+  jitter). A tunnel that stayed up 10 s resets the backoff, so the
+  reconnect after a relay restart takes about a second.
 
 ## Versioning
 

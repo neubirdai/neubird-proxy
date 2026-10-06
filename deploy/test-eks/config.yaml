@@ -56,3 +56,6 @@ tunnel:
   cert_file: /etc/neubird-proxy-tunnel/tls.crt
   key_file: /etc/neubird-proxy-tunnel/tls.key
   ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt
+  # Two tunnels per pod, so one relay replica restarting rarely leaves
+  # the tenant without a tunnel.
+  connections_per_relay: 2

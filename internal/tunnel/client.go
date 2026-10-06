@@ -27,7 +27,10 @@ const (
 	pingTimeout = 10 * time.Second // drop the tunnel if a PING goes unanswered
 	backoffMin  = time.Second
 	backoffMax  = 60 * time.Second
-	stableAfter = 60 * time.Second // a tunnel up this long resets the backoff
+	// A tunnel up this long resets the backoff, so a relay restart (GOAWAY)
+	// is followed by a reconnect within a second, while a relay that
+	// accepts and drops at once still gets backed off.
+	stableAfter = 10 * time.Second
 	dialTimeout = 15 * time.Second
 )
 
