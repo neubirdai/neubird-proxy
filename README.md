@@ -64,39 +64,62 @@ warning for it.
 
 ## Outbound tunnel (optional)
 
-With a `tunnel:` section, the proxy also connects *out* to NeuBird relays
-over mutual TLS, and NeuBird's requests arrive over those connections. With
-`listen: "off"`, nothing is exposed inbound at all; the customer opens one
-outbound port to the relay hostnames.
+With a `tunnel:` section, the proxy connects *out* to NeuBird's relay, and
+NeuBird's requests arrive over that connection. With `listen: "off"`,
+nothing is exposed inbound at all.
 
-Requests that arrive through the tunnel go through exactly the same path as
-inbound ones: token, allowlists, redaction, audit (marked `via: tunnel`).
+What the customer needs on their network:
+- **Outbound HTTPS** to `tunnel.neubird.ai:443`, nothing else. If they
+  allowlist by IP rather than hostname, NeuBird publishes the relay's fixed
+  IP addresses.
+- **No TLS inspection** of that traffic. A corporate proxy that re-signs
+  outbound HTTPS breaks mutual TLS. A plain HTTP proxy is fine: the tunnel
+  uses `HTTPS_PROXY` with `CONNECT`.
+
+Requests that arrive through the tunnel take exactly the same path as
+inbound ones: token check, allowlists, redaction, and the audit line
+(marked `via: tunnel`). The customer never uses NeuBird's per-tenant relay
+hostnames (`<tenant>.relay.neubird.ai`); those are how NeuBird's own
+connectors reach them, on NeuBird's side.
 Protocol: [docs/tunnel-protocol.md](docs/tunnel-protocol.md). Design:
 [docs/outbound-tunnel-design.md](docs/outbound-tunnel-design.md).
 
 ```yaml
 listen: "off"                 # tunnel only: no inbound listener
 tunnel:
-  relays: [tunnel-0.neubird.ai:443, tunnel-1.neubird.ai:443]
-  cert_file: /etc/neubird-proxy/tunnel/tls.crt      # signed by NeuBird
-  key_file: /etc/neubird-proxy/tunnel/tls.key       # generated here, never sent
-  ca_file: /etc/neubird-proxy/tunnel/relay-ca.crt   # pins the relays' CA
-  connections_per_relay: 1
+  relays: [tunnel.neubird.ai:443]
+  cert_file: /etc/neubird-proxy-tunnel/tls.crt      # signed by NeuBird
+  key_file: /etc/neubird-proxy-tunnel/tls.key       # generated here, never sent
+  ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt   # pins NeuBird's relay CA
+  connections_per_relay: 2    # two tunnels per pod, for faster failover
 ```
 
-Getting the certificate:
-1. Run `neubird-proxy csr -tenant <tenant> -proxy <name>`. It writes
-   `tunnel.key`, which stays with you, and `tunnel.csr`.
-2. Send NeuBird the CSR. NeuBird returns the signed certificate and the
-   relay CA.
-3. Put all three in the proxy's Secret.
+**Identity.** The certificate carries a SPIFFE ID, for example
+`spiffe://neubird.ai/tenant/acme/proxy/aks-prod`. SPIFFE is an open
+standard (CNCF) for naming workloads in certificates, the way a website
+certificate names a domain. It tells the relay which customer (`acme`) and
+which of their proxy deployments (`aks-prod`) is connecting.
+
+**Getting the certificate.** The key is created here and never leaves:
+1. Run `neubird-proxy csr -tenant <tenant> -proxy <name>`, with the tenant
+   name NeuBird gives you. It writes `tunnel.key`, which stays with you, and
+   `tunnel.csr`.
+2. Send NeuBird the CSR. NeuBird signs it and returns the certificate and
+   its relay CA certificate.
+3. Put the key, certificate and relay CA in a Secret mounted at the paths
+   above.
+4. Generate the proxy token with `neubird-proxy token`, and give it to
+   NeuBird through your usual secure channel.
+
+Certificates last 90 days; the proxy warns from 30 days before expiry, and
+renewal repeats these steps.
 
 `validate` checks the files and shows the tunnel identity and certificate
 expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
 `netpol` includes the relays in the egress rules.
 
 **Behavior:**
-- Each pod keeps `connections_per_relay` tunnels to every relay.
+- Each pod keeps `connections_per_relay` tunnels to every relay address.
 - A dropped tunnel reconnects with exponential backoff (1 s to 60 s, with
   jitter).
 - An outbound HTTP proxy from `HTTPS_PROXY` or `NO_PROXY` is used with
