@@ -59,8 +59,11 @@ a query or fragment.
 - **The relay sets `:authority` to `tunnel`.** The proxy routes by host
   first and then by path; `tunnel` matches no connection's host (don't
   name one that), so tunnel requests are routed by path.
-- **Hop-by-hop headers are removed,** as for any proxy. The relay adds
-  `X-Request-Id` if the connector didn't send one.
+- **Hop-by-hop headers are removed,** as for any proxy.
+- **One request ID end to end:** the relay keeps the connector's
+  `X-Request-Id` if it is a short plain token (up to 64 of `A-Z a-z 0-9 . _ : -`)
+  and sets its own otherwise; the proxy keeps it. The same ID is in the
+  relay's log, the proxy's audit line, the upstream request and the response.
 - **Responses stream:** the relay copies and flushes response bodies as
   they arrive, so SSE and newline-delimited JSON stay incremental.
 

@@ -24,7 +24,7 @@ client_token_env: NEUBIRD_PROXY_TOKEN
 
 max_body_bytes: 20971520      # 20 MiB; larger bodies are refused (502), never passed through
 max_concurrent_requests: 256  # beyond this, 503
-max_concurrent_buffered: 4    # peak memory is about 4.5 x max_body_bytes per buffered body
+max_concurrent_buffered: 4    # and memory is budgeted from the container's limit (README: Latency and capacity)
 
 upstream_defaults:
   headers:

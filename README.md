@@ -444,7 +444,9 @@ done | neubird-proxy metrics -
 
 Connectors see these in addition to upstream responses. Upstream error
 responses such as 4xx and 5xx pass through, and their bodies are redacted
-too. Every response carries `X-Request-Id`.
+too. Every response carries `X-Request-Id`: the caller's own if it sent a
+short plain one (the relay always does, so one ID follows a request through
+the relay's log, the audit line and the upstream), otherwise a new one.
 
 | Status | `error` | When |
 |---|---|---|
@@ -521,11 +523,24 @@ Ranges run from operational logs with no PII to PII in every event.
   about 10–15% more total time than buffering did, in exchange for an
   immediate first byte.
 
-Peak heap for a buffered body is about 4.5× its size, so 4 buffered 20 MiB
-bodies need about 360 MiB. That's why `max_concurrent_buffered` defaults to 4
-against the 512 MiB memory limit. Raise both together. Streamed responses
-hold one document at a time and count against the cap only while their first
-document is decoded. Redaction is single-threaded per response; see the plan
+Redacting a buffered body takes 6–11× its size in memory (measured; one
+long JSON string is the worst case). So memory is budgeted, not just
+counted:
+- At startup the proxy reads its container's memory limit, sets the Go
+  runtime's to 90% of it (unless `GOMEMLIMIT` is set), and lets buffered
+  bodies take three quarters of it together.
+- Each buffered body reserves 12× its size (its `Content-Length`, or
+  `max_body_bytes` if it has none) and waits if there isn't room. Small API
+  and MCP responses run side by side; large ones take turns.
+- If one body of `max_body_bytes` couldn't fit even alone, bodies are capped
+  lower to fit, and larger ones fail closed with `body_too_large`. The
+  startup log says so. With the 512 MiB limit the cap is 32 MiB, above the
+  20 MiB default; at 256 MiB it would be 16 MiB.
+- A body over the cap is refused as soon as the proxy has read past the
+  cap, not after decoding it.
+- `max_concurrent_buffered` (default 4) still limits how many are buffered at
+  once. Streamed responses hold one document at a time and count against
+  both only while their first document is decoded. Redaction is single-threaded per response; see the plan
 for the throughput work.
 
 ## Kubernetes hardening
@@ -540,7 +555,7 @@ of the proxy's own checks:
 | Service account | A dedicated one with no Role bindings, and its token isn't mounted: the proxy can't talk to the Kubernetes API |
 | `default-deny` NetworkPolicy | Nothing in the namespace sends or receives traffic unless another policy allows it |
 | `neubird-proxy` NetworkPolicy | In: the proxy port from the load balancer's range only, the admin port (health, metrics) from monitoring only. Out: the APIM range on 443, plus DNS |
-| Resources | A 512 MiB memory limit, matched to `max_concurrent_buffered` (see Latency and capacity) |
+| Resources | A 512 MiB memory limit; response buffering is sized to it (see Latency and capacity) |
 
 **Restricting egress by hostname.** A standard NetworkPolicy matches IP
 ranges and ports, not hostnames. The policy above allows the APIM CIDR,

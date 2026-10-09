@@ -53,7 +53,12 @@ type Server struct {
 	tools    map[string]map[string]bool
 	inflight chan struct{} // max_concurrent_requests
 	buffered chan struct{} // max_concurrent_buffered
-	Metrics  *Metrics
+	// mem bounds buffered bodies' memory when the memory limit is known
+	// (SetMemoryLimit); maxBuffered is the largest body that may be
+	// buffered: max_body_bytes, or less if that couldn't fit.
+	mem         *memBudget
+	maxBuffered int64
+	Metrics     *Metrics
 }
 
 type Metrics struct {
@@ -99,6 +104,7 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		buffered: make(chan struct{}, cfg.MaxConcurrentBuffered),
 		Metrics:  newMetrics(),
 	}
+	s.maxBuffered = cfg.MaxBodyBytes
 	for i := range cfg.Connections {
 		c := &cfg.Connections[i]
 		s.byName[c.Name] = c
@@ -205,7 +211,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := st.conn.Name
-	st.id = newRequestID()
+	st.id = requestID(r.Header.Get("X-Request-Id"))
 	rec.Header().Set("X-Request-Id", st.id)
 
 	defer func() {
@@ -579,7 +585,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	kind := classify(h.Get("Content-Type"))
 	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
-		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.cfg.MaxBodyBytes).WithFields(fields)
+		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.maxBuffered).WithFields(fields)
 		st.stream = sse
 		resp.Body = &dropTrailers{ReadCloser: sse, resp: resp}
 		resp.ContentLength = -1
@@ -594,14 +600,28 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return &blockError{"not_json"}
 	}
 
-	// Bound how many bodies are buffered at once, so memory stays under
-	// max_concurrent_buffered x max_body_bytes x a small factor.
+	// Bound how many bodies are buffered at once, and, when the memory
+	// limit is known, how much memory they may take together: each
+	// reserves bufferFactor times its size (its declared length, or the
+	// cap when it has none).
 	select {
 	case s.buffered <- struct{}{}:
 		defer func() { <-s.buffered }()
 	case <-resp.Request.Context().Done():
 		resp.Body.Close()
 		return resp.Request.Context().Err()
+	}
+	if s.mem != nil {
+		size := s.maxBuffered
+		if n := resp.ContentLength; n >= 0 && n < size && !gzipped {
+			size = n
+		}
+		reserve := size * bufferFactor
+		if err := s.mem.acquire(resp.Request.Context(), reserve); err != nil {
+			resp.Body.Close()
+			return err
+		}
+		defer s.mem.release(reserve)
 	}
 
 	if kind == kindJSON {
@@ -615,7 +635,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		if gzipped {
 			knownLen = -1
 		}
-		js, single, raw, err := redact.NewJSONStream(resp.Body, s.engine, st.stats, s.cfg.MaxBodyBytes, fields, knownLen)
+		js, single, raw, err := redact.NewJSONStream(resp.Body, s.engine, st.stats, s.maxBuffered, fields, knownLen)
 		switch {
 		case errors.Is(err, redact.ErrDocTooLarge):
 			resp.Body.Close()
@@ -646,12 +666,12 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, s.cfg.MaxBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, s.maxBuffered+1))
 	resp.Body.Close()
 	if err != nil {
 		return fmt.Errorf("read upstream body: %w", err)
 	}
-	if int64(len(body)) > s.cfg.MaxBodyBytes {
+	if int64(len(body)) > s.maxBuffered {
 		return &blockError{"body_too_large"}
 	}
 	if len(body) > 0 && !redact.IsText(body) {
@@ -869,6 +889,22 @@ func (r *recorder) Write(b []byte) (int, error) {
 }
 
 func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// requestID keeps the caller's X-Request-Id (the relay sets one on every
+// request) so one ID follows a request through the relay's and the
+// proxy's logs and upstream. Anything that isn't a short plain token is
+// replaced, so a caller can't write odd text into the audit log.
+func requestID(in string) string {
+	if len(in) == 0 || len(in) > 64 {
+		return newRequestID()
+	}
+	for _, c := range in {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == ':' || c == '-') {
+			return newRequestID()
+		}
+	}
+	return in
+}
 
 func newRequestID() string {
 	var b [8]byte

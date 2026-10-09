@@ -45,9 +45,21 @@ type countingReader struct {
 	max      int64
 }
 
+// readSlack is how far past a document's limit the decoder may read ahead
+// (into the next document of a stream) before reads are refused.
+const readSlack = 64 << 10
+
+// Read never returns bytes beyond docStart+max+readSlack: a document over
+// the limit fails as soon as the decoder needs those bytes, instead of
+// being read, decoded and redacted in full first. Redacting a buffered
+// document takes several times its size in memory.
 func (c *countingReader) Read(p []byte) (int, error) {
-	if c.n-c.docStart > c.max {
+	left := c.docStart + c.max + readSlack - c.n
+	if left <= 0 {
 		return 0, ErrDocTooLarge
+	}
+	if int64(len(p)) > left {
+		p = p[:left]
 	}
 	n, err := c.r.Read(p)
 	c.n += int64(n)
@@ -72,7 +84,10 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // not been closed.
 func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields *Fields, knownLen int64) (s *JSONStream, single bool, raw []byte, err error) {
 	var head bytes.Buffer
-	cr := &countingReader{r: io.TeeReader(src, &head), max: 2 * maxDoc}
+	if knownLen > 0 && knownLen <= maxDoc+readSlack {
+		head.Grow(int(knownLen))
+	}
+	cr := &countingReader{r: io.TeeReader(src, &head), max: maxDoc}
 	dec := json.NewDecoder(cr)
 	dec.UseNumber()
 	w := &jsonWriter{e: e, fields: fields}
@@ -101,7 +116,8 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 		st[k] += v
 	}
 	w.st = st
-	s.out = append([]byte{}, w.out.Bytes()...)
+	s.out = w.out.Bytes() // owned from here; w.out starts over for the next document
+	w.out = bytes.Buffer{}
 
 	// Raw bytes are only needed for the first document.
 	cr.r = src
