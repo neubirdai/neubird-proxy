@@ -69,9 +69,9 @@ NeuBird's requests arrive over that connection. With `listen: "off"`,
 nothing is exposed inbound at all.
 
 What the customer needs on their network:
-- **Outbound HTTPS** to `tunnel.neubird.ai:443`, nothing else. If they
-  allowlist by IP rather than hostname, NeuBird publishes the relay's fixed
-  IP addresses.
+- **Outbound HTTPS** to their own relay, `<tenant>.tunnel.neubird.ai:443`,
+  nothing else. Each customer has a dedicated relay; if they allowlist by IP
+  rather than hostname, NeuBird gives them its fixed IP addresses.
 - **No TLS inspection** of that traffic. A corporate proxy that re-signs
   outbound HTTPS breaks mutual TLS. A plain HTTP proxy is fine: the tunnel
   uses `HTTPS_PROXY` with `CONNECT`.
@@ -87,7 +87,7 @@ Protocol: [docs/tunnel-protocol.md](docs/tunnel-protocol.md). Design:
 ```yaml
 listen: "off"                 # tunnel only: no inbound listener
 tunnel:
-  relays: [tunnel.neubird.ai:443]
+  relays: [acme.tunnel.neubird.ai:443]   # the customer's dedicated relay
   cert_file: /etc/neubird-proxy-tunnel/tls.crt      # signed by NeuBird
   key_file: /etc/neubird-proxy-tunnel/tls.key       # generated here, never sent
   ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt   # pins NeuBird's relay CA
