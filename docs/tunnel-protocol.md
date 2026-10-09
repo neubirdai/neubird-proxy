@@ -64,6 +64,36 @@ a query or fragment.
 - **Responses stream:** the relay copies and flushes response bodies as
   they arrive, so SSE and newline-delimited JSON stay incremental.
 
+## Only plain HTTP
+
+Only plain HTTP requests and responses cross the tunnel. Both ends refuse
+anything that could turn it into a byte stream, before it reaches a
+connection's settings: the relay before it chooses a tunnel, the proxy as
+a request arrives on one.
+
+- `CONNECT`, including HTTP/2 extended CONNECT: 405 `method_not_allowed`.
+- `TRACE`: 405 `method_not_allowed`.
+- A protocol upgrade (an `Upgrade` header, or `upgrade` in `Connection`;
+  WebSocket, h2c): 400 `upgrade_not_supported`.
+
+This doesn't depend on a connection's `methods` or `passthrough`, or on
+what the HTTP libraries happen to reject.
+
+## Encryption on each hop
+
+| Hop | On the wire | Who can read it |
+|---|---|---|
+| NeuBird's agent (ace) → relay, inside NeuBird's cluster | plain HTTP | the relay |
+| relay ↔ proxy, the tunnel | one mutual TLS 1.3 connection carrying plain HTTP/2 requests and responses | only the relay and the proxy |
+| proxy → backend (e.g. Splunk), inside the customer's network | HTTPS if the backend requires it | the proxy and the backend |
+
+The proxy decrypts the backend's response, redacts it, and writes plain
+HTTP into the tunnel; the tunnel's TLS is the only encryption on that hop.
+The HTTPS to the backend is a separate hop on the customer's side, not a
+second layer. The load balancer in front of the relay doesn't decrypt;
+TLS ends at the relay, which needs the client certificate and routes on
+the plain HTTP inside.
+
 ## Accepting a tunnel
 
 With TLS 1.3 the proxy's handshake completes before the relay has checked

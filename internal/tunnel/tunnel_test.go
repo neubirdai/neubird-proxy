@@ -509,3 +509,59 @@ func TestTunnelStartsWithoutIdentity(t *testing.T) {
 	os.WriteFile(cfg.CertFile, good, 0o600)
 	relay.next(t)
 }
+
+// Only plain HTTP requests cross the tunnel, whatever the connection's
+// settings: CONNECT, TRACE and upgrades are refused before the handler.
+func TestTunnelOnlyPlainHTTP(t *testing.T) {
+	p := newPKI(t)
+	relay := newRelay(t, p, ALPN)
+	var reached atomic.Int32
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		fmt.Fprint(w, "ok")
+	})
+	c, _ := newClient(t, p.proxyConfig(t, relay.ln.Addr().String()), h)
+	c.Start(context.Background())
+	tc := relay.next(t)
+
+	for _, m := range []string{http.MethodConnect, http.MethodTrace} {
+		req, _ := http.NewRequest(m, "https://tunnel/splunk/services/mcp", nil)
+		if m == http.MethodConnect {
+			req.URL.Path = "" // CONNECT carries an authority, not a path
+		}
+		resp, err := tc.cc.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("%s: %v", m, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed || !strings.Contains(string(b), "method_not_allowed") {
+			t.Errorf("%s: %d %q", m, resp.StatusCode, b)
+		}
+	}
+	if n := reached.Load(); n != 0 {
+		t.Fatalf("%d refused requests reached the handler", n)
+	}
+	if _, body := get(t, tc, "/splunk/services/mcp"); body != "ok" {
+		t.Fatalf("plain GET: %q", body)
+	}
+
+	// Go's HTTP/2 client won't send an Upgrade header, so check the
+	// guard directly for what another client might send.
+	for name, hdr := range map[string]http.Header{
+		"websocket":           {"Connection": {"Upgrade"}, "Upgrade": {"websocket"}},
+		"upgrade header":      {"Upgrade": {"h2c"}},
+		"connection: upgrade": {"Connection": {"keep-alive, upgrade"}},
+	} {
+		r, _ := http.NewRequest("GET", "https://tunnel/x", nil)
+		r.Header = hdr
+		if code, kind := notPlainHTTP(r); code != http.StatusBadRequest || kind != "upgrade_not_supported" {
+			t.Errorf("%s: %d %s", name, code, kind)
+		}
+	}
+	r, _ := http.NewRequest("POST", "https://tunnel/x", nil)
+	r.Header.Set("Connection", "keep-alive")
+	if code, _ := notPlainHTTP(r); code != 0 {
+		t.Fatalf("plain POST refused: %d", code)
+	}
+}

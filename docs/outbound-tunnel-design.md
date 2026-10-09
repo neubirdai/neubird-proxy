@@ -178,10 +178,9 @@ A small Go service, ideally sharing code with the proxy repo.
 - **Deployment: a dedicated relay per customer.** Each customer gets its
   own relay: 3 replicas in its own namespace, behind its own load balancer
   with its own Elastic IPs and hostname, `<tenant>.tunnel.neubird.ai`. The
-  load balancer uses TLS passthrough: it forwards the encrypted connection
-  without decrypting it, so the relay itself terminates TLS and sees client
-  certificates. That's a load balancer setting; what travels inside is
-  HTTP. A failure, a heavy customer or a compromised relay
+  load balancer doesn't decrypt (layer 4): TLS ends at the relay, which sees
+  client certificates and plain HTTP. There's one layer of encryption on
+  the tunnel, not two (tunnel-protocol.md, "Encryption on each hop"). A failure, a heavy customer or a compromised relay
   process then affects only that customer. The relay is configured with
   `tenant: <tenant>` and refuses any other tenant's certificate. A proxy's
   tunnels can land on any of its relay's replicas; a request that arrives
