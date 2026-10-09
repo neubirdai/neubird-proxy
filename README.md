@@ -110,8 +110,11 @@ which of their proxy deployments (`aks-prod`) is connecting.
 4. Generate the proxy token with `neubird-proxy token`, and give it to
    NeuBird through your usual secure channel.
 
-Certificates last 90 days; the proxy warns from 30 days before expiry, and
-renewal repeats these steps.
+Certificates last 90 days; the proxy warns from 30 days before expiry.
+Renewal repeats steps 1 and 2, then you update the Secret with the new
+certificate and key: no restart, the proxy re-reads them (its log says
+`tunnel certificate or relay CA reloaded`) and NeuBird moves the tunnels
+over without failing any request.
 
 `validate` checks the files and shows the tunnel identity and certificate
 expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
