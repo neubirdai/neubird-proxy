@@ -2,9 +2,9 @@
 
 **Status: built; production infrastructure pending.** Proposed Oct 2,
 2026. The proxy's tunnel client shipped in v0.1.1, and the relay is
-neubird-relay, one dedicated relay per customer. Not built yet: tunnel-only
-TCP connections and the relay checking its callers (phase 2). Two reasons
-to build it:
+neubird-relay, one dedicated relay per customer in its NeuBird tenant's
+namespace, callable only by that tenant's ace. The tunnel carries HTTP and
+MCP only (see Scope). Two reasons to build it:
 
 - **Customers that allow no inbound path.** MetLife may require the proxy
   to connect *out* to NeuBird, with nothing exposed inbound. If an inbound
@@ -15,8 +15,8 @@ to build it:
   have rejected Teleport (GM and MetLife among them) because it can do far
   more than NeuBird needs, SSH and shell access included. The proxy plus
   relay reaches only allowlisted HTTP endpoints and MCP tools, and redacts
-  before anything leaves. See Coverage and the tunnel-only requirement for
-  what it doesn't cover yet.
+  before anything leaves. See Scope: it carries HTTP and MCP only, never
+  raw TCP.
 
 ## Summary
 
@@ -175,10 +175,12 @@ A small Go service, ideally sharing code with the proxy repo.
   tunnel if one fails before the request is sent. It never retries after
   the request was sent: a write must not run twice.
 - **Deployment: a dedicated relay per customer.** Each customer gets its
-  own relay: 3 replicas in its own namespace, behind its own TCP
-  (passthrough) load balancer with its own Elastic IPs and hostname,
-  `<tenant>.tunnel.neubird.ai`, so the relay itself terminates TLS and sees
-  client certificates. A failure, a heavy customer or a compromised relay
+  own relay: 3 replicas in its own namespace, behind its own load balancer
+  with its own Elastic IPs and hostname, `<tenant>.tunnel.neubird.ai`. The
+  load balancer uses TLS passthrough: it forwards the encrypted connection
+  without decrypting it, so the relay itself terminates TLS and sees client
+  certificates. That's a load balancer setting; what travels inside is
+  HTTP. A failure, a heavy customer or a compromised relay
   process then affects only that customer. The relay is configured with
   `tenant: <tenant>` and refuses any other tenant's certificate. A proxy's
   tunnels can land on any of its relay's replicas; a request that arrives
@@ -194,70 +196,25 @@ A small Go service, ideally sharing code with the proxy repo.
   (`<proxy>.<tenant>.relay.neubird.ai`) narrows it to one proxy. Another
   tenant's hostname is refused. Nothing else in the request is consulted.
 
-## Coverage and the tunnel-only requirement
+## Scope: HTTP and MCP only
 
-Through the proxy, the tunnel carries HTTP APIs and MCP servers. That's
-most connectors, and all three in MetLife's pilot. To replace Teleport for
-every customer, it also needs to carry connections that don't speak HTTP:
-databases over their own protocols (Postgres, MySQL, SQL Server, Oracle),
-and any other TCP service a connector reaches today through Teleport.
+The tunnel is an HTTP reverse proxy end to end, and nothing else:
 
-The proxy can't redact those. Its masking works on HTTP responses (JSON,
-text, SSE). A database's wire protocol is a binary format the proxy doesn't
-parse, often encrypted end to end with the database's own TLS. So these
-connections need a **tunnel-only** mode: bytes carried through the tunnel
-as they are, with no redaction.
+- **The relay sends HTTP requests,** each as an HTTP/2 request down the
+  tunnel. It has no way to open a connection to a host or port in the
+  customer's network.
+- **The proxy forwards them only to its configured upstreams,** through its
+  path, method and MCP tool allowlists and deny patterns, and redacts every
+  response.
+- **There is no TCP or port forwarding,** and none will be added. Raw TCP
+  (databases over their own protocols, for example) would carry bytes the
+  proxy can't inspect, allowlist or redact, which is exactly what makes
+  Teleport hard to approve. A backend that only speaks a binary protocol
+  needs an HTTP or MCP front end on the customer's side, behind the proxy,
+  so the same allowlists and redaction apply.
 
-**Requirements for tunnel-only connections:**
-
-- **Explicit opt-in, per connection, by the customer.** A separate
-  `tcp_connections` section, so a raw connection can't be mistaken for a
-  redacting one in review:
-
-  ```yaml
-  tcp_connections:
-    - name: claims-db
-      upstream: claims-db.internal:5432    # fixed host and port, as for HTTP
-  ```
-
-- **The destination still never comes from the request.** Each
-  tunnel-only connection reaches exactly one configured host and port, the
-  same guarantee as HTTP connections. There's no general-purpose TCP
-  forwarding.
-- **Customers must be told plainly that nothing is redacted.**
-  `validate` lists tunnel-only connections, the pod warns at every start,
-  and the docs say so. Customers who require redaction for everything, as
-  MetLife does, can simply not configure any.
-- **Least privilege moves to the backend.** Without an HTTP layer there
-  are no path, method or tool allowlists, so the account the connector
-  uses must be read-only, with access limited to what's needed. For
-  databases that means a dedicated user with SELECT on specific schemas.
-- **The backend credential sits with NeuBird.** The proxy injects
-  credentials for HTTP connections, but for a raw database connection the
-  login happens inside the database's own protocol. So NeuBird's connector
-  holds the database credential, as with Teleport today. A protocol-aware
-  mode that keeps credentials at the customer (the proxy logging in to
-  Postgres on NeuBird's behalf) is possible later, one protocol at a time.
-- **Audit and limits without content.** One line per connection (who,
-  which connection, start, duration, bytes each way), connection counts and
-  bytes in metrics, a cap on concurrent connections per tunnel-only
-  connection, and an idle timeout.
-
-**How it works:** each raw connection is one HTTP/2 stream on the existing
-tunnel, so it needs no new ports on the customer side.
-- **Proxy side:** opens a TCP connection to the configured upstream and
-  copies bytes both ways.
-- **Relay side:** the connector needs a hostname and port to connect to.
-  The relay listens on one port per tunnel-only connection, published on
-  its Service in the tenant's namespace (e.g.
-  `neubird-relay.metlife.svc:15432` for `claims-db`). Each tunnel-only
-  connection gets its own port, because database protocols carry no
-  hostname the relay could route on, the way HTTP routes on `Host`.
-
-**Open question:** which of NeuBird's connectors (see
-`raven-fdw-bridge/plugins`) speak a non-HTTP protocol today, and for which
-customers? That decides whether tunnel-only belongs in the first release of
-the relay or a later one.
+Through the proxy, that covers HTTP APIs and MCP servers: most connectors,
+and all three in MetLife's pilot.
 
 ## Certificates
 
@@ -317,8 +274,7 @@ These are estimates for one engineer, not yet sized by the team:
 | Hardening: replicas, alerts, outbound HTTP proxy support, load test, docs | 3–5 days |
 | Relay in each tenant's namespace, NetworkPolicy limiting it to the tenant's ace | done |
 | **Total, HTTP and MCP** | **about 3–4 weeks for one engineer; about 2 weeks for two** |
-| Tunnel-only (TCP) connections: proxy stream-to-TCP copy, relay per-connection ports, audit and limits, docs | 1–2 weeks more |
-| Relay checks the caller's workload identity (phase 2) | 3–5 days more |
+| Relay checks the caller (phase 2) | largely covered: only the tenant's ace can reach its relay (NetworkPolicy); a service account token check would be 3–5 days more |
 
 A pilot-only MVP (one relay instance, manual signing, no outbound HTTP
 proxy support) is about 1.5 weeks. It's enough for MetLife's first
@@ -326,10 +282,9 @@ end-to-end test, but not for production.
 
 ## Open questions for NeuBird
 
-- Which connectors speak a non-HTTP protocol, and which customers use them
-  (decides when tunnel-only ships)?
-- What do NeuBird's platform workloads use for identity today? That decides
-  how the relay checks callers in phase 2.
+- Which connectors speak a non-HTTP protocol, and which customers use
+  them? Those need an HTTP or MCP front end on the customer's side; the
+  tunnel won't carry raw TCP.
 - Where does connection configuration live in the platform, so moving a
   customer from Teleport or direct to the relay is a base URL change?
 
