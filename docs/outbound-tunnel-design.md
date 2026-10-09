@@ -164,9 +164,10 @@ A small Go service, ideally sharing code with the proxy repo.
 - **Mutual TLS** against the tenant CA. The tenant comes from the
   certificate's SPIFFE URI, for example
   `spiffe://neubird.ai/tenant/<tenant-id>/proxy/<name>`.
-- **Revocation:** a denylist of certificate serial numbers, checked at
-  every handshake, so a compromised certificate can be cut off immediately
-  without waiting for it to expire.
+- **Revocation and rotation:** the tenant records list every certificate
+  serial. A `revoked` one (compromised) is refused and its tunnels closed at
+  once; a `retired` one (renewed, or a CA rollover) is refused for new
+  tunnels and its open ones drain, so a planned rotation fails no requests.
 - **Tenant isolation:** a request for tenant A is only ever sent down
   tenant A's tunnels. That rule lives in one small, reviewed function with
   its own tests, because it's the relay's most important property.
@@ -267,11 +268,16 @@ This is the flow Sreekanth described:
    returns the certificate along with NeuBird's CA certificate.
 3. MetLife adds both to the Secret, and the CA to the proxy's trust store.
 
-NeuBird needs to stand up the tenant CA, probably on AWS Private CA (or
-step-ca), plus a signing runbook: who may sign, how a request is verified,
-and audit of every certificate issued. Certificates should last 90 days, and
-the proxy warns from 30 days before expiry. Renewal is the same CSR flow for
-v1, and can be automated later.
+The CA private keys are AWS KMS keys that never leave KMS: `neubird-relay`
+builds each certificate and asks KMS to sign it, so who may sign is an IAM
+permission and every signature is in CloudTrail (about $1 a month per key,
+against about $400 per CA for AWS Private CA). There are two: the tenant CA
+signs proxies' certificates, the relay CA signs relays' server
+certificates and is what proxies pin. Certificates last 90 days, and the
+proxy warns from 30 days before expiry. Renewal is the same CSR flow: the
+customer updates the proxy's Secret, the proxy picks the new certificate up
+without a restart, and NeuBird retires the old serial so open tunnels move
+to the new one with no failed requests.
 
 ## Security properties
 
@@ -306,7 +312,7 @@ These are estimates for one engineer, not yet sized by the team:
 |---|---|
 | Proxy: tunnel client, config, reconnects, metrics, `csr` and `test` support, tests | 3–4 days |
 | Relay MVP: mTLS, tenant mapping, revocation list, forwarding, streaming, tests | 4–6 days |
-| Tenant CA, signing runbook, first MetLife certificate | 1–2 days |
+| CAs with keys in KMS, signing runbook, first MetLife certificate | done in neubird-relay; the production keys remain |
 | NeuBird connectors pointed at the relay per tenant (depends on how connections are configured in the platform) | 1–3 days |
 | Hardening: replicas, alerts, outbound HTTP proxy support, load test, docs | 3–5 days |
 | Relay in each tenant's namespace, NetworkPolicy limiting it to the tenant's ace | done |
