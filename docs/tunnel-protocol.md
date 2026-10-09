@@ -66,18 +66,17 @@ a query or fragment.
 
 ## Only plain HTTP
 
-Only plain HTTP requests and responses cross the tunnel. Both ends refuse
-anything that could turn it into a byte stream, before it reaches a
-connection's settings: the relay before it chooses a tunnel, the proxy as
-a request arrives on one.
+Only plain HTTP requests and responses cross the tunnel; nothing can turn
+it into a byte stream. This doesn't depend on a connection's `methods` or
+`passthrough`.
 
-- `CONNECT`, including HTTP/2 extended CONNECT: 405 `method_not_allowed`.
-- `TRACE`: 405 `method_not_allowed`.
-- A protocol upgrade (an `Upgrade` header, or `upgrade` in `Connection`;
-  WebSocket, h2c): 400 `upgrade_not_supported`.
-
-This doesn't depend on a connection's `methods` or `passthrough`, or on
-what the HTTP libraries happen to reject.
+- **The relay**, before it chooses a tunnel, refuses `CONNECT` and `TRACE`
+  (405 `method_not_allowed`) and protocol upgrades: an `Upgrade` header, or
+  `upgrade` in `Connection`, such as WebSocket or h2c (400
+  `upgrade_not_supported`).
+- **The proxy** refuses `CONNECT` and `TRACE` again as they arrive on a
+  tunnel (405). Upgrades can't arrive: HTTP/2 forbids those headers, the
+  HTTP/2 server answers them itself, and it resets extended CONNECT.
 
 ## Encryption on each hop
 

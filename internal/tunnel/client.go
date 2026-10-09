@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http/httpproxy"
 	"golang.org/x/net/http2"
 
@@ -205,11 +204,15 @@ func (c *Client) Connected() int { return int(c.live.Load()) }
 // and returns the connection's read error, if any, as the close reason.
 func (c *Client) serve(ctx context.Context, conn *acceptedConn) error {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if code, kind := notPlainHTTP(r); code != 0 {
-			c.log.Warn("tunnel request refused", "method", r.Method, "path", r.URL.Path, "error", kind)
+		// Only plain HTTP crosses the tunnel, whatever a connection's
+		// settings. HTTP/2 already keeps upgrades out: the server answers
+		// Upgrade and Connection headers itself and resets extended
+		// CONNECT. CONNECT and TRACE are refused here.
+		if r.Method == http.MethodConnect || r.Method == http.MethodTrace {
+			c.log.Warn("tunnel request refused", "method", r.Method, "path", r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(code)
-			fmt.Fprintf(w, "{\"error\":%q,\"reason\":\"only plain HTTP requests cross the tunnel\"}\n", kind)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprintln(w, `{"error":"method_not_allowed","reason":"only plain HTTP requests cross the tunnel"}`)
 			return
 		}
 		c.handler.ServeHTTP(w, r.WithContext(WithVia(r.Context())))
@@ -418,19 +421,6 @@ func (c *Client) dialRelay(ctx context.Context, relay string) (net.Conn, error) 
 		return nil, errors.New("outbound proxy sent data before the TLS handshake")
 	}
 	return conn, nil
-}
-
-// notPlainHTTP refuses, whatever a connection's settings, every tunnel
-// request that could become a byte stream: CONNECT (including HTTP/2
-// extended CONNECT), protocol upgrades such as WebSocket, and TRACE.
-func notPlainHTTP(r *http.Request) (code int, kind string) {
-	switch {
-	case r.Method == http.MethodConnect || r.Method == http.MethodTrace:
-		return http.StatusMethodNotAllowed, "method_not_allowed"
-	case r.Header.Get("Upgrade") != "" || httpguts.HeaderValuesContainsToken(r.Header["Connection"], "upgrade"):
-		return http.StatusBadRequest, "upgrade_not_supported"
-	}
-	return 0, ""
 }
 
 type viaKey struct{}
