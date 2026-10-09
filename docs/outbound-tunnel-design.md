@@ -41,12 +41,12 @@ A prototype (Oct 2, outside the repo) confirmed the approach:
 ## Architecture
 
 ```
- MetLife (AKS)                              │  NeuBird
+ MetLife (AKS)                              │  NeuBird (namespace metlife: MetLife's tenant stack)
                                             │
- backends ◀── APIM ◀── neubird-proxy ──mTLS─┼──▶ relay ◀── NeuBird connectors
-                        (dials out,         │    (maps cert → tenant,       (call the relay
-                         serves HTTP/2      │     forwards requests          per tenant, with
-                         on the tunnel)     │     down that tenant's         the proxy token)
+ backends ◀── APIM ◀── neubird-proxy ──mTLS─┼──▶ relay ◀────────── ace ◀── falcon
+                        (dials out,         │    (maps cert → tenant,   (calls the relay's
+                         serves HTTP/2      │     forwards requests      Service with the
+                         on the tunnel)     │     down MetLife's         proxy token)
                                             │     tunnels)
 ```
 
@@ -56,9 +56,10 @@ A prototype (Oct 2, outside the repo) confirmed the approach:
    pinned NeuBird CA.
 2. **The relay verifies the certificate** and reads the tenant from it,
    then registers the connection as one of that tenant's tunnels.
-3. **A NeuBird connector calls the tenant's relay hostname**, e.g.
-   `https://metlife.relay.neubird.ai/splunk/services/mcp`, sending the proxy
-   token as it does today (see Connecting NeuBird's connectors).
+3. **MetLife's ace calls the relay's Service** in MetLife's namespace,
+   e.g. `http://neubird-relay.metlife.svc.cluster.local:8080/splunk/services/mcp`,
+   sending the proxy token as it does today (see Connecting NeuBird's
+   connectors).
 4. **The relay forwards the request** as an HTTP/2 stream down one of the
    tenant's tunnels. The proxy handles it exactly as an inbound request,
    and the response streams back the same way.
@@ -70,34 +71,31 @@ flow control and streaming without a custom framing protocol.
 
 ## Connecting NeuBird's connectors
 
-The relay is transparent to connector code. Each tenant gets its own
-hostname on the relay, and a connector sees exactly what it sees with a
-direct proxy: a base URL plus the proxy token.
+Every NeuBird tenant runs its own stack (ace, falcon, …) in its own
+namespace, and a customer's relay runs in that namespace too, deployed
+with the stack. The relay is transparent to connector code: a connector
+sees exactly what it sees with a direct proxy, a base URL plus the proxy
+token.
 
 ```
 direct (inbound):   https://proxy.metlife.com/splunk/services/mcp
-through the relay:  https://metlife.relay.neubird.ai/splunk/services/mcp
+through the relay:  http://neubird-relay.metlife.svc.cluster.local:8080/splunk/services/mcp
 ```
 
-- **The hostname picks the tenant.** The relay reads it from the request's
-  `Host` and forwards only down tunnels whose certificate names that
-  tenant.
+- **The relay serves one tenant.** It's configured with `tenant: metlife`,
+  takes any request on its Service as MetLife's, and forwards only down
+  tunnels whose certificate names MetLife.
 - **The path is unchanged.** `/splunk/...` still selects the connection on
   the proxy, and the proxy still applies the token check, allowlists and
   redaction. Moving a customer from direct to relay changes only the base
   URL in the connection's configuration.
-- **Onboarding is automatic.** A wildcard DNS name and certificate
-  (`*.relay.neubird.ai`) cover every tenant, and a tenant's hostname starts
-  working when its first tunnel connects. A new customer needs only a
-  signed certificate; nothing is configured on the relay.
-- **Several proxies per customer** (prod and dev, two regions) get one
-  hostname each, taken from the certificate's proxy name, e.g.
-  `aks-prod.metlife.relay.neubird.ai` for
-  `spiffe://neubird.ai/tenant/metlife/proxy/aks-prod`. The bare tenant
-  hostname spreads load across all of that tenant's proxies.
-
-Hostnames are better than a path prefix (`relay.neubird.ai/t/metlife/…`)
-because not every connector accepts a base URL with a path.
+- **No load balancer, DNS or certificate on the request side.** The call
+  stays inside the tenant's namespace. (Earlier drafts had a shared
+  internal load balancer on `*.relay.neubird.ai`.)
+- **Several proxies per customer** (prod and dev, two regions): requests
+  spread across all of them; a caller that sets the Host header
+  `aks-prod.metlife.relay.neubird.ai` reaches only the proxy whose
+  certificate is `spiffe://neubird.ai/tenant/metlife/proxy/aks-prod`.
 
 ### Two faces, kept apart
 
@@ -106,25 +104,25 @@ be mixed:
 
 | Endpoint | Who connects | Reachable from |
 |---|---|---|
-| `<tenant>.tunnel.neubird.ai` | That customer's proxies, with mutual TLS, to that customer's dedicated relay | The internet |
-| `*.relay.neubird.ai` | NeuBird's connectors | NeuBird's platform network only: private DNS and an internal load balancer |
+| `<tenant>.tunnel.neubird.ai:443` | That customer's proxies, with mutual TLS, to that customer's dedicated relay | The internet |
+| The relay's Service, port 8080 | That tenant's ace | Only pods labelled `app.kubernetes.io/name: ace` in the tenant's namespace (NetworkPolicy) |
 
-If the per-tenant hostnames were public, the relay would be a public way
-into every customer's network, guarded only by the proxy token.
+If the request port were reachable from elsewhere, the relay would be a
+way into the customer's network guarded only by the proxy token.
 
-### Don't trust the Host header alone
+### Who may call the relay
 
-Anything inside NeuBird's network can send `Host: metlife.relay…`, so the
-hostname says which tenant a request is *for*, not whether the caller may
-reach it. Two layers guard that:
+Two layers, so a mistake in one doesn't expose a customer:
 
-1. **Proxy tokens are per customer** (already true). A connector for
-   another tenant doesn't hold MetLife's token, so MetLife's proxy refuses
-   the request with a 401.
-2. **The relay checks the caller** (phase 2). It authenticates the calling
-   workload (mTLS or a workload identity token inside the platform) and
-   checks that the workload may reach that tenant before forwarding. A
-   mistake in one layer then doesn't expose a customer.
+1. **The network:** the relay's NetworkPolicy admits its request port only
+   from its own tenant's ace. Another tenant's ace, or any other pod, can't
+   connect. This needs NetworkPolicy enforcement in the cluster (prod_cluster
+   runs the VPC CNI network policy agent).
+2. **Proxy tokens are per customer** (already true). A caller without
+   MetLife's token gets a 401 from MetLife's proxy.
+
+A third layer, the relay verifying a Kubernetes service account token
+from ace, is possible later if the network check isn't considered enough.
 
 ## Proxy changes
 
@@ -184,16 +182,16 @@ A small Go service, ideally sharing code with the proxy repo.
   `tenant: <tenant>` and refuses any other tenant's certificate. A proxy's
   tunnels can land on any of its relay's replicas; a request that arrives
   at a replica without the tunnel is forwarded to one that has it.
-  Customers configure one hostname and one port. NeuBird's connectors
-  reach every customer's relay through one shared internal load balancer
-  that routes by hostname. (Updated Oct 2026; earlier drafts used one
+  Customers configure one hostname and one port. The relay runs in the
+  NeuBird tenant's own namespace, deployed with the tenant's stack, and the
+  tenant's ace calls its Service. (Updated Oct 2026; earlier drafts used one
   hostname per replica, then one relay shared by every customer. See
   neubird-relay deploy/production.)
 - **Metrics:** tunnels per tenant, requests, latency, errors, and tenants
   with no live tunnel, which should alert.
-- **Routing** by hostname, as described in Connecting NeuBird's
-  connectors: the tenant from `Host`, checked against the tunnel
-  certificates' tenant, never anything else in the request.
+- **Routing:** a dedicated relay serves its one tenant; a per-proxy Host
+  (`<proxy>.<tenant>.relay.neubird.ai`) narrows it to one proxy. Another
+  tenant's hostname is refused. Nothing else in the request is consulted.
 
 ## Coverage and the tunnel-only requirement
 
@@ -249,8 +247,9 @@ tunnel, so it needs no new ports on the customer side.
 - **Proxy side:** opens a TCP connection to the configured upstream and
   copies bytes both ways.
 - **Relay side:** the connector needs a hostname and port to connect to.
-  The relay listens on one internal port per tenant tunnel-only connection,
-  published as `claims-db.metlife.relay.neubird.ai:<port>`. Each tunnel-only
+  The relay listens on one port per tunnel-only connection, published on
+  its Service in the tenant's namespace (e.g.
+  `neubird-relay.metlife.svc:15432` for `claims-db`). Each tunnel-only
   connection gets its own port, because database protocols carry no
   hostname the relay could route on, the way HTTP routes on `Host`.
 
@@ -310,7 +309,7 @@ These are estimates for one engineer, not yet sized by the team:
 | Tenant CA, signing runbook, first MetLife certificate | 1–2 days |
 | NeuBird connectors pointed at the relay per tenant (depends on how connections are configured in the platform) | 1–3 days |
 | Hardening: replicas, alerts, outbound HTTP proxy support, load test, docs | 3–5 days |
-| Per-tenant hostnames: wildcard DNS and certificate, internal load balancer, Host-based routing | 1–2 days |
+| Relay in each tenant's namespace, NetworkPolicy limiting it to the tenant's ace | done |
 | **Total, HTTP and MCP** | **about 3–4 weeks for one engineer; about 2 weeks for two** |
 | Tunnel-only (TCP) connections: proxy stream-to-TCP copy, relay per-connection ports, audit and limits, docs | 1–2 weeks more |
 | Relay checks the caller's workload identity (phase 2) | 3–5 days more |

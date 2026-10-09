@@ -78,9 +78,8 @@ What the customer needs on their network:
 
 Requests that arrive through the tunnel take exactly the same path as
 inbound ones: token check, allowlists, redaction, and the audit line
-(marked `via: tunnel`). The customer never uses NeuBird's per-tenant relay
-hostnames (`<tenant>.relay.neubird.ai`); those are how NeuBird's own
-connectors reach them, on NeuBird's side.
+(marked `via: tunnel`). On NeuBird's side, the relay runs in the NeuBird
+tenant's own namespace and only that tenant's ace can call it.
 Protocol: [docs/tunnel-protocol.md](docs/tunnel-protocol.md). Design:
 [docs/outbound-tunnel-design.md](docs/outbound-tunnel-design.md).
 
