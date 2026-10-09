@@ -64,6 +64,35 @@ a query or fragment.
 - **Responses stream:** the relay copies and flushes response bodies as
   they arrive, so SSE and newline-delimited JSON stay incremental.
 
+## Only plain HTTP
+
+Only plain HTTP requests and responses cross the tunnel; nothing can turn
+it into a byte stream. This doesn't depend on a connection's `methods` or
+`passthrough`.
+
+- **The relay**, before it chooses a tunnel, refuses `CONNECT` and `TRACE`
+  (405 `method_not_allowed`) and protocol upgrades: an `Upgrade` header, or
+  `upgrade` in `Connection`, such as WebSocket or h2c (400
+  `upgrade_not_supported`).
+- **The proxy** refuses `CONNECT` and `TRACE` again as they arrive on a
+  tunnel (405). Upgrades can't arrive: HTTP/2 forbids those headers, the
+  HTTP/2 server answers them itself, and it resets extended CONNECT.
+
+## Encryption on each hop
+
+| Hop | On the wire | Who can read it |
+|---|---|---|
+| NeuBird's agent (ace) → relay, inside NeuBird's cluster | plain HTTP | the relay |
+| relay ↔ proxy, the tunnel | one mutual TLS 1.3 connection carrying plain HTTP/2 requests and responses | only the relay and the proxy |
+| proxy → backend (e.g. Splunk), inside the customer's network | HTTPS if the backend requires it | the proxy and the backend |
+
+The proxy decrypts the backend's response, redacts it, and writes plain
+HTTP into the tunnel; the tunnel's TLS is the only encryption on that hop.
+The HTTPS to the backend is a separate hop on the customer's side, not a
+second layer. The load balancer in front of the relay doesn't decrypt;
+TLS ends at the relay, which needs the client certificate and routes on
+the plain HTTP inside.
+
 ## Accepting a tunnel
 
 With TLS 1.3 the proxy's handshake completes before the relay has checked
@@ -75,14 +104,16 @@ connected only once the relay's first bytes arrive (within 10 s), and
 
 ## Liveness and shutdown
 
-- **Pings:** both sides send HTTP/2 PING after 15 s without traffic, and
-  drop the connection when no answer arrives within 10 s.
+- **Pings:** both sides send HTTP/2 PING after 5 s without traffic, and
+  drop the connection when no answer arrives within 5 s. A path that dies
+  silently (packets dropped by a firewall or NAT) is noticed within about
+  10 s; until then, requests sent down that tunnel wait.
 - **Proxy shutdown** sends GOAWAY: the relay stops sending new requests on
   that connection, and in-flight ones finish.
 - **Relay restarts** send GOAWAY: in-flight requests finish, then the
   connection closes. The relay stops accepting tunnels first, so the
   proxy's reconnect reaches another replica.
-- **Reconnects** use exponential backoff (1 s doubling to 60 s, with equal
+- **Reconnects** use exponential backoff (1 s doubling to 15 s, with equal
   jitter: half of each wait is random). A tunnel that stayed up 10 s resets the backoff, so the
   reconnect after a relay restart takes about a second.
 

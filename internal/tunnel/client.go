@@ -25,10 +25,12 @@ import (
 )
 
 const (
-	pingAfter   = 15 * time.Second // PING after this long without traffic
-	pingTimeout = 10 * time.Second // drop the tunnel if a PING goes unanswered
+	pingAfter   = 5 * time.Second // PING after this long without traffic
+	pingTimeout = 5 * time.Second // drop the tunnel if a PING goes unanswered
 	backoffMin  = time.Second
-	backoffMax  = 60 * time.Second
+	// Short enough that a tunnel is back within ~15 s of the network
+	// returning, even after a long outage.
+	backoffMax = 15 * time.Second
 	// A tunnel up this long resets the backoff, so a relay restart (GOAWAY)
 	// is followed by a reconnect within a second, while a relay that
 	// accepts and drops at once still gets backed off.
@@ -202,6 +204,17 @@ func (c *Client) Connected() int { return int(c.live.Load()) }
 // and returns the connection's read error, if any, as the close reason.
 func (c *Client) serve(ctx context.Context, conn *acceptedConn) error {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only plain HTTP crosses the tunnel, whatever a connection's
+		// settings. HTTP/2 already keeps upgrades out: the server answers
+		// Upgrade and Connection headers itself and resets extended
+		// CONNECT. CONNECT and TRACE are refused here.
+		if r.Method == http.MethodConnect || r.Method == http.MethodTrace {
+			c.log.Warn("tunnel request refused", "method", r.Method, "path", r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprintln(w, `{"error":"method_not_allowed","reason":"only plain HTTP requests cross the tunnel"}`)
+			return
+		}
 		c.handler.ServeHTTP(w, r.WithContext(WithVia(r.Context())))
 	})
 	c.h2.ServeConn(conn, &http2.ServeConnOpts{Context: ctx, BaseConfig: c.hs, Handler: handler})
