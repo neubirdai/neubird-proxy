@@ -56,12 +56,22 @@ a query or fragment.
   query, headers (including the proxy token in `Authorization`) and body.
   The path starts with the proxy connection's name, exactly as it would
   for a direct inbound request.
-- **The relay sets `:authority` to `tunnel`.** The proxy routes tunnel
-  requests by path only.
+- **The relay sets `:authority` to `tunnel`.** The proxy routes by host
+  first and then by path; `tunnel` matches no connection's host (don't
+  name one that), so tunnel requests are routed by path.
 - **Hop-by-hop headers are removed,** as for any proxy. The relay adds
   `X-Request-Id` if the connector didn't send one.
 - **Responses stream:** the relay copies and flushes response bodies as
   they arrive, so SSE and newline-delimited JSON stay incremental.
+
+## Accepting a tunnel
+
+With TLS 1.3 the proxy's handshake completes before the relay has checked
+the proxy's certificate; a refusal (revoked, unrecorded, expired, another
+tenant) arrives as a TLS alert on the proxy's first read. The relay starts
+HTTP/2 as soon as it accepts a tunnel, so the proxy counts a tunnel as
+connected only once the relay's first bytes arrive (within 10 s), and
+`neubird-proxy test` does the same.
 
 ## Liveness and shutdown
 
@@ -72,8 +82,8 @@ a query or fragment.
 - **Relay restarts** send GOAWAY: in-flight requests finish, then the
   connection closes. The relay stops accepting tunnels first, so the
   proxy's reconnect reaches another replica.
-- **Reconnects** use exponential backoff (1 s doubling to 60 s, with full
-  jitter). A tunnel that stayed up 10 s resets the backoff, so the
+- **Reconnects** use exponential backoff (1 s doubling to 60 s, with equal
+  jitter: half of each wait is random). A tunnel that stayed up 10 s resets the backoff, so the
   reconnect after a relay restart takes about a second.
 
 ## Versioning

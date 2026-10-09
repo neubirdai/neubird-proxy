@@ -443,3 +443,69 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// With TLS 1.3 the proxy's handshake succeeds before the relay has checked
+// its certificate; a refused certificate must not count as connected.
+func TestTunnelRefusedCertificateIsNotConnected(t *testing.T) {
+	p := newPKI(t)
+	relay := newRelay(t, p, ALPN)
+	other := newPKI(t) // the proxy's certificate is from a CA the relay doesn't trust
+	cfg := other.proxyConfig(t, relay.ln.Addr().String())
+	cfg.CAFile = p.caFile // but it does pin the right relay CA
+	c, reg := newClient(t, cfg, http.NotFoundHandler())
+	c.Start(context.Background())
+	waitFor(t, func() bool { return metricHas(reg, `result="rejected"`) })
+	if metricHas(reg, `result="ok"`) || c.Connected() != 0 {
+		t.Fatalf("refused tunnel counted as connected (%d up)", c.Connected())
+	}
+	if _, err := c.Check(context.Background(), relay.ln.Addr().String()); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("Check of a refused certificate: %v", err)
+	}
+}
+
+// A renewed certificate written over the old files is used on the next
+// connect, without a restart.
+func TestTunnelReloadsRenewedCertificate(t *testing.T) {
+	p := newPKI(t)
+	relay := newRelay(t, p, ALPN)
+	cfg := p.proxyConfig(t, relay.ln.Addr().String())
+	c, _ := newClient(t, cfg, http.NotFoundHandler())
+	c.Start(context.Background())
+	first := relay.next(t)
+	waitFor(t, func() bool { return c.Connected() == 1 })
+
+	renewed, _, _ := p.leaf(t, "renewed", leafOpts{uris: []string{"spiffe://neubird.ai/tenant/metlife/proxy/aks-prod"}})
+	os.Rename(filepath.Join(p.dir, "renewed.crt"), cfg.CertFile)
+	os.Rename(filepath.Join(p.dir, "renewed.key"), cfg.KeyFile)
+	first.cc.Close() // the relay closes the tunnel (e.g. the old certificate expired)
+	relay.next(t)
+	c.idMu.Lock()
+	got := c.id.Leaf.SerialNumber
+	c.idMu.Unlock()
+	want, _ := x509.ParseCertificate(renewed.Certificate[0])
+	if got.Cmp(want.SerialNumber) != 0 {
+		t.Fatalf("tunnel uses serial %s, want the renewed %s", got, want.SerialNumber)
+	}
+}
+
+// A client started before its certificate files load keeps trying and
+// connects once they do.
+func TestTunnelStartsWithoutIdentity(t *testing.T) {
+	p := newPKI(t)
+	relay := newRelay(t, p, ALPN)
+	cfg := p.proxyConfig(t, relay.ln.Addr().String())
+	good, _ := os.ReadFile(cfg.CertFile)
+	os.WriteFile(cfg.CertFile, []byte("not a certificate"), 0o600)
+	reg := &metrics.Registry{}
+	c := New(cfg, nil, http.NotFoundHandler(), slog.New(slog.NewTextHandler(io.Discard, nil)), reg)
+	c.proxyFor = func(*url.URL) (*url.URL, error) { return nil, nil }
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		c.Shutdown(ctx)
+	})
+	c.Start(context.Background())
+	waitFor(t, func() bool { return metricHas(reg, `result="identity_error"`) })
+	os.WriteFile(cfg.CertFile, good, 0o600)
+	relay.next(t)
+}
