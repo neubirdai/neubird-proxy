@@ -51,9 +51,9 @@ A prototype (Oct 2, outside the repo) confirmed the approach:
 ```
 
 1. **The proxy dials out** to `metlife.tunnel.neubird.ai:443`, MetLife's
-   dedicated relay, with its client certificate: MetLife's key, signed by a
-   NeuBird tenant CA. It checks the relay's server certificate against a
-   pinned NeuBird CA.
+   dedicated relay, with its client certificate: MetLife's key, signed by
+   MetLife's own tenant CA. It checks the relay's server certificate against
+   MetLife's relay CA, which it pins.
 2. **The relay verifies the certificate** and reads the tenant from it,
    then registers the connection as one of that tenant's tunnels.
 3. **MetLife's ace calls the relay's Service** in MetLife's namespace,
@@ -161,7 +161,8 @@ tunnel:
 
 A small Go service, ideally sharing code with the proxy repo.
 
-- **Mutual TLS** against the tenant CA. The tenant comes from the
+- **Mutual TLS** against the customer's own tenant CA (the only CA its relay
+  trusts). The tenant comes from the
   certificate's SPIFFE URI, for example
   `spiffe://neubird.ai/tenant/<tenant-id>/proxy/<name>`.
 - **Revocation and rotation:** the tenant records list every certificate
@@ -221,16 +222,22 @@ and all three in MetLife's pilot.
 This is the flow Sreekanth described:
 1. MetLife runs `neubird-proxy csr`, keeps the key in a Kubernetes Secret,
    and sends NeuBird the CSR.
-2. NeuBird signs it with the tenant CA, embedding the tenant identity, and
-   returns the certificate along with NeuBird's CA certificate.
+2. NeuBird signs it with MetLife's own tenant CA, embedding the tenant
+   identity, and returns the certificate along with MetLife's relay CA
+   certificate.
 3. MetLife adds both to the Secret, and the CA to the proxy's trust store.
 
-The CA private keys are AWS KMS keys that never leave KMS: `neubird-relay`
-builds each certificate and asks KMS to sign it, so who may sign is an IAM
-permission and every signature is in CloudTrail (about $1 a month per key,
-against about $400 per CA for AWS Private CA). There are two: the tenant CA
-signs proxies' certificates, the relay CA signs relays' server
-certificates and is what proxies pin. Certificates last 90 days, and the
+**Every customer has its own two CAs;** none is shared, so a certificate
+issued for one customer can't be valid on another's relay. The tenant CA
+signs that customer's proxy certificates; the relay CA signs that
+customer's relay's server certificate and is what their proxies pin. Each
+CA certificate names its customer, a relay refuses to start with any other
+customer's CA, and the signing tools refuse to sign across customers. The
+CA private keys are AWS KMS keys that never leave KMS (and never sit in the
+relay pod): `neubird-relay` builds each certificate and asks KMS to sign
+it, so who may sign is an IAM permission and every signature is in
+CloudTrail (about $2 a month per customer for two keys, against about $400
+per CA for AWS Private CA). Certificates last 90 days, and the
 proxy warns from 30 days before expiry. Renewal is the same CSR flow: the
 customer updates the proxy's Secret, the proxy picks the new certificate up
 without a restart, and NeuBird retires the old serial so open tunnels move
