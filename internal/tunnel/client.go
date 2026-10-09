@@ -7,12 +7,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http/httpproxy"
@@ -32,14 +34,29 @@ const (
 	// accepts and drops at once still gets backed off.
 	stableAfter = 10 * time.Second
 	dialTimeout = 15 * time.Second
+	// With TLS 1.3 the client's handshake completes before the relay has
+	// checked the client certificate; a refusal arrives as an alert on the
+	// first read. The relay starts HTTP/2 at once, so a tunnel only counts
+	// as connected once its first bytes arrive.
+	acceptTimeout = 10 * time.Second
+	// How often the certificate files are re-read and the expiry metric
+	// refreshed, besides on every connect.
+	identityRefresh = time.Hour
 )
 
 // Client keeps tunnels open to every relay and serves handler over them.
 type Client struct {
 	cfg     *config.Tunnel
-	id      *Identity
 	handler http.Handler
 	log     *slog.Logger
+
+	// The identity is re-read from its files on every connect and every
+	// identityRefresh, so a renewed Secret takes effect on the next
+	// reconnect without a restart. nil until the files first load.
+	idMu    sync.Mutex
+	id      *Identity
+	idError string // last load error, logged once per change
+	live    atomic.Int64
 
 	hs *http.Server // carries the graceful-shutdown hook for every tunnel
 	h2 *http2.Server
@@ -59,7 +76,8 @@ type Client struct {
 }
 
 // New prepares a client. handler is the proxy itself; requests from a
-// tunnel go through it exactly like inbound ones.
+// tunnel go through it exactly like inbound ones. id may be nil when the
+// certificate files don't load yet; the client keeps trying.
 func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logger, reg *metrics.Registry) *Client {
 	c := &Client{
 		cfg: cfg, id: id, handler: handler, log: log,
@@ -91,12 +109,12 @@ func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logge
 // open until Shutdown (or until ctx ends, which also cancels in-flight
 // requests, so pass a context that outlives the shutdown signal).
 func (c *Client) Start(ctx context.Context) {
-	c.expiry.Set(c.id.DaysLeft())
-	c.log.Info("tunnel starting", "tenant", c.id.Tenant, "proxy", c.id.Proxy, "relays", c.cfg.Relays,
-		"connections_per_relay", c.cfg.ConnectionsPerRelay, "cert_expires", c.id.Leaf.NotAfter.Format(time.RFC3339))
-	if c.id.DaysLeft() < 30 {
-		c.log.Warn("tunnel certificate expires soon", "days", int(c.id.DaysLeft()))
+	if id, err := c.identity(); err == nil {
+		c.log.Info("tunnel starting", "tenant", id.Tenant, "proxy", id.Proxy, "relays", c.cfg.Relays,
+			"connections_per_relay", c.cfg.ConnectionsPerRelay, "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339))
 	}
+	c.wg.Add(1)
+	go c.refresh(ctx)
 	for _, relay := range c.cfg.Relays {
 		for i := 0; i < c.cfg.ConnectionsPerRelay; i++ {
 			c.wg.Add(1)
@@ -133,13 +151,20 @@ func (c *Client) keep(ctx context.Context, relay string) {
 				return
 			}
 			c.log.Warn("tunnel connect failed", "relay", relay, "error", err.Error(), "retry_in", backoff.String())
+		} else if c.isClosing() {
+			// Connected while shutting down: hs.Shutdown has already sent
+			// GOAWAY to the others and wouldn't reach this one.
+			conn.Close()
+			return
 		} else {
 			c.up.Add(1, relay)
+			c.live.Add(1)
 			c.log.Info("tunnel connected", "relay", relay)
-			c.serve(ctx, conn)
+			err := c.serve(ctx, conn)
+			c.live.Add(-1)
 			c.up.Add(-1, relay)
 			lived := time.Since(start)
-			c.log.Info("tunnel closed", "relay", relay, "lived", lived.Round(time.Second).String())
+			c.log.Info("tunnel closed", "relay", relay, "lived", lived.Round(time.Second).String(), "reason", closeReason(err))
 			if lived > stableAfter {
 				backoff = backoffMin
 			}
@@ -147,7 +172,8 @@ func (c *Client) keep(ctx context.Context, relay string) {
 		if c.isClosing() {
 			return
 		}
-		// Full jitter, so a relay restart doesn't get every proxy back at once.
+		// Equal jitter (half fixed, half random), so a relay restart doesn't
+		// get every proxy back at once.
 		wait := backoff/2 + rand.N(backoff/2+1)
 		select {
 		case <-ctx.Done():
@@ -169,17 +195,119 @@ func (c *Client) isClosing() bool {
 	}
 }
 
-// serve runs HTTP/2 with the relay as the client (docs/tunnel-protocol.md).
-func (c *Client) serve(ctx context.Context, conn *tls.Conn) {
+// Connected is the number of tunnels currently up, across relays.
+func (c *Client) Connected() int { return int(c.live.Load()) }
+
+// serve runs HTTP/2 with the relay as the client (docs/tunnel-protocol.md)
+// and returns the connection's read error, if any, as the close reason.
+func (c *Client) serve(ctx context.Context, conn *acceptedConn) error {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.handler.ServeHTTP(w, r.WithContext(WithVia(r.Context())))
 	})
 	c.h2.ServeConn(conn, &http2.ServeConnOpts{Context: ctx, BaseConfig: c.hs, Handler: handler})
+	return conn.readErr()
+}
+
+func closeReason(err error) string {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return "closed"
+	}
+	return err.Error()
+}
+
+// identity returns the tunnel identity, re-reading the files first. A file
+// that stops loading (mid-rotation, or a bad Secret) keeps the last good
+// identity in use; the error is logged once per change.
+func (c *Client) identity() (*Identity, error) {
+	id, err := Load(c.cfg)
+	c.idMu.Lock()
+	defer c.idMu.Unlock()
+	if err != nil {
+		if msg := err.Error(); msg != c.idError {
+			c.idError = msg
+			if c.id != nil {
+				c.log.Warn("tunnel certificate files don't load; keeping the previous certificate", "error", msg)
+			} else {
+				c.log.Error("tunnel certificate files don't load; no tunnel until they do", "error", msg)
+			}
+		}
+		if c.id == nil {
+			return nil, err
+		}
+		return c.id, nil
+	}
+	c.idError = ""
+	// Identities are replaced, never modified: connects in progress keep
+	// the one they started with.
+	if c.id == nil || !c.id.Leaf.Equal(id.Leaf) || !c.id.RelayCAs.Equal(id.RelayCAs) {
+		if c.id != nil {
+			c.log.Info("tunnel certificate or relay CA reloaded", "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339))
+		}
+		c.id = id
+	}
+	c.expiry.Set(c.id.DaysLeft())
+	if c.id.DaysLeft() < 30 {
+		c.log.Warn("tunnel certificate expires soon", "days", int(c.id.DaysLeft()))
+	}
+	return c.id, nil
+}
+
+// refresh re-reads the identity periodically, so the expiry metric stays
+// current and a renewed certificate is noticed without a reconnect.
+func (c *Client) refresh(ctx context.Context) {
+	defer c.wg.Done()
+	t := time.NewTicker(identityRefresh)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.closing:
+			return
+		case <-t.C:
+			c.identity()
+		}
+	}
+}
+
+// acceptedConn is a tunnel connection whose first bytes from the relay have
+// been read (to learn whether the relay accepted the client certificate);
+// Read returns them first.
+type acceptedConn struct {
+	*tls.Conn
+	br *bufio.Reader
+
+	mu  sync.Mutex
+	err error
+}
+
+func (a *acceptedConn) Read(p []byte) (int, error) {
+	n, err := a.br.Read(p)
+	if err != nil {
+		a.mu.Lock()
+		if a.err == nil {
+			a.err = err
+		}
+		a.mu.Unlock()
+	}
+	return n, err
+}
+
+func (a *acceptedConn) readErr() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.err
 }
 
 // connect dials the relay (through the outbound proxy if one is set), runs
-// mutual TLS and checks the negotiated protocol.
-func (c *Client) connect(ctx context.Context, relay string) (*tls.Conn, error) {
+// mutual TLS, checks the negotiated protocol and waits for the relay to
+// accept the client certificate.
+func (c *Client) connect(ctx context.Context, relay string) (*acceptedConn, error) {
+	id, err := c.identity()
+	if err != nil {
+		c.connects.Inc(relay, "identity_error")
+		return nil, fmt.Errorf("tunnel certificate: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	host, _, _ := net.SplitHostPort(relay)
@@ -190,8 +318,8 @@ func (c *Client) connect(ctx context.Context, relay string) (*tls.Conn, error) {
 		return nil, err
 	}
 	conn := tls.Client(raw, &tls.Config{
-		Certificates: []tls.Certificate{c.id.Certificate},
-		RootCAs:      c.id.RelayCAs,
+		Certificates: []tls.Certificate{id.Certificate},
+		RootCAs:      id.RelayCAs,
 		ServerName:   host,
 		NextProtos:   []string{ALPN},
 		MinVersion:   tls.VersionTLS13,
@@ -206,12 +334,21 @@ func (c *Client) connect(ctx context.Context, relay string) (*tls.Conn, error) {
 		c.connects.Inc(relay, "protocol_mismatch")
 		return nil, fmt.Errorf("relay negotiated protocol %q, want %q", p, ALPN)
 	}
+	conn.SetReadDeadline(time.Now().Add(acceptTimeout))
+	br := bufio.NewReader(conn)
+	if _, err := br.Peek(1); err != nil {
+		conn.Close()
+		c.connects.Inc(relay, "rejected")
+		return nil, fmt.Errorf("relay refused the tunnel (certificate revoked, unrecorded, expired or for another tenant?): %w", err)
+	}
+	conn.SetReadDeadline(time.Time{})
 	c.connects.Inc(relay, "ok")
-	return conn, nil
+	return &acceptedConn{Conn: conn, br: br}, nil
 }
 
-// Check connects to one relay and completes the mutual-TLS handshake, then
-// closes the connection. For `neubird-proxy test`.
+// Check connects to one relay, completes the mutual-TLS handshake and
+// waits for the relay to accept the certificate, then closes the
+// connection. For `neubird-proxy test`.
 func (c *Client) Check(ctx context.Context, relay string) (tls.ConnectionState, error) {
 	conn, err := c.connect(ctx, relay)
 	if err != nil {

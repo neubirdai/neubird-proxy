@@ -69,25 +69,24 @@ NeuBird's requests arrive over that connection. With `listen: "off"`,
 nothing is exposed inbound at all.
 
 What the customer needs on their network:
-- **Outbound HTTPS** to `tunnel.neubird.ai:443`, nothing else. If they
-  allowlist by IP rather than hostname, NeuBird publishes the relay's fixed
-  IP addresses.
+- **Outbound HTTPS** to their own relay, `<tenant>.tunnel.neubird.ai:443`,
+  nothing else. Each customer has a dedicated relay; if they allowlist by IP
+  rather than hostname, NeuBird gives them its fixed IP addresses.
 - **No TLS inspection** of that traffic. A corporate proxy that re-signs
   outbound HTTPS breaks mutual TLS. A plain HTTP proxy is fine: the tunnel
   uses `HTTPS_PROXY` with `CONNECT`.
 
 Requests that arrive through the tunnel take exactly the same path as
 inbound ones: token check, allowlists, redaction, and the audit line
-(marked `via: tunnel`). The customer never uses NeuBird's per-tenant relay
-hostnames (`<tenant>.relay.neubird.ai`); those are how NeuBird's own
-connectors reach them, on NeuBird's side.
+(marked `via: tunnel`). On NeuBird's side, the relay runs in the NeuBird
+tenant's own namespace and only that tenant's ace can call it.
 Protocol: [docs/tunnel-protocol.md](docs/tunnel-protocol.md). Design:
 [docs/outbound-tunnel-design.md](docs/outbound-tunnel-design.md).
 
 ```yaml
 listen: "off"                 # tunnel only: no inbound listener
 tunnel:
-  relays: [tunnel.neubird.ai:443]
+  relays: [acme.tunnel.neubird.ai:443]   # the customer's dedicated relay
   cert_file: /etc/neubird-proxy-tunnel/tls.crt      # signed by NeuBird
   key_file: /etc/neubird-proxy-tunnel/tls.key       # generated here, never sent
   ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt   # pins NeuBird's relay CA
@@ -111,8 +110,11 @@ which of their proxy deployments (`aks-prod`) is connecting.
 4. Generate the proxy token with `neubird-proxy token`, and give it to
    NeuBird through your usual secure channel.
 
-Certificates last 90 days; the proxy warns from 30 days before expiry, and
-renewal repeats these steps.
+Certificates last 90 days; the proxy warns from 30 days before expiry.
+Renewal repeats steps 1 and 2, then you update the Secret with the new
+certificate and key: no restart, the proxy re-reads them (its log says
+`tunnel certificate or relay CA reloaded`) and NeuBird moves the tunnels
+over without failing any request.
 
 `validate` checks the files and shows the tunnel identity and certificate
 expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.

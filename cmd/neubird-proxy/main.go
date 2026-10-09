@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -123,11 +124,20 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	}
 
 	var ready atomic.Bool
+	var tc *tunnel.Client
+	tunnelOnly := cfg.Tunnel != nil && cfg.Listen == config.ListenOff
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	admin.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if !ready.Load() {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		// Reached only through tunnels: a pod with none up can't serve, so a
+		// rollout with a bad certificate stops instead of replacing the
+		// working pods.
+		if tunnelOnly && tc.Connected() == 0 {
+			http.Error(w, "no tunnel connected", http.StatusServiceUnavailable)
 			return
 		}
 		w.Write([]byte("ok\n"))
@@ -169,11 +179,16 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	// complete.
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
-	var tc *tunnel.Client
 	if cfg.Tunnel != nil {
 		id, err := tunnel.Load(cfg.Tunnel)
 		if err != nil {
-			return err
+			if tunnelOnly {
+				return err
+			}
+			// The inbound listener still works; the tunnel client keeps
+			// re-reading the files and connects once they load.
+			log.Error("tunnel certificate files don't load; serving inbound only until they do", "error", err.Error())
+			id = nil
 		}
 		tc = tunnel.New(cfg.Tunnel, id, srv, log, srv.Metrics.Registry)
 		tc.Start(runCtx)
@@ -192,14 +207,22 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	ready.Store(false)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	// Tunnels and the inbound listener drain together: long-lived streams on
+	// one must not use up the other's time.
+	var wg sync.WaitGroup
 	if tc != nil {
-		if err := tc.Shutdown(shutdownCtx); err != nil {
-			log.Warn("tunnel shutdown incomplete", "error", err.Error())
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := tc.Shutdown(shutdownCtx); err != nil {
+				log.Warn("tunnel shutdown incomplete", "error", err.Error())
+			}
+		}()
 	}
 	if cfg.Listen != config.ListenOff {
 		err = proxySrv.Shutdown(shutdownCtx)
 	}
+	wg.Wait()
 	_ = adminSrv.Shutdown(shutdownCtx)
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err
