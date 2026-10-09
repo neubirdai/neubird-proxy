@@ -75,14 +75,16 @@ connected only once the relay's first bytes arrive (within 10 s), and
 
 ## Liveness and shutdown
 
-- **Pings:** both sides send HTTP/2 PING after 15 s without traffic, and
-  drop the connection when no answer arrives within 10 s.
+- **Pings:** both sides send HTTP/2 PING after 5 s without traffic, and
+  drop the connection when no answer arrives within 5 s. A path that dies
+  silently (packets dropped by a firewall or NAT) is noticed within about
+  10 s; until then, requests sent down that tunnel wait.
 - **Proxy shutdown** sends GOAWAY: the relay stops sending new requests on
   that connection, and in-flight ones finish.
 - **Relay restarts** send GOAWAY: in-flight requests finish, then the
   connection closes. The relay stops accepting tunnels first, so the
   proxy's reconnect reaches another replica.
-- **Reconnects** use exponential backoff (1 s doubling to 60 s, with equal
+- **Reconnects** use exponential backoff (1 s doubling to 15 s, with equal
   jitter: half of each wait is random). A tunnel that stayed up 10 s resets the backoff, so the
   reconnect after a relay restart takes about a second.
 

@@ -25,10 +25,12 @@ import (
 )
 
 const (
-	pingAfter   = 15 * time.Second // PING after this long without traffic
-	pingTimeout = 10 * time.Second // drop the tunnel if a PING goes unanswered
+	pingAfter   = 5 * time.Second // PING after this long without traffic
+	pingTimeout = 5 * time.Second // drop the tunnel if a PING goes unanswered
 	backoffMin  = time.Second
-	backoffMax  = 60 * time.Second
+	// Short enough that a tunnel is back within ~15 s of the network
+	// returning, even after a long outage.
+	backoffMax = 15 * time.Second
 	// A tunnel up this long resets the backoff, so a relay restart (GOAWAY)
 	// is followed by a reconnect within a second, while a relay that
 	// accepts and drops at once still gets backed off.
