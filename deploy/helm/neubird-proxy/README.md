@@ -17,11 +17,14 @@ NeuBird ── relay ⇄ (tunnel, opened from your side, :443) ⇄ neubird-proxy
 | Relay address, e.g. `acme.tunnel.neubird.ai:443`, and its IPs | `tunnel.relays`; `networkPolicy.relayCIDRs`, firewall egress |
 | Your tenant name | `tunnel.tenant` |
 | `relay-ca.crt` (public) | `--set-file relayCA.cert=relay-ca.crt` |
+| A **join token** (secret, works once, expires) | `NEUBIRD_JOIN_TOKEN` in your env Secret |
 
 ## What you send NeuBird
 
-Only the tunnel key's **fingerprint** (after install, below). The key itself,
-the proxy token's value, and your API credentials stay with you.
+**Nothing**, with a join token: the proxy enrolls its own key on first
+connect. (Without one, only the key's **fingerprint**, after install.) The
+key itself, the proxy token's value, and your API credentials stay with
+you.
 
 ## Install
 
@@ -31,6 +34,7 @@ the proxy token's value, and your API credentials stay with you.
    kubectl -n neubird create secret generic neubird-proxy-env \
      --from-literal=NEUBIRD_PROXY_TOKEN=$(openssl rand -hex 32) \
      --from-literal=REDACTION_HMAC_KEY=$(openssl rand -hex 32) \
+     --from-literal=NEUBIRD_JOIN_TOKEN=nbjt_...     # from NeuBird
      --from-literal=APIM_SUBSCRIPTION_KEY=...      # whatever your connections use
    ```
 2. Write your values (start from `examples/splunk-apim.yaml`) and install:
@@ -38,15 +42,17 @@ the proxy token's value, and your API credentials stay with you.
    helm install neubird-proxy ./neubird-proxy -n neubird -f my-values.yaml \
      --set-file relayCA.cert=relay-ca.crt
    ```
-   Don't use `--wait` the first time: pods stay not-ready until NeuBird has
-   recorded the key.
-3. Send NeuBird the fingerprint:
-   ```sh
-   kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key
-   ```
-4. When NeuBird confirms, the pods turn Ready within ~15 s. Then create the
-   connection in NeuBird's UI with the URL NeuBird gives you and, as its
-   token, `NEUBIRD_PROXY_TOKEN` from step 1.
+   The proxy enrolls its key with the join token and the pods turn Ready
+   within seconds (their log says `enrolled with the join token`).
+3. Create the connection in NeuBird's UI with the URL NeuBird gives you and,
+   as its token, `NEUBIRD_PROXY_TOKEN` from step 1.
+
+Once enrolled, you may delete `NEUBIRD_JOIN_TOKEN` from the Secret: the
+relay knows the key. **Without a join token**, install without `--wait`,
+then send NeuBird the fingerprint (`kubectl -n neubird exec
+deploy/neubird-proxy -- /neubird-proxy fingerprint
+/etc/neubird-proxy/tunnel/tunnel.key`); the pods turn Ready once NeuBird
+records it.
 
 ## Values
 
@@ -57,6 +63,7 @@ the proxy token's value, and your API credentials stay with you.
 | `relayCA.cert` or `relayCA.existingConfigMap` | yes | The relay CA NeuBird sent (key `relay-ca.crt`) |
 | `env.existingSecret` | yes | Your Secret: `NEUBIRD_PROXY_TOKEN`, `REDACTION_HMAC_KEY`, connection credentials |
 | `config` | yes | Connections, redaction, limits: see `config.example.yaml` in the neubird-proxy repository. `${VAR}` comes from `env` |
+| `tunnel.joinTokenEnv` | default `NEUBIRD_JOIN_TOKEN` | Env var with NeuBird's join token; empty or missing means send the fingerprint instead |
 | `tunnelKey.generate` | default `true` | Key generated in a Secret at install, kept on upgrade and uninstall |
 | `tunnelKey.existingSecret` | | Bring your own key (`neubird-proxy keygen`), key `tunnel.key` |
 | `networkPolicy.enabled` | default `false` | No inbound; outbound only DNS, `relayCIDRs`:443, `upstreams` |

@@ -90,6 +90,12 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 			inbound = "no inbound listener"
 		}
 		fmt.Fprintf(stdout, "\ntunnel: %d relay(s) x %d connection(s), %s\n", len(t.Relays), t.ConnectionsPerRelay, inbound)
+		switch {
+		case t.JoinToken != "":
+			fmt.Fprintf(stdout, "  join token: set (%s); the key enrolls itself on first connect\n", t.JoinTokenEnv)
+		case t.JoinTokenEnv != "":
+			fmt.Fprintf(stdout, "  join token: %s is empty; the key must already be recorded or enrolled\n", t.JoinTokenEnv)
+		}
 		if *offline {
 			fmt.Fprintln(stdout, "  certificate, key and CA files not checked (offline)")
 		} else if id, err := tunnel.Load(t); err != nil {

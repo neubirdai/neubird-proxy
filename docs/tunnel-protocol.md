@@ -18,7 +18,8 @@ and its reasons are in [outbound-tunnel-design.md](outbound-tunnel-design.md).
      dialed.
    - **The relay** accepts the client certificate only if its key's
      fingerprint (`sha256:` and the SHA-256 of the DER SubjectPublicKeyInfo)
-     is recorded, unrevoked and unretired, under the identity below. It also
+     is recorded (in the tenant records, or enrolled; see Enrollment),
+     unrevoked and unretired, under the identity below. It also
      requires the certificate to be current and allow client
      authentication. No CA is involved.
 3. HTTP/2 then runs on the TLS connection **with the roles reversed**: the
@@ -52,6 +53,35 @@ a query or fragment.
 | `spiffe://neubird.ai/tenant/metlife/proxy/` | invalid (empty) |
 | `spiffe://neubird.ai/tenant/metlife/proxy/aks?x=1` | invalid (query) |
 | `https://neubird.ai/tenant/metlife/proxy/aks-prod` | invalid (scheme) |
+
+## Enrollment
+
+A proxy whose key isn't recorded yet can enroll it with a **join token**
+NeuBird issued for its tenant and proxy name, instead of the customer
+sending the fingerprint back.
+
+- **Token:** `nbjt_` and 43 base64url characters (32 random bytes). NeuBird
+  records only `sha256:` and the hex SHA-256 of the token string, with an
+  expiry. One token enrolls one key.
+- **Connection:** as above (TCP, TLS 1.3 with the same client certificate
+  and pinned relay CA), but **ALPN `neubird-enroll/1`**. The relay completes
+  the handshake only for a tenant and proxy it has records for; it doesn't
+  require the key to be known.
+- **Exchange:** the proxy sends the token and `\n`. The relay answers one
+  line and closes:
+  - `ok enrolled`: the token was valid (for this tenant and proxy,
+    unexpired, unused) and the certificate's key is now recorded;
+  - `ok known`: the key was already recorded for this identity (a restart
+    or a second replica with the same key), whatever the token's state;
+  - `error <reason>`: refused (unknown, expired, spent or another proxy's
+    token; key recorded for another identity) or the relay's store failed
+    (the reason says to retry).
+- **Then** the proxy opens tunnels as usual (`neubird-tunnel/1`).
+- A relay without enrollment doesn't offer `neubird-enroll/1`; the
+  handshake fails with no_application_protocol.
+
+The proxy enrolls once per relay per process start, when it has a token;
+a token may be removed after the first successful enrollment.
 
 ## Requests
 

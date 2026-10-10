@@ -80,7 +80,8 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
   "proxy" $t.proxy
   "key_file" "/etc/neubird-proxy/tunnel/tunnel.key"
   "ca_file" "/etc/neubird-proxy/ca/relay-ca.crt"
-  "connections_per_relay" $t.connectionsPerRelay -}}
+  "connections_per_relay" $t.connectionsPerRelay
+  "join_token_env" ($t.joinTokenEnv | default "") -}}
 {{- $c := .Values.config -}}
 {{- if and (hasKey $c "listen") (ne (toString $c.listen) "off") -}}{{- fail "config.listen: this chart is tunnel-only; leave listen out (the chart sets it to off)" -}}{{- end -}}
 {{- if and (hasKey $c "admin_listen") (ne (toString $c.admin_listen) ":9090") -}}{{- fail "config.admin_listen: leave it out (the chart's probes use :9090)" -}}{{- end -}}

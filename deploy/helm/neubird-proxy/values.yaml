@@ -17,6 +17,10 @@ tunnel:
   tenant: ""              # your NeuBird tenant
   proxy: ""               # a name for this deployment, e.g. aks-prod
   connectionsPerRelay: 2  # tunnels per replica; NeuBird monitors replicas × this
+  # The env var (in env.existingSecret) holding the join token NeuBird gave
+  # you. With it, the proxy enrolls its own key on first connect: nothing to
+  # send back. Without it (or empty), send NeuBird the key's fingerprint.
+  joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
 # The relay CA certificate NeuBird sends you (public). The proxy only
 # connects to a relay whose certificate this CA signed.

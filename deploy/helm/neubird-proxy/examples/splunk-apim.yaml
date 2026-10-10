@@ -14,6 +14,7 @@ tunnel:
 # Secret neubird-proxy-env, created by you (or your secret store) with:
 #   NEUBIRD_PROXY_TOKEN     neubird-proxy token (also entered in NeuBird's connection)
 #   REDACTION_HMAC_KEY      openssl rand -hex 32
+#   NEUBIRD_JOIN_TOKEN      the join token from NeuBird (enrolls the key; removable after)
 #   APIM_SUBSCRIPTION_KEY   your gateway's key; it never leaves this cluster
 env:
   existingSecret: neubird-proxy-env

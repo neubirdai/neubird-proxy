@@ -1,8 +1,8 @@
 # neubird-proxy configuration reference
 
 The chart's `config` value is the proxy's configuration, minus what the
-chart sets itself: the `tunnel` section (from `tunnel.*`), `listen: off` and
-`admin_listen: :9090`. This page covers what you
+chart sets itself: the `tunnel` section (from `tunnel.*`, including
+`join_token_env`), `listen: off` and `admin_listen: :9090`. This page covers what you
 set there. Check any configuration with the image before rolling it out
 (see Checking a configuration).
 

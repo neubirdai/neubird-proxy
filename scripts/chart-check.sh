@@ -48,6 +48,7 @@ T=check-only-0123456789abcdef012345
 NEUBIRD_PROXY_TOKEN=$T REDACTION_HMAC_KEY=$T SPLUNK_TOKEN=x \
   "$W/neubird-proxy" validate -config "$W/local.yaml" > "$W/validate.txt" || { cat "$W/validate.txt"; fail "rendered config invalid"; }
 grep -q 'identity: tenant acme, proxy aks-prod' "$W/validate.txt" || fail "tunnel identity not generated"
+grep -q "join token: NEUBIRD_JOIN_TOKEN is empty" "$W/validate.txt" || fail "join_token_env not generated"
 grep -q 'upstream_ca_file:' "$W/config.yaml" || fail "upstreamCA did not set upstream_ca_file"
 echo "ok    chart renders a config this build accepts"
 

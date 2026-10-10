@@ -23,8 +23,9 @@ You need:
 - The proxy image, which NeuBird ships to you separately. Load it into your
   registry and note its digest (`sha256:...`).
 - From NeuBird: your relay's address (e.g. `acme.tunnel.neubird.ai:443`)
-  and its IP addresses for your firewall, your tenant name, and
-  `relay-ca.crt`, the relay's CA certificate.
+  and its IP addresses for your firewall, your tenant name,
+  `relay-ca.crt`, the relay's CA certificate, and a **join token**
+  (`nbjt_...`, secret, works once) for the proxy name you'll use.
 - Docker on your machine, to run the proxy's tools before anything is
   deployed. Every tool is a subcommand of the same image, so the version you
   check with is the version you deploy.
@@ -279,12 +280,14 @@ kubectl label namespace $NS pod-security.kubernetes.io/enforce=restricted
 
 printf 'Splunk MCP token: '; read -rs SPLUNK; echo
 printf 'ServiceNow password: '; read -rs SNPW; echo
+printf 'NeuBird join token: '; read -rs JOIN; echo
 kubectl -n $NS create secret generic neubird-proxy \
   --from-literal=NEUBIRD_PROXY_TOKEN="$(np token)" \
+  --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN" \
   --from-literal=SPLUNK_MCP_TOKEN="$SPLUNK" \
   --from-literal=SN_USER=neubird-integration \
   --from-literal=SN_PASSWORD="$SNPW"
-unset SPLUNK SNPW
+unset SPLUNK SNPW JOIN
 ```
 
 If you chose HMAC masking, add the key from `hmac.env` too, then delete
@@ -313,7 +316,7 @@ image:
 tunnel:
   relays: ["acme.tunnel.neubird.ai:443"]   # your relay, from NeuBird
   tenant: acme                             # your tenant, from NeuBird
-  proxy: aks-prod                          # your name for this deployment
+  proxy: aks-prod                          # the proxy name the join token is for
 env:
   existingSecret: neubird-proxy            # the Secret from step 4
 ```
@@ -328,19 +331,21 @@ helm install neubird-proxy ./neubird-proxy-<version>.tgz -n $NS \
 ```
 
 The chart generates the proxy's tunnel key in a Secret; it never leaves the
-cluster. Send NeuBird its **fingerprint** (not secret):
-
-```bash
-kubectl -n $NS exec deploy/neubird-proxy -- /neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key
-```
-
-The pods stay not ready until NeuBird has recorded it (so don't use
-`--wait` on this first install). Then they connect within about 15 seconds:
+cluster. On its first connect the proxy presents the join token, the relay
+records the key, and the tunnels open, all within seconds. Nothing to send
+NeuBird:
 
 ```bash
 kubectl -n $NS rollout status deploy/neubird-proxy
-kubectl -n $NS logs deploy/neubird-proxy | grep -E '"(starting|tunnel connected)"'
+kubectl -n $NS logs deploy/neubird-proxy | grep -E '"(starting|enrolled with the join token|tunnel connected)"'
 ```
+
+Once enrolled, you can delete `NEUBIRD_JOIN_TOKEN` from the Secret. If the
+log says `enrollment: relay refused: join token expired` (or `already
+used`), ask NeuBird for a new one. Without a join token, send NeuBird the
+key's fingerprint instead (`kubectl -n $NS exec deploy/neubird-proxy --
+/neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key`); the pods
+turn ready once it's recorded.
 
 The `starting` line lists the connections and the hash of the config they
 run. Any `risky configuration` lines are settings worth a second look.
