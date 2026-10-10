@@ -2,7 +2,7 @@
 # CA is passed with --set-file relayCA.cert=<a test CA>.
 image:
   repository: registry.example.com/neubird/neubird-proxy
-  digest: sha256:78daef725a02b28031004cbd7dd2b6b7137461e2c3640a2d01f8d89c3a9e4403
+  digest: sha256:ad40087a2605f1a181352782a112399e3f1b81fb26c6933684205bc6853eb46d
 tunnel:
   relays: ["acme.tunnel.neubird.ai:443"]
   tenant: acme
