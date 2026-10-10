@@ -1,0 +1,90 @@
+{{- if not .Values.env.existingSecret }}{{ fail "env.existingSecret is required: a Secret with NEUBIRD_PROXY_TOKEN and your connections' credentials" }}{{ end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "neubird-proxy.fullname" . }}
+  labels: {{- include "neubird-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "neubird-proxy.selectorLabels" . | nindent 6 }}
+  strategy:
+    # A new replica must have a tunnel up (readiness) before an old one goes.
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels:
+        {{- include "neubird-proxy.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{ toYaml . | nindent 8 }}{{ end }}
+      annotations:
+        checksum/config: {{ include "neubird-proxy.config" . | sha256sum }}
+        checksum/relay-ca: {{ .Values.relayCA.cert | sha256sum }}
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{ end }}
+    spec:
+      serviceAccountName: {{ include "neubird-proxy.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "neubird-proxy.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: proxy
+          image: {{ include "neubird-proxy.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [-config, /etc/neubird-proxy/config.yaml]
+          envFrom:
+            - secretRef: {name: {{ .Values.env.existingSecret }}}
+          ports:
+            - {name: admin, containerPort: 9090}
+          # Ready only with a tunnel up, so a rollout with a bad key or CA
+          # stops before it replaces working replicas.
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/neubird-proxy/config.yaml, subPath: config.yaml, readOnly: true}
+            - {name: tunnel, mountPath: /etc/neubird-proxy/tunnel, readOnly: true}
+            - {name: ca, mountPath: /etc/neubird-proxy/ca, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: {{ include "neubird-proxy.fullname" . }}}
+        - name: tunnel
+          secret:
+            secretName: {{ include "neubird-proxy.keySecret" . }}
+            items: [{key: tunnel.key, path: tunnel.key}]
+            defaultMode: 0440   # group-readable through fsGroup
+        - name: ca
+          configMap:
+            name: {{ include "neubird-proxy.caConfigMap" . }}
+            items: [{key: relay-ca.crt, path: relay-ca.crt}]
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

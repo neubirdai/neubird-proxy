@@ -28,6 +28,8 @@ jobs:
         run: make fuzz FUZZTIME=30s
       - name: Example config is valid
         run: make check-config
+      - name: Helm chart
+        run: make chart-check
 
   image:
     runs-on: ubuntu-latest

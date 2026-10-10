@@ -1,0 +1,22 @@
+neubird-proxy {{ .Chart.AppVersion }}: tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, relays {{ join ", " .Values.tunnel.relays }}.
+
+The replicas stay NOT READY until NeuBird has recorded this proxy's key.
+(First install: don't use --wait, or it times out.)
+
+1. Get the key's fingerprint and send it to NeuBird (it isn't secret; the key never leaves this cluster):
+
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "neubird-proxy.fullname" . }} -- \
+     /neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key
+
+2. Once NeuBird confirms, the tunnels come up within ~15 s and the pods turn Ready:
+
+   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} | grep '"tunnel connected"'
+
+3. In NeuBird's UI, create each connection with URL http://<relay>/<connection name>
+   as NeuBird tells you, and the auth token = the NEUBIRD_PROXY_TOKEN in Secret {{ .Values.env.existingSecret }}.
+
+Revoke access at any time by changing NEUBIRD_PROXY_TOKEN, or by scaling this Deployment to 0.
+{{- if and .Values.tunnelKey.generate (not .Values.tunnelKey.existingSecret) }}
+
+The tunnel key is in Secret {{ include "neubird-proxy.keySecret" . }} (kept on uninstall).
+{{- end }}

@@ -1,0 +1,32 @@
+# Used by CI (make chart-check): a complete tunnel-only install. The relay
+# CA is passed with --set-file relayCA.cert=<a test CA>.
+image:
+  repository: registry.example.com/neubird/neubird-proxy
+  digest: sha256:78daef725a02b28031004cbd7dd2b6b7137461e2c3640a2d01f8d89c3a9e4403
+tunnel:
+  relays: ["acme.tunnel.neubird.ai:443"]
+  tenant: acme
+  proxy: aks-prod
+env:
+  existingSecret: neubird-proxy-env
+config:
+  listen: "off"
+  admin_listen: ":9090"
+  client_token_env: NEUBIRD_PROXY_TOKEN
+  connections:
+    - name: splunk
+      upstream: https://splunk.example.com:8089
+      client_auth: bearer
+      methods: [GET, POST]
+      paths: [/services/search/jobs, "/services/search/jobs/[A-Za-z0-9._-]+(/(results|control))?"]
+      headers:
+        Authorization: Bearer ${SPLUNK_TOKEN}
+      request_deny_patterns:
+        - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|collect|delete|script|run|map|dbxquery)\\b"
+  redaction:
+    mask: hmac
+    hmac_key_env: REDACTION_HMAC_KEY
+networkPolicy:
+  enabled: true
+  relayCIDRs: ["203.0.113.10/32"]
+  upstreams: [{cidr: 10.20.0.0/16, ports: [8089]}]

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$"},
+        "tag": {"type": "string"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "replicaCount": {"type": "integer", "minimum": 1},
+    "tunnel": {
+      "type": "object",
+      "properties": {
+        "relays": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9.-]+:[0-9]+$"}},
+        "tenant": {"type": "string", "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$"},
+        "proxy": {"type": "string", "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$"},
+        "connectionsPerRelay": {"type": "integer", "minimum": 1, "maximum": 8}
+      }
+    },
+    "relayCA": {
+      "type": "object",
+      "properties": {
+        "cert": {"type": "string", "pattern": "^(\\s*-----BEGIN CERTIFICATE-----[\\s\\S]*)?$"},
+        "existingConfigMap": {"type": "string"}
+      }
+    },
+    "tunnelKey": {
+      "type": "object",
+      "properties": {
+        "generate": {"type": "boolean"},
+        "existingSecret": {"type": "string"}
+      }
+    },
+    "env": {
+      "type": "object",
+      "properties": {"existingSecret": {"type": "string"}}
+    },
+    "config": {"type": "object"},
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "relayCIDRs": {"type": "array", "items": {"type": "string"}},
+        "upstreams": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cidr", "ports"],
+            "properties": {
+              "cidr": {"type": "string"},
+              "ports": {"type": "array", "items": {"type": "integer"}}
+            }
+          }
+        }
+      }
+    }
+  }
+}

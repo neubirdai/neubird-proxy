@@ -1,0 +1,11 @@
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "neubird-proxy.fullname" . }}
+  labels: {{- include "neubird-proxy.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {{- include "neubird-proxy.selectorLabels" . | nindent 6 }}
+{{- end }}

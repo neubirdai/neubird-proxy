@@ -1,0 +1,4 @@
+# Not shipped in the chart package.
+ci/
+.DS_Store
+*.tgz
