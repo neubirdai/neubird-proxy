@@ -12,12 +12,15 @@ and its reasons are in [outbound-tunnel-design.md](outbound-tunnel-design.md).
 2. TLS 1.3, mutual:
    - **ALPN** is `neubird-tunnel/1`. Both sides refuse a connection that
      negotiates anything else.
-   - **The proxy** presents its client certificate and verifies the relay's
-     server certificate against its pinned CA (`tunnel.ca_file`), for the
-     relay host name it dialed.
-   - **The relay** verifies the client certificate against the tenant CA,
-     requires the `clientAuth` extended key usage, rejects revoked serial
-     numbers, and reads the identity below.
+   - **The proxy** presents its client certificate (self-signed, minted from
+     its key on every connect) and verifies the relay's server certificate
+     against its pinned CA (`tunnel.ca_file`), for the relay host name it
+     dialed.
+   - **The relay** accepts the client certificate only if its key's
+     fingerprint (`sha256:` and the SHA-256 of the DER SubjectPublicKeyInfo)
+     is recorded, unrevoked and unretired, under the identity below. It also
+     requires the certificate to be current and allow client
+     authentication. No CA is involved.
 3. HTTP/2 then runs on the TLS connection **with the roles reversed**: the
    relay is the HTTP/2 client and sends the connection preface, and the
    proxy is the HTTP/2 server.

@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -32,8 +33,8 @@ import (
 	"github.com/neubirdai/neubird-proxy/internal/tunnel"
 )
 
-// testCA signs a relay server certificate and the proxy's tunnel
-// certificate, written to files as an operator would have them.
+// testCA is the relay CA: it signs the test relay's server certificate,
+// which the proxy pins (tunnel.ca_file).
 type testCA struct {
 	dir  string
 	cert *x509.Certificate
@@ -84,16 +85,31 @@ func (ca *testCA) sign(t *testing.T, pub any, spiffe string) []byte {
 	return der
 }
 
-// relay is a minimal relay: it accepts tunnels and hands back the HTTP/2
-// client for each.
-func startRelay(t *testing.T, ca *testCA) (string, chan *http2.ClientConn) {
+// relay is a minimal relay: like the real one, it accepts a proxy only by
+// a pinned key fingerprint (pin records one), and hands back the HTTP/2
+// client for each tunnel.
+func startRelay(t *testing.T, ca *testCA) (string, chan *http2.ClientConn, func(string)) {
 	t.Helper()
 	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	pool := x509.NewCertPool()
-	pool.AddCert(ca.cert)
+	var mu sync.Mutex
+	pinned := map[string]bool{}
+	pin := func(fp string) { mu.Lock(); pinned[fp] = true; mu.Unlock() }
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{ca.sign(t, &k.PublicKey, "")}, PrivateKey: k}},
-		ClientCAs:    pool, ClientAuth: tls.RequireAndVerifyClientCert, NextProtos: []string{tunnel.ALPN},
+		ClientAuth:   tls.RequireAnyClientCert, NextProtos: []string{tunnel.ALPN},
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			c, err := x509.ParseCertificate(raw[0])
+			if err != nil {
+				return err
+			}
+			fp, _ := tunnel.Fingerprint(c.PublicKey)
+			mu.Lock()
+			defer mu.Unlock()
+			if !pinned[fp] {
+				return fmt.Errorf("key %s not pinned", fp)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -115,61 +131,70 @@ func startRelay(t *testing.T, ca *testCA) (string, chan *http2.ClientConn) {
 			}
 		}
 	}()
-	return ln.Addr().String(), conns
+	return ln.Addr().String(), conns, pin
 }
 
-// The csr command's output is what the relay's signing step consumes.
-func TestCSR(t *testing.T) {
+// keygen writes the key and prints its fingerprint, the one thing NeuBird
+// records; fingerprint prints the same for the key or a certificate.
+func TestKeygen(t *testing.T) {
 	dir := t.TempDir()
-	key, csr := filepath.Join(dir, "tunnel.key"), filepath.Join(dir, "tunnel.csr")
-	code, out, errOut := runCmd(t, cmdCSR, "-tenant", "metlife", "-proxy", "aks-prod", "-key-out", key, "-csr-out", csr)
-	if code != 0 || !strings.Contains(out, "spiffe://neubird.ai/tenant/metlife/proxy/aks-prod") {
+	key := filepath.Join(dir, "tunnel.key")
+	code, out, errOut := runCmd(t, cmdKeygen, "-tenant", "metlife", "-proxy", "aks-prod", "-key-out", key)
+	if code != 0 || !strings.Contains(out, "tenant: metlife") || !strings.Contains(out, "proxy: aks-prod") {
 		t.Fatalf("code %d %s %s", code, out, errOut)
 	}
-	raw, _ := os.ReadFile(csr)
-	block, _ := pem.Decode(raw)
-	req, err := x509.ParseCertificateRequest(block.Bytes)
-	if err != nil || req.CheckSignature() != nil {
-		t.Fatalf("CSR: %v", err)
-	}
-	if len(req.URIs) != 1 || req.URIs[0].String() != "spiffe://neubird.ai/tenant/metlife/proxy/aks-prod" {
-		t.Fatalf("CSR URIs %v", req.URIs)
-	}
+	fp := fingerprintIn(t, out)
 	if fi, _ := os.Stat(key); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("key mode %v", fi.Mode().Perm())
 	}
 	if strings.Contains(out, "PRIVATE KEY") {
 		t.Fatal("key printed")
 	}
-	if code, _, errOut := runCmd(t, cmdCSR, "-tenant", "metlife", "-proxy", "aks-prod", "-key-out", key, "-csr-out", csr); code != 1 || !strings.Contains(errOut, "refusing to overwrite") {
+	if code, got, _ := runCmd(t, cmdFingerprint, key); code != 0 || strings.TrimSpace(got) != fp {
+		t.Fatalf("fingerprint of the key: %d %q, want %s", code, got, fp)
+	}
+	signer, err := tunnel.LoadKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tunnel.Mint(signer, "spiffe://neubird.ai/tenant/metlife/proxy/aks-prod", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile := writeFile(t, "minted.crt", string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})))
+	if code, got, _ := runCmd(t, cmdFingerprint, certFile); code != 0 || strings.TrimSpace(got) != fp {
+		t.Fatalf("fingerprint of a certificate for the key: %d %q, want %s", code, got, fp)
+	}
+	if code, _, errOut := runCmd(t, cmdKeygen, "-tenant", "metlife", "-proxy", "aks-prod", "-key-out", key); code != 1 || !strings.Contains(errOut, "refusing to overwrite") {
 		t.Fatalf("overwrite: %d %s", code, errOut)
 	}
-	if code, _, _ := runCmd(t, cmdCSR, "-tenant", "Met Life", "-proxy", "x", "-key-out", key+"2", "-csr-out", csr+"2"); code != 2 {
+	if code, _, _ := runCmd(t, cmdKeygen, "-tenant", "Met Life", "-proxy", "x", "-key-out", key+"2"); code != 2 {
 		t.Fatalf("invalid tenant accepted")
 	}
 }
 
-// signCSR plays NeuBird's signing step: take the CSR's key, issue a cert.
-func signCSR(t *testing.T, ca *testCA, csrFile string) string {
+func fingerprintIn(t *testing.T, out string) string {
 	t.Helper()
-	raw, _ := os.ReadFile(csrFile)
-	block, _ := pem.Decode(raw)
-	req, err := x509.ParseCertificateRequest(block.Bytes)
-	if err != nil {
-		t.Fatal(err)
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[0] == "fingerprint:" {
+			return f[1]
+		}
 	}
-	return ca.writePEM(t, "tunnel.crt", "CERTIFICATE", ca.sign(t, req.PublicKey, req.URIs[0].String()))
+	t.Fatalf("no fingerprint in %q", out)
+	return ""
 }
 
-// tunnelConfig runs the csr command and the signing step, then writes a
-// tunnel-only config whose one connection points at upstream.
-func tunnelConfig(t *testing.T, ca *testCA, relay, upstream string) string {
+// tunnelConfig runs keygen, records the fingerprint with the relay (pin),
+// and writes a tunnel-only config whose one connection points at upstream.
+// The proxy mints its own certificate from the key.
+func tunnelConfig(t *testing.T, ca *testCA, pin func(string), relay, upstream string) string {
 	t.Helper()
-	key, csr := filepath.Join(ca.dir, "tunnel.key"), filepath.Join(ca.dir, "tunnel.csr")
-	if code, _, errOut := runCmd(t, cmdCSR, "-tenant", "metlife", "-proxy", "aks-prod", "-key-out", key, "-csr-out", csr); code != 0 {
+	key := filepath.Join(ca.dir, "tunnel.key")
+	code, out, errOut := runCmd(t, cmdKeygen, "-tenant", "metlife", "-proxy", "aks-prod", "-key-out", key)
+	if code != 0 {
 		t.Fatal(errOut)
 	}
-	cert := signCSR(t, ca, csr)
+	pin(fingerprintIn(t, out))
 	return writeFile(t, "config.yaml", `
 listen: "off"
 client_token_env: PROXY_TOKEN
@@ -179,7 +204,8 @@ connections:
     upstream: `+upstream+`
 tunnel:
   relays: ["`+relay+`"]
-  cert_file: `+cert+`
+  tenant: metlife
+  proxy: aks-prod
   key_file: `+key+`
   ca_file: `+ca.file+`
 `)
@@ -194,8 +220,8 @@ func TestProxyOverTunnel(t *testing.T) {
 	}))
 	defer up.Close()
 	ca := newTestCA(t)
-	relayAddr, conns := startRelay(t, ca)
-	cfgPath := tunnelConfig(t, ca, relayAddr, up.URL)
+	relayAddr, conns, pin := startRelay(t, ca)
+	cfgPath := tunnelConfig(t, ca, pin, relayAddr, up.URL)
 
 	t.Setenv("PROXY_TOKEN", testToken)
 	cfg, err := config.Load(cfgPath)
@@ -257,8 +283,8 @@ func TestProxyOverTunnel(t *testing.T) {
 
 func TestToolsWithTunnel(t *testing.T) {
 	ca := newTestCA(t)
-	relayAddr, _ := startRelay(t, ca)
-	cfg := tunnelConfig(t, ca, relayAddr, "https://api.example.com")
+	relayAddr, _, pin := startRelay(t, ca)
+	cfg := tunnelConfig(t, ca, pin, relayAddr, "https://api.example.com")
 	env := envFile(t, "k")
 
 	code, out, _ := runCmd(t, cmdValidate, "-config", cfg, "-env-file", env)

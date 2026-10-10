@@ -456,7 +456,11 @@ func (t *tester) tunnel() bool {
 	if id.DaysLeft() < 30 {
 		status = "warn"
 	}
-	t.line(status, "identity", "tenant %s, proxy %s; certificate expires in %d days", id.Tenant, id.Proxy, int(id.DaysLeft()))
+	if id.Minted {
+		t.line(status, "identity", "tenant %s, proxy %s; key %s (NeuBird must have this fingerprint on record)", id.Tenant, id.Proxy, id.Fingerprint)
+	} else {
+		t.line(status, "identity", "tenant %s, proxy %s; key %s; certificate expires in %d days", id.Tenant, id.Proxy, id.Fingerprint, int(id.DaysLeft()))
+	}
 	client := tunnel.New(tc, id, http.NotFoundHandler(), discardLog, &metrics.Registry{})
 	for _, relay := range tc.Relays {
 		host, port, _ := net.SplitHostPort(relay)

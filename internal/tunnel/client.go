@@ -113,7 +113,7 @@ func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logge
 func (c *Client) Start(ctx context.Context) {
 	if id, err := c.identity(); err == nil {
 		c.log.Info("tunnel starting", "tenant", id.Tenant, "proxy", id.Proxy, "relays", c.cfg.Relays,
-			"connections_per_relay", c.cfg.ConnectionsPerRelay, "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339))
+			"connections_per_relay", c.cfg.ConnectionsPerRelay, "key", id.Fingerprint, "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339))
 	}
 	c.wg.Add(1)
 	go c.refresh(ctx)
@@ -252,12 +252,12 @@ func (c *Client) identity() (*Identity, error) {
 	c.idError = ""
 	// Identities are replaced, never modified: connects in progress keep
 	// the one they started with.
-	if c.id == nil || !c.id.Leaf.Equal(id.Leaf) || !c.id.RelayCAs.Equal(id.RelayCAs) {
-		if c.id != nil {
-			c.log.Info("tunnel certificate or relay CA reloaded", "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339))
-		}
-		c.id = id
+	// A minted certificate is new on every load; only a new key, file
+	// certificate or relay CA is worth a log line.
+	if c.id != nil && (c.id.Fingerprint != id.Fingerprint || (!id.Minted && !c.id.Leaf.Equal(id.Leaf)) || !c.id.RelayCAs.Equal(id.RelayCAs)) {
+		c.log.Info("tunnel key, certificate or relay CA reloaded", "key", id.Fingerprint, "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339))
 	}
+	c.id = id
 	c.expiry.Set(c.id.DaysLeft())
 	if c.id.DaysLeft() < 30 {
 		c.log.Warn("tunnel certificate expires soon", "days", int(c.id.DaysLeft()))
