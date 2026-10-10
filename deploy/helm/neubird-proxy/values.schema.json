@@ -28,6 +28,13 @@
         "existingConfigMap": {"type": "string"}
       }
     },
+    "upstreamCA": {
+      "type": "object",
+      "properties": {
+        "cert": {"type": "string", "pattern": "^(\\s*-----BEGIN CERTIFICATE-----[\\s\\S]*)?$"},
+        "existingConfigMap": {"type": "string"}
+      }
+    },
     "tunnelKey": {
       "type": "object",
       "properties": {

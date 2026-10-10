@@ -1,12 +1,12 @@
-listen: ":8443"          # the port NeuBird reaches, behind your load balancer
-admin_listen: ":9090"    # health and metrics, cluster-internal only
+# listen, admin_listen and tunnel are set by the Helm chart: requests arrive
+# through the tunnel, nothing listens for them.
 
 # The token NeuBird sends. Secrets never go in this file: the proxy reads
 # them from environment variables, which come from a Kubernetes Secret.
 client_token_env: NEUBIRD_PROXY_TOKEN
 
 connections:
-  # NeuBird calls https://<proxy>/splunk/services/mcp
+  # NeuBird's connection URL ends in /splunk/services/mcp
   - name: splunk
     upstream: https://splunk.example.com
     client_auth: bearer
@@ -15,7 +15,7 @@ connections:
     headers:
       Authorization: Bearer ${SPLUNK_MCP_TOKEN}   # sent to Splunk, never to NeuBird
 
-  # NeuBird calls https://<proxy>/servicenow/api/now/table/incident...
+  # NeuBird's connection URL ends in /servicenow
   - name: servicenow
     upstream: https://yourinstance.service-now.com
     client_auth: basic                 # NeuBird sends its token as a Basic password

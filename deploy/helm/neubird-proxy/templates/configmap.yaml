@@ -17,3 +17,14 @@ data:
   relay-ca.crt: |
     {{- .Values.relayCA.cert | trim | nindent 4 }}
 {{- end }}
+{{- if and .Values.upstreamCA.cert (not .Values.upstreamCA.existingConfigMap) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "neubird-proxy.upstreamCAConfigMap" . }}
+  labels: {{- include "neubird-proxy.labels" . | nindent 4 }}
+data:
+  ca.crt: |
+    {{- .Values.upstreamCA.cert | trim | nindent 4 }}
+{{- end }}

@@ -24,6 +24,12 @@ relayCA:
   cert: ""                # the PEM itself, or:
   existingConfigMap: ""   # a ConfigMap with key relay-ca.crt
 
+# Optional: extra CA certificates to trust for your upstreams (e.g. an API
+# gateway with an internal certificate). Sets upstream_ca_file.
+upstreamCA:
+  cert: ""                # PEM bundle, or:
+  existingConfigMap: ""   # a ConfigMap with key ca.crt
+
 # The proxy's tunnel key: its identity. It never leaves your cluster; you
 # send NeuBird only its fingerprint (see the install notes).
 tunnelKey:
@@ -40,12 +46,11 @@ tunnelKey:
 env:
   existingSecret: ""
 
-# The proxy's configuration (see config.example.yaml in the neubird-proxy
-# repository): connections, redaction, limits. The tunnel section is
-# generated from `tunnel` above. ${VAR} placeholders are filled from env.
+# The proxy's configuration (docs/configuration.md): connections,
+# redaction, limits. The chart sets the rest: the tunnel section (from
+# `tunnel` above), listen: off and admin_listen: :9090. ${VAR} placeholders
+# are filled from env.
 config:
-  listen: "off"
-  admin_listen: ":9090"
   client_token_env: NEUBIRD_PROXY_TOKEN
   connections: []
   # redaction:

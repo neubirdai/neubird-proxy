@@ -64,6 +64,10 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 {{- end -}}
 
+{{- define "neubird-proxy.upstreamCAConfigMap" -}}
+{{- default (printf "%s-upstream-ca" (include "neubird-proxy.fullname" .)) .Values.upstreamCA.existingConfigMap -}}
+{{- end -}}
+
 {{/* The proxy's config.yaml: .Values.config plus the generated tunnel section. */}}
 {{- define "neubird-proxy.config" -}}
 {{- $t := .Values.tunnel -}}
@@ -77,5 +81,13 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
   "key_file" "/etc/neubird-proxy/tunnel/tunnel.key"
   "ca_file" "/etc/neubird-proxy/ca/relay-ca.crt"
   "connections_per_relay" $t.connectionsPerRelay -}}
-{{- toYaml (merge (dict "tunnel" $tunnel) (deepCopy .Values.config)) -}}
+{{- $c := .Values.config -}}
+{{- if and (hasKey $c "listen") (ne (toString $c.listen) "off") -}}{{- fail "config.listen: this chart is tunnel-only; leave listen out (the chart sets it to off)" -}}{{- end -}}
+{{- if and (hasKey $c "admin_listen") (ne (toString $c.admin_listen) ":9090") -}}{{- fail "config.admin_listen: leave it out (the chart's probes use :9090)" -}}{{- end -}}
+{{- $cfg := merge (dict "tunnel" $tunnel "listen" "off" "admin_listen" ":9090") (deepCopy $c) -}}
+{{- if or .Values.upstreamCA.cert .Values.upstreamCA.existingConfigMap -}}
+{{- if hasKey .Values.config "upstream_ca_file" -}}{{- fail "set upstreamCA instead of config.upstream_ca_file" -}}{{- end -}}
+{{- $_ := set $cfg "upstream_ca_file" "/etc/neubird-proxy/upstream-ca/ca.crt" -}}
+{{- end -}}
+{{- toYaml $cfg -}}
 {{- end -}}
