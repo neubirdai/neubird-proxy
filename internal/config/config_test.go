@@ -118,7 +118,8 @@ func TestTunnelConfig(t *testing.T) {
 		"off without tunnel": {"client_token_env: TOKEN\nlisten: \"off\"\nconnections: [{name: a, upstream: 'https://x'}]\n", "needs a tunnel"},
 		"no relays":          {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {cert_file: c, key_file: k, ca_file: ca}\n", "at least one relay"},
 		"bad relay":          {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: [tunnel.neubird.ai], cert_file: c, key_file: k, ca_file: ca}\n", "not host:port"},
-		"missing files":      {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443']}\n", "all required"},
+		"missing files":      {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443']}\n", "key_file and ca_file are required"},
+		"no identity":        {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443'], key_file: k, ca_file: ca}\n", "tenant and proxy are required"},
 		"too many":           {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443'], cert_file: c, key_file: k, ca_file: ca, connections_per_relay: 9}\n", "1 to 8"},
 		"off with tls":       {"client_token_env: TOKEN\nlisten: \"off\"\ntls: {cert_file: a, key_file: b}\nconnections: [{name: a, upstream: 'https://x'}]\ntunnel: {relays: ['r:443'], cert_file: c, key_file: k, ca_file: ca}\n", "listen: off turns off"},
 	} {

@@ -87,34 +87,39 @@ Protocol: [docs/tunnel-protocol.md](docs/tunnel-protocol.md). Design:
 listen: "off"                 # tunnel only: no inbound listener
 tunnel:
   relays: [acme.tunnel.neubird.ai:443]   # the customer's dedicated relay
-  cert_file: /etc/neubird-proxy-tunnel/tls.crt      # signed by NeuBird
-  key_file: /etc/neubird-proxy-tunnel/tls.key       # generated here, never sent
+  tenant: acme                  # names NeuBird gives you
+  proxy: aks-prod
+  key_file: /etc/neubird-proxy-tunnel/tunnel.key    # made here (keygen), never sent
   ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt   # pins NeuBird's relay CA
   connections_per_relay: 2    # two tunnels per pod, for faster failover
 ```
 
-**Identity.** The certificate carries a SPIFFE ID, for example
-`spiffe://neubird.ai/tenant/acme/proxy/aks-prod`. SPIFFE is an open
+**Identity.** The proxy has its own key and NeuBird records the key's
+fingerprint; nothing is signed. On every connect the proxy mints a
+short-lived self-signed certificate from the key, carrying a SPIFFE ID, for
+example `spiffe://neubird.ai/tenant/acme/proxy/aks-prod`. SPIFFE is an open
 standard (CNCF) for naming workloads in certificates, the way a website
-certificate names a domain. It tells the relay which customer (`acme`) and
-which of their proxy deployments (`aks-prod`) is connecting.
+certificate names a domain. The relay accepts the connection only if the
+key is the one recorded for that customer (`acme`) and proxy (`aks-prod`).
 
-**Getting the certificate.** The key is created here and never leaves:
-1. Run `neubird-proxy csr -tenant <tenant> -proxy <name>`, with the tenant
-   name NeuBird gives you. It writes `tunnel.key`, which stays with you, and
-   `tunnel.csr`.
-2. Send NeuBird the CSR. NeuBird signs it and returns the certificate and
-   its relay CA certificate.
-3. Put the key, certificate and relay CA in a Secret mounted at the paths
-   above.
+**Setting it up.** The key is created here and never leaves:
+1. Run `neubird-proxy keygen -tenant <tenant> -proxy <name>`, with the
+   tenant name NeuBird gives you. It writes `tunnel.key`, which stays with
+   you, and prints its fingerprint (`sha256:…`).
+2. Send NeuBird the fingerprint; it isn't secret. NeuBird records it and
+   returns its relay CA certificate and your relay's hostname.
+3. Put the key and relay CA in a Secret mounted at the paths above.
 4. Generate the proxy token with `neubird-proxy token`, and give it to
    NeuBird through your usual secure channel.
 
-Certificates last 90 days; the proxy warns from 30 days before expiry.
-Renewal repeats steps 1 and 2, then you update the Secret with the new
-certificate and key: no restart, the proxy re-reads them (its log says
-`tunnel certificate or relay CA reloaded`) and NeuBird moves the tunnels
-over without failing any request.
+Nothing expires: the proxy re-mints its certificate on every connect.
+To rotate the key, run `keygen` again, send NeuBird the new fingerprint,
+and update the Secret: no restart (the proxy's log says
+`tunnel key, certificate or relay CA reloaded`), and NeuBird then retires
+the old key, moving the tunnels over without failing any request.
+`neubird-proxy fingerprint <file>` prints a key's or certificate's
+fingerprint. A proxy set up with a NeuBird-signed certificate can keep it
+(`tunnel.cert_file`): NeuBird records its key's fingerprint the same way.
 
 `validate` checks the files and shows the tunnel identity and certificate
 expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
@@ -324,7 +329,9 @@ variable, or the proxy refuses to start. Unknown YAML fields are errors.
 | `connections[].upstream_basic_auth` | none | `{username_env, password_env}` injected as upstream Basic auth |
 | `connections[].passthrough` | `false` | Skip redaction and fail-closed checks for this connection |
 | `tunnel.relays` | none | Relay `host:port` addresses; setting `tunnel` enables the outbound tunnel |
-| `tunnel.cert_file`, `tunnel.key_file` | required with `tunnel` | Tunnel client certificate (signed by NeuBird) and its key (from `neubird-proxy csr`) |
+| `tunnel.tenant`, `tunnel.proxy` | required with `tunnel` (unless `cert_file`) | The names NeuBird gives you; the proxy mints its certificate for them |
+| `tunnel.key_file` | required with `tunnel` | The tunnel key, from `neubird-proxy keygen`; NeuBird records its fingerprint |
+| `tunnel.cert_file` | none | A certificate for the key to present instead of minting one |
 | `tunnel.ca_file` | required with `tunnel` | CA that signs the relays' certificates, pinned |
 | `tunnel.connections_per_relay` | 1 | Tunnels each pod keeps to each relay (1 to 8) |
 | `redaction.builtins` | default set | Built-in rules, in precedence order |
@@ -420,8 +427,9 @@ legend:     - returned by the system   + received by NeuBird
       +       "description": "[REDACTED:FIELD]",
 ```
 
-**`csr`** generates the tunnel's private key and a certificate signing
-request for NeuBird to sign (see Outbound tunnel).
+**`keygen`** makes the tunnel's private key and prints its fingerprint for
+NeuBird to record (see Outbound tunnel). **`fingerprint <file>`** prints the
+fingerprint of a key or certificate.
 
 **`token`** prints a new random 64-character token:
 `--from-literal=NEUBIRD_PROXY_TOKEN="$(neubird-proxy token)"`.

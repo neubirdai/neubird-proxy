@@ -90,11 +90,18 @@ const ListenOff = "off"
 type Tunnel struct {
 	// Relays are host:port addresses; every pod keeps tunnels to each.
 	Relays []string `yaml:"relays"`
-	// CertFile and KeyFile are the proxy's client certificate (signed by
-	// NeuBird's tenant CA) and its private key (generated here with
-	// `neubird-proxy csr`; it never leaves the cluster).
+	// Tenant and Proxy name this proxy (DNS labels NeuBird gives you). With
+	// them, the proxy mints its own self-signed certificate from KeyFile on
+	// every connect; NeuBird pins the key's fingerprint, so nothing is ever
+	// signed or renewed.
+	Tenant string `yaml:"tenant"`
+	Proxy  string `yaml:"proxy"`
+	// KeyFile is the proxy's private key, made here with `neubird-proxy
+	// keygen`; it never leaves the cluster.
+	KeyFile string `yaml:"key_file"`
+	// CertFile is optional: a certificate for KeyFile to present instead of
+	// minting one (a proxy set up before keys were pinned).
 	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
 	// CAFile pins the CA that signs the relays' server certificates.
 	CAFile string `yaml:"ca_file"`
 	// ConnectionsPerRelay is how many tunnels each pod keeps to each relay.
@@ -287,8 +294,11 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 				fail("tunnel.relays[%d]: %q is not host:port", i, r)
 			}
 		}
-		if t.CertFile == "" || t.KeyFile == "" || t.CAFile == "" {
-			fail("tunnel: cert_file, key_file and ca_file are all required")
+		if t.KeyFile == "" || t.CAFile == "" {
+			fail("tunnel: key_file and ca_file are required")
+		}
+		if t.CertFile == "" && (t.Tenant == "" || t.Proxy == "") {
+			fail("tunnel: tenant and proxy are required (or a cert_file naming them)")
 		}
 		if t.ConnectionsPerRelay == 0 {
 			t.ConnectionsPerRelay = DefaultTunnelConnectionsPerRelay
