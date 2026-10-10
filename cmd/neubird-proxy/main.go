@@ -106,6 +106,7 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	applyMemoryLimit(srv, cfg.MaxBodyBytes, log)
 
 	var conns []string
 	for _, c := range cfg.Connections {

@@ -354,3 +354,32 @@ func TestRequestCannotChooseDestination(t *testing.T) {
 		})
 	}
 }
+
+// One ID follows a request: the caller's X-Request-Id (the relay sets one)
+// is kept in the response, the audit line and upstream; anything that
+// isn't a short plain token is replaced.
+func TestRequestIDCarriedThrough(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		keep bool
+	}{
+		{"e1-trace-0001", true},
+		{"0c9f3a1b.ab:CD_9", true},
+		{"has space", false},
+		{`x"},"forged":"1`, false},
+		{strings.Repeat("a", 65), false},
+	} {
+		f := newFixture(t, baseConfig, jsonHandler(`{}`))
+		resp, _ := f.do(t, "GET", "/splunk/x", map[string]string{"Authorization": "Bearer " + token, "X-Request-Id": tc.in})
+		id := resp.Header.Get("X-Request-Id")
+		if (id == tc.in) != tc.keep || id == "" {
+			t.Errorf("%q: response id %q, keep=%v", tc.in, id, tc.keep)
+		}
+		if got := f.lastReq().Header.Get("X-Request-Id"); got != id {
+			t.Errorf("%q: upstream got %q, response %q", tc.in, got, id)
+		}
+		if logs := f.waitForAudit(t); !strings.Contains(logs, `"request_id":"`+id+`"`) {
+			t.Errorf("%q: audit line missing request_id %q", tc.in, id)
+		}
+	}
+}

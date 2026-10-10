@@ -228,3 +228,30 @@ func TestJSONStreamBatching(t *testing.T) {
 		t.Fatal("Read waited on a partial document")
 	}
 }
+
+type countReads struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countReads) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// A document over the limit fails as soon as it passes it: the rest is
+// never read, decoded or redacted (that took several times its size).
+func TestOversizeDocumentStopsEarly(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	const max = 1 << 20
+	doc := `{"x":"` + strings.Repeat("a", 10*max) + `"}`
+	src := &countReads{r: strings.NewReader(doc)}
+	_, _, _, err := NewJSONStream(io.NopCloser(src), e, Stats{}, max, nil, int64(len(doc)))
+	if !errors.Is(err, ErrDocTooLarge) {
+		t.Fatalf("err %v, want ErrDocTooLarge", err)
+	}
+	if src.n > max+readSlack {
+		t.Fatalf("read %d bytes of a %d-byte document; want at most %d", src.n, len(doc), max+readSlack)
+	}
+}
