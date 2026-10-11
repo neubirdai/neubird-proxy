@@ -1,33 +1,42 @@
 # Getting started
 
 This guide takes you from nothing to a working proxy in front of your
-systems: write a config, deploy it to Kubernetes, check that it reaches
-each system, and see exactly what NeuBird will receive. It takes about an
-hour.
+systems: write a config, check exactly what NeuBird will receive, install
+the proxy with this Helm chart, connect it to NeuBird, and check that it
+reaches each system. It takes about an hour.
+
+The proxy runs in your cluster and opens outbound tunnels (TLS, port 443) to
+your dedicated NeuBird relay; NeuBird's requests come back through them.
+Nothing connects in to your cluster.
 
 The example has two connections: Splunk through its MCP server, and the
-ServiceNow REST API. Swap in your own systems as you go. The
-[README](../README.md) is the full reference for every setting.
+ServiceNow REST API. Swap in your own systems as you go.
+[configuration.md](configuration.md) is the reference for every setting, and
+the chart's [README](../README.md) for its values.
 
 ## Before you start
 
 You need:
 
-- `kubectl` access to the cluster, with rights to create a namespace.
-- The proxy image, `neubirdai/neubird-proxy:v0.1.0` on Docker Hub, digest
-  `sha256:07447eb97140035d97d9b8a4c247ca9a73455803236b3caceef63a0a738ab44f`.
-  Pull it directly, or mirror it to your registry and keep the digest. You
-  can also build it from this repository with `make image`.
+- `kubectl` access to the cluster, with rights to create a namespace, and
+  Helm 3.
+- The proxy image, which NeuBird ships to you separately. Load it into your
+  registry and note its digest (`sha256:...`).
+- From NeuBird: your relay's address (e.g. `acme.tunnel.neubird.ai:443`)
+  and its IP addresses for your firewall, your tenant name,
+  `relay-ca.crt`, the relay's CA certificate, and a **join token**
+  (`nbjt_...`, secret, works once) for the proxy name you'll use.
 - Docker on your machine, to run the proxy's tools before anything is
   deployed. Every tool is a subcommand of the same image, so the version you
   check with is the version you deploy.
 - For each system, its URL and a credential for the proxy to use. The proxy
   holds these; NeuBird never sees them.
+- Outbound access from the cluster to the relay on port 443.
 
 Set a shortcut for running the tools:
 
 ```bash
-IMAGE=neubirdai/neubird-proxy:v0.1.0
+IMAGE=<your registry>/neubird-proxy@sha256:<digest>
 np() { docker run --rm -i -v "$PWD":/work -w /work "$IMAGE" "$@"; }
 np help
 ```
@@ -46,15 +55,15 @@ used in step 3. Run the commands from that directory.
 Create `config.yaml` (or start from `docs/examples/config.yaml`):
 
 ```yaml
-listen: ":8443"          # the port NeuBird reaches, behind your load balancer
-admin_listen: ":9090"    # health and metrics, cluster-internal only
+# listen, admin_listen and tunnel are set by the Helm chart: requests arrive
+# through the tunnel, nothing listens for them.
 
 # The token NeuBird sends. Secrets never go in this file: the proxy reads
 # them from environment variables, which come from a Kubernetes Secret.
 client_token_env: NEUBIRD_PROXY_TOKEN
 
 connections:
-  # NeuBird calls https://<proxy>/splunk/services/mcp
+  # NeuBird's connection URL ends in /splunk/services/mcp
   - name: splunk
     upstream: https://splunk.example.com
     client_auth: bearer
@@ -63,7 +72,7 @@ connections:
     headers:
       Authorization: Bearer ${SPLUNK_MCP_TOKEN}   # sent to Splunk, never to NeuBird
 
-  # NeuBird calls https://<proxy>/servicenow/api/now/table/incident...
+  # NeuBird's connection URL ends in /servicenow
   - name: servicenow
     upstream: https://yourinstance.service-now.com
     client_auth: basic                 # NeuBird sends its token as a Basic password
@@ -84,8 +93,8 @@ redaction:
 
 A few things to know:
 
-- **`name`** becomes the path prefix NeuBird uses, so `splunk` means
-  `https://<proxy>/splunk/...`.
+- **`name`** is the connection name NeuBird uses in its URL, so `splunk`
+  serves NeuBird's `.../splunk/...` requests.
 - **`paths`** patterns must match the whole path after the prefix. Leave a
   connection's `paths` out and every URL under its upstream is reachable;
   the proxy allows that, but warns at every start.
@@ -119,7 +128,8 @@ not checked (offline, placeholders used): NEUBIRD_PROXY_TOKEN, SN_PASSWORD, SN_U
 ```
 
 Both warnings are expected at this point:
-- **TLS** is handled by your load balancer in this setup.
+- **TLS**: ignore it. It's about the request listener, which the chart turns
+  off; the chart adds the tunnel part of the config in step 5.
 - **The Splunk warning** goes away in step 6, when you list the MCP tools
   the agent may call.
 
@@ -265,16 +275,19 @@ token and the systems' credentials:
 
 ```bash
 NS=neubird
-kubectl create namespace $NS   # the manifest in step 5 adds its security labels
+kubectl create namespace $NS
+kubectl label namespace $NS pod-security.kubernetes.io/enforce=restricted
 
 printf 'Splunk MCP token: '; read -rs SPLUNK; echo
 printf 'ServiceNow password: '; read -rs SNPW; echo
+printf 'NeuBird join token: '; read -rs JOIN; echo
 kubectl -n $NS create secret generic neubird-proxy \
   --from-literal=NEUBIRD_PROXY_TOKEN="$(np token)" \
+  --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN" \
   --from-literal=SPLUNK_MCP_TOKEN="$SPLUNK" \
   --from-literal=SN_USER=neubird-integration \
   --from-literal=SN_PASSWORD="$SNPW"
-unset SPLUNK SNPW
+unset SPLUNK SNPW JOIN
 ```
 
 If you chose HMAC masking, add the key from `hmac.env` too, then delete
@@ -292,39 +305,50 @@ shows up immediately rather than as wrong codes.
 `np token` generates the proxy token, so nobody types it. `read -rs` keeps
 the credentials off the screen and out of your shell history.
 
-## 5. Deploy
+## 5. Install with Helm
 
-```bash
-kubectl -n $NS create configmap neubird-proxy --from-file=config.yaml
+Write `values.yaml` with what NeuBird gave you:
+
+```yaml
+image:
+  repository: <your registry>/neubird-proxy
+  digest: sha256:<digest>
+tunnel:
+  relays: ["acme.tunnel.neubird.ai:443"]   # your relay, from NeuBird
+  tenant: acme                             # your tenant, from NeuBird
+  proxy: aks-prod                          # the proxy name the join token is for
+env:
+  existingSecret: neubird-proxy            # the Secret from step 4
 ```
 
-Copy `deploy/kubernetes.yaml` from this repository and edit the lines marked
-`CHANGE ME`:
-
-| Setting | Set it to |
-|---|---|
-| `namespace:` (every object) and the Namespace's `name:` | `$NS` |
-| `image:` | already set to the published image, pinned by digest; change the registry part only if you mirror it |
-| Ingress `ipBlock` | the range your load balancer or ingress controller connects from |
-| Egress `ipBlock` | the range your systems (or your API gateway) are in |
-| Monitoring namespace | where your Prometheus runs, if anything scrapes `/metrics` |
-
-The egress range matters. The manifest denies all other traffic, so if it
-doesn't cover your systems, the proxy can't reach them; step 6 shows that
-as a `tcp` failure. To restrict egress to exactly the configured hostnames
-instead of a range, see `np netpol` in the README (Kubernetes hardening).
-
-Apply it and wait for the two pods:
+Your `config.yaml` becomes the chart's `config` value. Wrap it, then install
+(add `--set-file upstreamCA.cert=...` if a system uses an internal CA):
 
 ```bash
-kubectl apply -f kubernetes.yaml
+{ echo 'config:'; sed 's/^/  /' config.yaml; } > config-values.yaml
+helm install neubird-proxy ./neubird-proxy-<version>.tgz -n $NS \
+  -f values.yaml -f config-values.yaml --set-file relayCA.cert=relay-ca.crt
+```
+
+The chart generates the proxy's tunnel key in a Secret; it never leaves the
+cluster. On its first connect the proxy presents the join token, the relay
+records the key, and the tunnels open, all within seconds. Nothing to send
+NeuBird:
+
+```bash
 kubectl -n $NS rollout status deploy/neubird-proxy
-kubectl -n $NS logs deploy/neubird-proxy | head -5
+kubectl -n $NS logs deploy/neubird-proxy | grep -E '"(starting|enrolled with the join token|tunnel connected)"'
 ```
 
-The first log line, `starting`, lists the connections and the hash of the
-config they run. Any `risky configuration` lines are settings worth a second
-look.
+Once enrolled, you can delete `NEUBIRD_JOIN_TOKEN` from the Secret. If the
+log says `enrollment: relay refused: join token expired` (or `already
+used`), ask NeuBird for a new one. Without a join token, send NeuBird the
+key's fingerprint instead (`kubectl -n $NS exec deploy/neubird-proxy --
+/neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key`); the pods
+turn ready once it's recorded.
+
+The `starting` line lists the connections and the hash of the config they
+run. Any `risky configuration` lines are settings worth a second look.
 
 ## 6. Test each connection
 
@@ -355,21 +379,20 @@ Each failure says where it broke:
 | Failure | Usually means |
 |---|---|
 | `FAIL dns` | The name doesn't resolve from inside the cluster |
-| `FAIL tcp` | A firewall, or the manifest's egress range doesn't cover the system |
-| `FAIL tls`, "set upstream_ca_file" | The system uses an internal CA; add its bundle as `upstream_ca_file` |
+| `FAIL tcp` | A firewall, or your NetworkPolicy, doesn't allow the system |
+| `FAIL tls`, "set upstream_ca_file" | The system uses an internal CA: pass its bundle with the chart's `upstreamCA` |
 | "rejected the credentials" | The system refused the credential in the Secret |
 | "refused by the proxy: path_not_allowed" | The test probe's path isn't in `paths`; pass `-path` with one that is |
 
 For an MCP connection, the last lines list the server's tools. Copy the
 ones the agent should use into the connection's `mcp_tools`, and every
-other tool is refused. Then update the ConfigMap and restart:
+other tool is refused. Then upgrade; a config change rolls the pods:
 
 ```bash
-kubectl -n $NS create configmap neubird-proxy --from-file=config.yaml --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n $NS rollout restart deploy/neubird-proxy
+{ echo 'config:'; sed 's/^/  /' config.yaml; } > config-values.yaml
+helm upgrade neubird-proxy ./neubird-proxy-<version>.tgz -n $NS \
+  -f values.yaml -f config-values.yaml --set-file relayCA.cert=relay-ca.crt
 ```
-
-The proxy has no hot reload, so config changes take effect on restart.
 
 ## 7. Check the masking on live data
 
@@ -393,21 +416,12 @@ Add `-html - > report.html` to either for the side-by-side report.
 
 ## 8. Connect NeuBird
 
-Expose the Service (port 443) through your load balancer or ingress with
-TLS, limited to NeuBird's egress IPs if you can. Then check it from outside
-the cluster:
+The tunnels are already up (step 5). In NeuBird, create one connection per
+system, with the URL NeuBird gives you for it and, as its credential, the
+proxy token:
 
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://<proxy-host>/splunk/services/mcp -X POST
-# 401: reachable, and refusing requests without the token
-```
-
-Send NeuBird the connection URLs and the proxy token through your usual
-secure channel:
-
-- Splunk MCP: `https://<proxy-host>/splunk/services/mcp`, bearer token.
-- ServiceNow: `https://<proxy-host>/servicenow`, Basic auth with any user
-  name and the token as the password.
+- Splunk MCP: bearer token.
+- ServiceNow: Basic auth with any user name and the token as the password.
 
 Print the token with:
 
@@ -415,11 +429,14 @@ Print the token with:
 kubectl -n $NS get secret neubird-proxy -o jsonpath='{.data.NEUBIRD_PROXY_TOKEN}' | base64 -d
 ```
 
+To cut NeuBird off at any time: change the token in the Secret and restart
+the pods, or scale the Deployment to 0.
+
 ## 9. Watch it work
 
-Every request gets one audit line: who called (`forwarded_for`, as reported
-by your load balancer), which connection and path, the status, the time,
-and how many values each rule masked. Matched values and query values are
+Every request gets one audit line: that it came through the tunnel
+(`"via":"tunnel"`), which connection and path, the status, the time, and how
+many values each rule masked. Matched values and query values are
 never logged.
 
 ```bash
@@ -440,9 +457,11 @@ done | np metrics -
   NeuBird's connectors actually call; the audit lines show every method,
   path and query parameter name. Add `response_fields` where free text
   doesn't need to leave.
-- **Lock down egress by hostname** with `np netpol` (README, Kubernetes
-  hardening).
+- **Lock down egress by hostname**: generate a policy for your systems and
+  the relay with `neubird-proxy netpol` ([configuration.md](configuration.md),
+  Egress by hostname).
 - **Correlate without revealing values:** if you skipped it in step 3,
   see the HMAC section there.
-- **Rotate the token** without downtime: set `client_token_previous_env` to
-  the old token's variable while NeuBird switches over (README, Deploy).
+- **Rotate the token** without downtime: add the new token to the Secret,
+  keep the old one under another name set as `client_token_previous_env`,
+  restart, update NeuBird, then remove the old one and restart again.

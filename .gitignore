@@ -1,3 +1,4 @@
 /bin/
 sbom.spdx.json
 .DS_Store
+dist/

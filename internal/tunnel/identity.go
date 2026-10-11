@@ -27,6 +27,10 @@ import (
 // ALPN is the protocol both sides must negotiate (docs/tunnel-protocol.md).
 const ALPN = "neubird-tunnel/1"
 
+// EnrollALPN is the enrollment protocol: the proxy presents its join token
+// once over it and the relay records its key (docs/tunnel-protocol.md).
+const EnrollALPN = "neubird-enroll/1"
+
 const trustDomain = "neubird.ai"
 
 var label = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)

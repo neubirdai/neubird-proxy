@@ -106,7 +106,18 @@ type Tunnel struct {
 	CAFile string `yaml:"ca_file"`
 	// ConnectionsPerRelay is how many tunnels each pod keeps to each relay.
 	ConnectionsPerRelay int `yaml:"connections_per_relay"`
+	// JoinTokenEnv names an environment variable holding a join token from
+	// NeuBird. When it's set, the proxy enrolls its key with the relay on
+	// its first connection, so nothing needs sending back to NeuBird. It's
+	// optional, unlike other _env fields: once enrolled, the token can be
+	// removed (the relay then knows the key).
+	JoinTokenEnv string `yaml:"join_token_env"`
+	// JoinToken is JoinTokenEnv's value, "" if unset.
+	JoinToken string `yaml:"-"`
 }
+
+// JoinTokenRE is a well-formed join token (docs/tunnel-protocol.md).
+var JoinTokenRE = regexp.MustCompile(`^nbjt_[A-Za-z0-9_-]{43}$`)
 
 const (
 	DefaultTunnelConnectionsPerRelay = 1
@@ -238,6 +249,9 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			return ""
 		}
 		v, ok := lookupEnv(name)
+		// A Secret made with --from-file keeps the file's trailing newline,
+		// which would make every token or credential silently wrong.
+		v = strings.TrimRight(v, "\r\n")
 		if !ok || v == "" {
 			fail("%s: environment variable %s is not set", field, name)
 		}
@@ -305,6 +319,13 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		}
 		if t.ConnectionsPerRelay < 1 || t.ConnectionsPerRelay > MaxTunnelConnectionsPerRelay {
 			fail("tunnel.connections_per_relay must be 1 to %d", MaxTunnelConnectionsPerRelay)
+		}
+		if t.JoinTokenEnv != "" {
+			t.JoinToken, _ = lookupEnv(t.JoinTokenEnv)
+			t.JoinToken = strings.TrimSpace(t.JoinToken)
+			if t.JoinToken != "" && !JoinTokenRE.MatchString(t.JoinToken) {
+				fail("tunnel.join_token_env: %s doesn't hold a join token (nbjt_ and 43 characters)", t.JoinTokenEnv)
+			}
 		}
 	}
 	if c.Listen == ListenOff {

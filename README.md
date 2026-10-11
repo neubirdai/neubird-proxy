@@ -6,8 +6,11 @@ for, and masks PII and secrets in every response before the data leaves
 MetLife. Design: *MetLife Redaction Proxy: Engineering Proposal* (Sep 30,
 2026). Open security work: [docs/security-plan.md](docs/security-plan.md).
 
-**New here? Start with [docs/getting-started.md](docs/getting-started.md)**:
-config, deploy, test and check the masking, in about an hour.
+**New here? Start with [the getting started guide](deploy/helm/neubird-proxy/docs/getting-started.md)**:
+config, check the masking, install with Helm, connect, in about an hour.
+Customers get everything they need inside the Helm chart
+([`deploy/helm/neubird-proxy`](deploy/helm/neubird-proxy)): its README, the
+guide, and the [configuration reference](deploy/helm/neubird-proxy/docs/configuration.md).
 
 ```
 NeuBird ──(proxy token)──▶ neubird-proxy ──(APIM subscription key)──▶ APIM (internal) ──(Key Vault creds)──▶ Splunk / Maestro / ServiceNow
@@ -553,22 +556,25 @@ for the throughput work.
 
 ## Kubernetes hardening
 
-`deploy/kubernetes.yaml` enforces these at the cluster level, independently
-of the proxy's own checks:
+The Helm chart ([`deploy/helm/neubird-proxy`](deploy/helm/neubird-proxy),
+the only supported way to deploy) enforces these at the cluster level,
+independently of the proxy's own checks:
 
 | Control | What it enforces |
 |---|---|
-| Own namespace, Pod Security `restricted` | The cluster rejects any pod there that runs as root, escalates privileges, keeps Linux capabilities, mounts host paths or skips seccomp |
+| Own namespace, Pod Security `restricted` | The customer labels the namespace; the chart's pods meet `restricted`, so the cluster rejects any pod there that runs as root, escalates privileges, keeps Linux capabilities, mounts host paths or skips seccomp |
 | Pod security context | Non-root user 65532, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp |
 | Service account | A dedicated one with no Role bindings, and its token isn't mounted: the proxy can't talk to the Kubernetes API |
-| `default-deny` NetworkPolicy | Nothing in the namespace sends or receives traffic unless another policy allows it |
-| `neubird-proxy` NetworkPolicy | In: the proxy port from the load balancer's range only, the admin port (health, metrics) from monitoring only. Out: the APIM range on 443, plus DNS |
+| No inbound port | Tunnel-only: the proxy dials out to the relay; nothing connects in |
+| NetworkPolicy (`networkPolicy.enabled`) | In: only the admin port, from `metricsFrom`. Out: DNS, the relay's addresses on 443, and the listed upstream ranges. Or a hostname policy from `neubird-proxy netpol` (below) |
 | Resources | A 512 MiB memory limit; response buffering is sized to it (see Latency and capacity) |
 
 **Restricting egress by hostname.** A standard NetworkPolicy matches IP
-ranges and ports, not hostnames. The policy above allows the APIM CIDR,
+ranges and ports, not hostnames. The chart's policy allows upstream CIDRs,
 which may be wider than the hosts the proxy needs. To allow exactly the
-configured upstream hosts, generate the rules from the config:
+configured upstream hosts and the relay, generate the rules from the
+running config (`/etc/neubird-proxy/config.yaml` in the pod, which includes
+the tunnel section); they select the chart's pods by `app: neubird-proxy`:
 
 ```bash
 neubird-proxy netpol -config config.yaml -namespace neubird                    # CiliumNetworkPolicy (default)
@@ -602,16 +608,13 @@ plan, item 5.
 
 ## Deploy
 
-```bash
-kubectl -n neubird create secret generic neubird-proxy \
-  --from-literal=NEUBIRD_PROXY_TOKEN="$(openssl rand -hex 32)" \
-  --from-literal=NEUBIRD_PROXY_TOKEN_SERVICENOW="$(openssl rand -hex 32)" \
-  --from-literal=APIM_SUBSCRIPTION_KEY=...
-kubectl -n neubird create configmap neubird-proxy --from-file=config.yaml
-kubectl apply -f deploy/kubernetes.yaml   # edit the CHANGE ME lines first
-```
+With the Helm chart only: see its
+[README](deploy/helm/neubird-proxy/README.md) and the
+[getting started guide](deploy/helm/neubird-proxy/docs/getting-started.md).
+`make chart-check` lints and renders it, and validates the rendered config
+with this build.
 
-To rotate a token:
+To rotate the proxy token:
 1. Add the new value as `NEUBIRD_PROXY_TOKEN` and move the old one to
    `NEUBIRD_PROXY_TOKEN_PREVIOUS`, with `client_token_previous_env` set, then
    restart.

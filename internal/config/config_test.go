@@ -131,3 +131,50 @@ func TestTunnelConfig(t *testing.T) {
 		})
 	}
 }
+
+// join_token_env is optional: unset or empty means no enrollment (the token
+// is removed after install), but a value must look like a join token.
+func TestTunnelJoinToken(t *testing.T) {
+	const jt = "nbjt_Eqsj3YL4mQ0Su35QzRZS4KjcVHYOfWDnFMrVo_NgHZQ"
+	base := "client_token_env: TOKEN\nlisten: \"off\"\nconnections: [{name: a, upstream: 'https://x'}]\n" +
+		"tunnel: {relays: ['r:443'], tenant: swift, proxy: p, key_file: k, ca_file: ca, join_token_env: NEUBIRD_JOIN_TOKEN}\n"
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string // "" = valid
+		tok  string
+	}{
+		"set":       {map[string]string{"TOKEN": tok, "NEUBIRD_JOIN_TOKEN": jt + "\n"}, "", jt},
+		"unset":     {map[string]string{"TOKEN": tok}, "", ""},
+		"empty":     {map[string]string{"TOKEN": tok, "NEUBIRD_JOIN_TOKEN": ""}, "", ""},
+		"malformed": {map[string]string{"TOKEN": tok, "NEUBIRD_JOIN_TOKEN": "hunter2"}, "doesn't hold a join token", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := Parse([]byte(base), env(tc.env))
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "hunter2") {
+					t.Fatalf("err = %v, want %q (and never the value)", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Tunnel.JoinToken != tc.tok {
+				t.Fatalf("join token %q, want %q", c.Tunnel.JoinToken, tc.tok)
+			}
+		})
+	}
+}
+
+// Values from a Secret made with --from-file end in a newline; it's not
+// part of the token.
+func TestEnvTrailingNewlineTrimmed(t *testing.T) {
+	c, err := Parse([]byte("client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\n"),
+		env(map[string]string{"TOKEN": tok + "\n"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Connections[0].ClientTokens[0]; got != tok {
+		t.Fatalf("token %q, want %q", got, tok)
+	}
+}

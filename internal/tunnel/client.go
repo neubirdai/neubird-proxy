@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,6 +73,10 @@ type Client struct {
 	// proxyFor returns the outbound HTTP proxy for a relay, or nil.
 	proxyFor func(*url.URL) (*url.URL, error)
 
+	// enrolled is, per relay, whether this process has enrolled its key
+	// there (or found it known), when a join token is configured.
+	enrolled map[string]*atomic.Bool
+
 	wg      sync.WaitGroup
 	closing chan struct{} // closed by Shutdown: stop reconnecting
 	once    sync.Once
@@ -95,6 +100,10 @@ func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logge
 		dial:     (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		proxyFor: httpproxy.FromEnvironment().ProxyFunc(),
 		closing:  make(chan struct{}),
+		enrolled: map[string]*atomic.Bool{},
+	}
+	for _, r := range cfg.Relays {
+		c.enrolled[r] = &atomic.Bool{}
 	}
 	// Registers the http2 server with hs, so hs.Shutdown sends GOAWAY on
 	// every tunnel and lets in-flight requests finish.
@@ -113,7 +122,8 @@ func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logge
 func (c *Client) Start(ctx context.Context) {
 	if id, err := c.identity(); err == nil {
 		c.log.Info("tunnel starting", "tenant", id.Tenant, "proxy", id.Proxy, "relays", c.cfg.Relays,
-			"connections_per_relay", c.cfg.ConnectionsPerRelay, "key", id.Fingerprint, "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339))
+			"connections_per_relay", c.cfg.ConnectionsPerRelay, "key", id.Fingerprint, "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339),
+			"join_token", c.cfg.JoinToken != "")
 	}
 	c.wg.Add(1)
 	go c.refresh(ctx)
@@ -321,6 +331,20 @@ func (c *Client) connect(ctx context.Context, relay string) (*acceptedConn, erro
 		c.connects.Inc(relay, "identity_error")
 		return nil, fmt.Errorf("tunnel certificate: %w", err)
 	}
+	if c.cfg.JoinToken != "" && !c.enrolled[relay].Load() {
+		outcome, err := c.enroll(ctx, relay, id)
+		if err != nil {
+			c.connects.Inc(relay, "enroll_error")
+			return nil, fmt.Errorf("enrollment: %w", err)
+		}
+		if c.enrolled[relay].CompareAndSwap(false, true) {
+			msg := "enrolled with the join token"
+			if outcome == "known" {
+				msg = "key already enrolled"
+			}
+			c.log.Info(msg, "relay", relay, "key", id.Fingerprint)
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	host, _, _ := net.SplitHostPort(relay)
@@ -357,6 +381,54 @@ func (c *Client) connect(ctx context.Context, relay string) (*acceptedConn, erro
 	conn.SetReadDeadline(time.Time{})
 	c.connects.Inc(relay, "ok")
 	return &acceptedConn{Conn: conn, br: br}, nil
+}
+
+// enroll presents the join token to one relay over EnrollALPN, with the
+// same pinned-CA TLS and certificate as a tunnel. The relay records the
+// certificate's key ("enrolled"), or already has it ("known").
+func (c *Client) enroll(ctx context.Context, relay string, id *Identity) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	host, _, _ := net.SplitHostPort(relay)
+	raw, err := c.dialRelay(ctx, relay)
+	if err != nil {
+		return "", err
+	}
+	conn := tls.Client(raw, &tls.Config{
+		Certificates: []tls.Certificate{id.Certificate},
+		RootCAs:      id.RelayCAs,
+		ServerName:   host,
+		NextProtos:   []string{EnrollALPN},
+		MinVersion:   tls.VersionTLS13,
+	})
+	defer conn.Close()
+	if err := conn.HandshakeContext(ctx); err != nil {
+		if strings.Contains(err.Error(), "no application protocol") {
+			return "", errors.New("the relay doesn't accept join tokens; send NeuBird the key's fingerprint instead")
+		}
+		return "", fmt.Errorf("tls: %w", err)
+	}
+	if p := conn.ConnectionState().NegotiatedProtocol; p != EnrollALPN {
+		return "", errors.New("the relay doesn't accept join tokens; send NeuBird the key's fingerprint instead")
+	}
+	conn.SetDeadline(time.Now().Add(acceptTimeout))
+	if _, err := io.WriteString(conn, c.cfg.JoinToken+"\n"); err != nil {
+		return "", fmt.Errorf("send join token: %w", err)
+	}
+	line, err := bufio.NewReader(io.LimitReader(conn, 512)).ReadString('\n')
+	line = strings.TrimSpace(line)
+	switch {
+	case line == "ok enrolled":
+		return "enrolled", nil
+	case line == "ok known":
+		return "known", nil
+	case strings.HasPrefix(line, "error "):
+		return "", fmt.Errorf("relay refused: %s", strings.TrimPrefix(line, "error "))
+	case err != nil:
+		return "", fmt.Errorf("relay refused the enrollment (is %s/%s in NeuBird's records?): %w", id.Tenant, id.Proxy, err)
+	default:
+		return "", fmt.Errorf("unexpected answer from the relay: %q", line)
+	}
 }
 
 // Check connects to one relay, completes the mutual-TLS handshake and

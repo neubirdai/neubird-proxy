@@ -1,0 +1,93 @@
+# neubird-proxy chart values. Required: image, tunnel, relayCA, env.
+
+# The image is shipped to you separately: load it into your registry and
+# point here, by digest (preferred) or tag.
+image:
+  repository: ""          # e.g. registry.example.com/neubird/neubird-proxy
+  digest: ""              # sha256:...
+  tag: ""                 # used only when digest is empty
+  pullPolicy: IfNotPresent
+imagePullSecrets: []      # [{name: my-registry-creds}]
+
+replicaCount: 2
+
+# Your dedicated relay, from NeuBird.
+tunnel:
+  relays: []              # ["<tenant>.tunnel.neubird.ai:443"]
+  tenant: ""              # your NeuBird tenant
+  proxy: ""               # a name for this deployment, e.g. aks-prod
+  connectionsPerRelay: 2  # tunnels per replica; NeuBird monitors replicas × this
+  # The env var (in env.existingSecret) holding the join token NeuBird gave
+  # you. With it, the proxy enrolls its own key on first connect: nothing to
+  # send back. Without it (or empty), send NeuBird the key's fingerprint.
+  joinTokenEnv: NEUBIRD_JOIN_TOKEN
+
+# The relay CA certificate NeuBird sends you (public). The proxy only
+# connects to a relay whose certificate this CA signed.
+relayCA:
+  cert: ""                # the PEM itself, or:
+  existingConfigMap: ""   # a ConfigMap with key relay-ca.crt
+
+# Optional: extra CA certificates to trust for your upstreams (e.g. an API
+# gateway with an internal certificate). Sets upstream_ca_file.
+upstreamCA:
+  cert: ""                # PEM bundle, or:
+  existingConfigMap: ""   # a ConfigMap with key ca.crt
+
+# The proxy's tunnel key: its identity. It never leaves your cluster; you
+# send NeuBird only its fingerprint (see the install notes).
+tunnelKey:
+  # Generate a P-256 key in a Secret at install, kept across upgrades and
+  # left in place on uninstall. With `helm template`, generate it yourself
+  # (neubird-proxy keygen) and use existingSecret, or the key lands in your
+  # rendered YAML.
+  generate: true
+  existingSecret: ""      # a Secret with key tunnel.key
+
+# A Secret you create, loaded as environment: NEUBIRD_PROXY_TOKEN (NeuBird's
+# token, which you also enter in NeuBird's connection), REDACTION_HMAC_KEY
+# if config.redaction uses hmac, and every ${VAR} your connections use.
+env:
+  existingSecret: ""
+
+# The proxy's configuration (docs/configuration.md): connections,
+# redaction, limits. The chart sets the rest: the tunnel section (from
+# `tunnel` above), listen: off and admin_listen: :9090. ${VAR} placeholders
+# are filled from env.
+config:
+  client_token_env: NEUBIRD_PROXY_TOKEN
+  connections: []
+  # redaction:
+  #   mask: hmac
+  #   hmac_key_env: REDACTION_HMAC_KEY
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 512Mi}  # the proxy sizes its request buffers from this
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Off by default. When on: no inbound traffic except metricsFrom on 9090;
+# outbound only DNS, the relays (relayCIDRs, port 443) and your upstreams.
+networkPolicy:
+  enabled: false
+  relayCIDRs: []           # NeuBird's relay addresses, e.g. ["203.0.113.10/32"]
+  upstreams: []            # [{cidr: 10.20.0.0/16, ports: [443]}]
+  metricsFrom: []          # NetworkPolicyPeers allowed to scrape :9090
+  dnsPeers:                # where DNS is answered
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}

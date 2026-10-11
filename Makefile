@@ -1,7 +1,7 @@
 IMAGE   ?= neubird-proxy
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build test lint vuln fuzz bench image sbom check-config clean
+.PHONY: chart-check chart-package build test lint vuln fuzz bench image sbom check-config clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/neubird-proxy ./cmd/neubird-proxy
@@ -39,6 +39,15 @@ sbom: image
 CONFIG ?= deploy/config.example.yaml
 check-config: build
 	NEUBIRD_PROXY_TOKEN=check-only-0123456789abcdef012345 NEUBIRD_PROXY_TOKEN_SERVICENOW=check-only-0123456789abcdef012345 APIM_SUBSCRIPTION_KEY=x ./bin/neubird-proxy -check -config $(CONFIG)
+
+chart-check:
+	scripts/chart-check.sh
+
+# The chart customers get: dist/neubird-proxy-<version>.tgz (ship the image separately).
+chart-package: chart-check
+	mkdir -p dist
+	docker run --rm -v $(CURDIR):/src -w /src alpine/helm:3.16.4 package deploy/helm/neubird-proxy -d dist
+	cd dist && shasum -a 256 neubird-proxy-*.tgz > SHA256SUMS
 
 clean:
 	rm -rf bin sbom.spdx.json

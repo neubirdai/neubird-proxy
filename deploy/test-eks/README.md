@@ -2,8 +2,8 @@
 
 The proxy in front of the Splunk E2E instance's MCP server, for end-to-end
 testing from the NeuBird platform. This is not a MetLife deployment: there is
-no APIM, and the proxy injects the Splunk MCP token itself. For MetLife, see
-`deploy/kubernetes.yaml` and `deploy/config.example.yaml`.
+no APIM, and the proxy injects the Splunk MCP token itself. Customers deploy with
+the Helm chart, `deploy/helm/neubird-proxy`.
 
 ```
 NeuBird ──(proxy token)──▶ https://neubird-proxy.htm.neubird.ai/splunk/services/mcp

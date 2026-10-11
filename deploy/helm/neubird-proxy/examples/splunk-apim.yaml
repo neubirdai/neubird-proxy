@@ -1,0 +1,56 @@
+# Example: Splunk's REST API behind an API gateway (e.g. Azure APIM) that
+# needs a subscription key. Copy, then replace every CHANGE_ME.
+image:
+  repository: CHANGE_ME.registry.example.com/neubird/neubird-proxy
+  digest: sha256:CHANGE_ME          # from NeuBird's release notes
+
+tunnel:
+  relays: ["CHANGE_ME.tunnel.neubird.ai:443"]   # from NeuBird
+  tenant: CHANGE_ME                             # from NeuBird
+  proxy: aks-prod                               # your name for this deployment
+
+# relayCA: pass the file NeuBird sent: --set-file relayCA.cert=relay-ca.crt
+
+# Secret neubird-proxy-env, created by you (or your secret store) with:
+#   NEUBIRD_PROXY_TOKEN     neubird-proxy token (also entered in NeuBird's connection)
+#   REDACTION_HMAC_KEY      openssl rand -hex 32
+#   NEUBIRD_JOIN_TOKEN      the join token from NeuBird (enrolls the key; removable after)
+#   APIM_SUBSCRIPTION_KEY   your gateway's key; it never leaves this cluster
+env:
+  existingSecret: neubird-proxy-env
+
+config:
+  client_token_env: NEUBIRD_PROXY_TOKEN
+  max_body_bytes: 20971520
+  connections:
+    - name: splunk-apim
+      upstream: https://CHANGE_ME.example.com/splunk
+      client_auth: bearer
+      methods: [GET, POST]
+      paths:
+        - /services/search/jobs
+        - /services/search/jobs/[A-Za-z0-9._-]+(/(results|control))?
+        - /services/data/indexes
+        # NeuBird probes these for MCP before using REST. Let them reach the
+        # gateway so it answers 404; a 403 from the proxy reads as a failing
+        # MCP server and the connection can't be created.
+        - /services/mcp
+        - /mcp
+        - /
+      headers:
+        Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY}
+      # SPL commands that write, send, delete or reach other systems.
+      request_deny_patterns:
+        - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|dbxoutput|dbxquery|sendresults)\\b"
+      rate_limit: {requests_per_second: 5, burst: 20}
+  redaction:                    # all default detectors (secrets, email, SSN, cards, phone, IPv4, DOB), plus:
+    custom:
+      - name: member_id
+        regex: "\\bCHANGE_ME[0-9]{9}\\b"
+    mask: hmac                  # same value -> same token, so events still correlate
+    hmac_key_env: REDACTION_HMAC_KEY
+
+networkPolicy:
+  enabled: true
+  relayCIDRs: ["CHANGE_ME/32"]                   # NeuBird's relay addresses
+  upstreams: [{cidr: CHANGE_ME/32, ports: [443]}] # your gateway

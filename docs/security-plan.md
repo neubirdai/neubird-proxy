@@ -186,8 +186,10 @@ NeuBird engineering adds tests.*
 - Whether to turn on `windows_account`.
 
 **17. Deployment values.** *Owner: MetLife platform.*
-- Fill in the `CHANGE ME` values in `deploy/kubernetes.yaml`: image,
-  namespace, load balancer and APIM CIDRs, monitoring namespace.
+- Fill in the Helm chart's values (`deploy/helm/neubird-proxy`): image
+  (from their registry, by digest), relay and tenant, relay CA, the env
+  Secret, and the NetworkPolicy's relay and APIM ranges or a `netpol`
+  hostname policy.
 - Confirm Pod Security admission and the read-only root filesystem work in
   their cluster.
 
