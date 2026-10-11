@@ -117,12 +117,49 @@ func TestDestinationsStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.Destinations == nil || strings.Join(st.Destinations.Hosts, ",") != "127.0.0.1,*.acme.internal" ||
-		strings.Join(st.Destinations.Methods, ",") != "GET,POST" || st.Destinations.CredentialHeaders[0] != "Authorization" {
+	if st.Destinations == nil || st.Destinations.ClientAuth != "bearer" || strings.Join(st.Destinations.CredentialHeaders, ",") != "Authorization" {
 		t.Fatalf("destinations: %+v", st.Destinations)
 	}
-	if len(st.Connections) != 1 || st.Connections[0].Name != "splunk" {
-		t.Fatalf("connections: %+v", st.Connections)
+	// Only how to send requests: no hosts, connections or upstreams.
+	for _, leak := range []string{"acme.internal", "127.0.0.1", "splunk", "apim-key"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("status leaks %q: %s", leak, raw)
+		}
+	}
+	for _, tok := range []string{"", "wrong-token-wrong-token-wrong-token"} {
+		hdr := map[string]string{}
+		if tok != "" {
+			hdr["Authorization"] = "Bearer " + tok
+		}
+		if resp, _ := f.do(t, "GET", "/_neubird/status", hdr); resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("token %q: status %d", tok, resp.StatusCode)
+		}
+	}
+	if resp, _ := f.do(t, "POST", "/_neubird/status", map[string]string{"Authorization": "Bearer " + token}); resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST: status %d", resp.StatusCode)
+	}
+}
+
+// Without open mode there is nothing for NeuBird to ask about.
+func TestStatusWithoutDestinations(t *testing.T) {
+	f := newFixture(t, baseConfig, func(w http.ResponseWriter, r *http.Request) {})
+	if resp, _ := f.do(t, "GET", "/_neubird/status", map[string]string{"Authorization": "Bearer " + token}); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
+// A named connection keeps the customer's credential: a NeuBird one is never
+// forwarded (the header allowlist drops it).
+func TestNamedConnectionDropsNeuBirdCredential(t *testing.T) {
+	f := newFixture(t, destinationsConfig, func(w http.ResponseWriter, r *http.Request) {})
+	resp, _ := f.do(t, "GET", "/splunk/x", map[string]string{
+		"Authorization":                    "Bearer " + token,
+		"X-Neubird-Upstream-Authorization": "Bearer neubird",
+	})
+	up := f.lastReq()
+	if resp.StatusCode != 200 || up.Header.Get("Authorization") != "" || up.Header.Get("X-Neubird-Upstream-Authorization") != "" ||
+		up.Header.Get("Ocp-Apim-Subscription-Key") != "apim-key" {
+		t.Fatalf("status %d, upstream headers %v", resp.StatusCode, up.Header)
 	}
 }
 

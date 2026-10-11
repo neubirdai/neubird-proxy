@@ -179,56 +179,6 @@ func TestEnvTrailingNewlineTrimmed(t *testing.T) {
 	}
 }
 
-func TestCredentials(t *testing.T) {
-	base := func(conn string) string {
-		return "client_token_env: TOKEN\nupstream_defaults:\n  headers:\n    Ocp-Apim-Subscription-Key: ${APIM_KEY}\nconnections:\n  - name: jira\n    upstream: https://jira.example.com\n" + conn
-	}
-	e := env(map[string]string{"TOKEN": tok, "APIM_KEY": "k", "U": "u", "P": "p"})
-
-	c, err := Parse([]byte(base("")), e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Connections[0].Credentials != CredentialsCustomer || c.Connections[0].CredentialHeaderSet != nil {
-		t.Fatalf("default: %+v", c.Connections[0])
-	}
-
-	c, err = Parse([]byte(base("    credentials: neubird\n")), e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hs := c.Connections[0].CredentialHeaderSet; len(hs) != 1 || !hs["Authorization"] {
-		t.Fatalf("default credential headers: %v", hs)
-	}
-
-	c, err = Parse([]byte(base("    credentials: neubird\n    credential_headers: [authorization, dd-api-key]\n")), e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hs := c.Connections[0].CredentialHeaderSet; len(hs) != 2 || !hs["Authorization"] || !hs["Dd-Api-Key"] {
-		t.Fatalf("credential headers: %v", hs)
-	}
-
-	for name, tc := range map[string]struct{ conn, want string }{
-		"unknown mode":        {"    credentials: both\n", "credentials must be customer or neubird"},
-		"headers w/ customer": {"    credential_headers: [Authorization]\n", "only applies to credentials: neubird"},
-		"basic auth too":      {"    credentials: neubird\n    upstream_basic_auth: {username_env: U, password_env: P}\n", "both set the backend credential"},
-		"denied header":       {"    credentials: neubird\n    credential_headers: [Cookie]\n", "Cookie cannot be set by NeuBird"},
-		"apim trace":          {"    credentials: neubird\n    credential_headers: [Ocp-Apim-Trace]\n", "cannot be set by NeuBird"},
-		"forwarded":           {"    credentials: neubird\n    credential_headers: [X-Forwarded-Host]\n", "cannot be set by NeuBird"},
-		"own prefix":          {"    credentials: neubird\n    credential_headers: [X-Neubird-Upstream-Authorization]\n", "cannot be set by NeuBird"},
-		"bad name":            {"    credentials: neubird\n    credential_headers: [\"Bad Header\"]\n", "is not a header name"},
-		"proxy-set header":    {"    credentials: neubird\n    credential_headers: [Ocp-Apim-Subscription-Key]\n", "already set from the proxy's own config"},
-		"also forwarded":      {"    credentials: neubird\n    credential_headers: [X-Api-Key]\n    request_headers: [X-Api-Key]\n", "also in request_headers"},
-		"prefix forwarded":    {"    request_headers: [X-Neubird-Upstream-Authorization]\n", "is a credential header"},
-	} {
-		_, err := Parse([]byte(base(tc.conn)), e)
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: got %v, want %q", name, err, tc.want)
-		}
-	}
-}
-
 func TestNeubirdDestinations(t *testing.T) {
 	e := env(map[string]string{"TOKEN": tok, "APIM_KEY": "k"})
 	base := "client_token_env: TOKEN\nupstream_defaults:\n  headers:\n    Ocp-Apim-Subscription-Key: ${APIM_KEY}\n"
@@ -239,7 +189,7 @@ func TestNeubirdDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := c.NeubirdDestinations
-	if d.Conn.Credentials != CredentialsNeuBird || !d.Conn.CredentialHeaderSet["Authorization"] || !d.AnyHost() {
+	if !d.Conn.NeuBirdCredentials || !d.Conn.CredentialHeaderSet["Authorization"] || !d.AnyHost() {
 		t.Fatalf("template: %+v", d.Conn)
 	}
 	// upstream_defaults.headers (the APIM key) must never reach other hosts.

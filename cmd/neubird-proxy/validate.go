@@ -62,7 +62,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "VALID %s\n\n", cf.config)
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CONNECTION\tUPSTREAM\tAUTH\tMETHODS\tPATHS\tMCP TOOLS\tFIELDS\tCREDENTIALS\tMODE")
+	fmt.Fprintln(tw, "CONNECTION\tUPSTREAM\tAUTH\tMETHODS\tPATHS\tMCP TOOLS\tFIELDS\tMODE")
 	for _, c := range cfg.Connections {
 		methods := allowHeaderOf(c.MethodSet)
 		paths := "any"
@@ -80,15 +80,11 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		if c.Passthrough {
 			mode = "PASSTHROUGH"
 		}
-		creds := c.Credentials
-		if creds == config.CredentialsNeuBird {
-			creds = "NEUBIRD"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, c.Upstream, c.ClientAuth, methods, paths, tools, fields, creds, mode)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, c.Upstream, c.ClientAuth, methods, paths, tools, fields, mode)
 	}
 	if d := cfg.NeubirdDestinations; d != nil {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "(open mode)", strings.Join(d.Hosts, ","), d.Conn.ClientAuth,
-			allowHeaderOf(d.Conn.MethodSet), "any", "-", "all", "NEUBIRD", "redact")
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "(open mode)", strings.Join(d.Hosts, ","), d.Conn.ClientAuth,
+			allowHeaderOf(d.Conn.MethodSet), "any", "-", "all", "NeuBird credentials")
 	}
 	tw.Flush()
 	fmt.Fprintf(stdout, "\nredaction: mask=%s, rules: %s\n", cfg.Redaction.Mask, strings.Join(engine.RuleNames(), ", "))

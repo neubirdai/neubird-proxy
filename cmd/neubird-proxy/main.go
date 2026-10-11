@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,7 +107,6 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv.Version, srv.ConfigSHA256 = version, configHash(configPath)
 	applyMemoryLimit(srv, cfg.MaxBodyBytes, log)
 
 	var conns []string
@@ -116,9 +114,6 @@ func run(configPath string, check bool, log *slog.Logger) error {
 		mode := "redact"
 		if c.Passthrough {
 			mode = "passthrough"
-		}
-		if c.Credentials == config.CredentialsNeuBird {
-			mode += ",neubird-credentials"
 		}
 		conns = append(conns, c.Name+"("+mode+")")
 	}
@@ -274,14 +269,6 @@ func warnings(cfg *config.Config) []string {
 	for _, c := range cfg.Connections {
 		if c.Passthrough {
 			out = append(out, fmt.Sprintf("connection %s: passthrough, responses are NOT redacted", c.Name))
-		}
-		if c.Credentials == config.CredentialsNeuBird {
-			hs := make([]string, 0, len(c.CredentialHeaderSet))
-			for h := range c.CredentialHeaderSet {
-				hs = append(hs, h)
-			}
-			sort.Strings(hs)
-			out = append(out, fmt.Sprintf("connection %s: credentials: neubird, NeuBird holds the backend credential and sets %s", c.Name, strings.Join(hs, ", ")))
 		}
 		if len(c.PathRes) == 0 {
 			out = append(out, fmt.Sprintf("connection %s: no paths allowlist, every upstream path is reachable", c.Name))

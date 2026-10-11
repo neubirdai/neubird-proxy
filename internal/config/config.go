@@ -51,22 +51,13 @@ const (
 	AuthHeader = "header" // <client_auth_header>: <token>
 )
 
-// Credential sources: who supplies the credential the backend sees.
-const (
-	// CredentialsCustomer: the proxy injects it from its own Secret
-	// (headers, upstream_basic_auth); anything NeuBird sends is refused.
-	CredentialsCustomer = "customer"
-	// CredentialsNeuBird: NeuBird holds it, as for a direct connection, and
-	// sends it in X-Neubird-Upstream-<Header>; the proxy moves it to <Header>.
-	CredentialsNeuBird = "neubird"
-)
-
 // UpstreamCredentialPrefix marks a request header carrying a NeuBird-held
-// backend credential: X-Neubird-Upstream-Authorization becomes Authorization.
+// backend credential in open mode: X-Neubird-Upstream-Authorization becomes
+// Authorization.
 const UpstreamCredentialPrefix = "X-Neubird-Upstream-"
 
-// DefaultCredentialHeaders is what credentials: neubird may set when the
-// connection lists no credential_headers.
+// DefaultCredentialHeaders is what NeuBird may set in open mode when
+// neubird_destinations lists no credential_headers.
 var DefaultCredentialHeaders = []string{"Authorization"}
 
 // credentialHeaderDenied are headers NeuBird may never set, whatever
@@ -102,9 +93,6 @@ type Config struct {
 	UpstreamDefaults       Upstream     `yaml:"upstream_defaults"`
 	Connections            []Connection `yaml:"connections"`
 	Redaction              Redaction    `yaml:"redaction"`
-	// DisableStatusAPI turns off GET /_neubird/status, which tells a token
-	// holder the names and settings of the connections that token opens.
-	DisableStatusAPI bool `yaml:"disable_status_api"`
 	// NeubirdDestinations ("open mode"), when set, lets NeuBird name the
 	// destination host of a request instead of a configured connection, within
 	// the host patterns listed here. No per-backend entries; credentials are
@@ -195,11 +183,12 @@ type Connection struct {
 	ResponseFields []string `yaml:"response_fields"`
 	// MCPTools allowlists the tools a tools/call request may name.
 	MCPTools []string `yaml:"mcp_tools"`
-	// Credentials is customer (default) or neubird; see CredentialsCustomer.
-	Credentials string `yaml:"credentials"`
-	// CredentialHeaders are the upstream headers NeuBird may set with
-	// credentials: neubird. Default: Authorization.
-	CredentialHeaders []string `yaml:"credential_headers"`
+	// NeuBirdCredentials is set on open mode's shared policy only: NeuBird
+	// sends the backend credential (X-Neubird-Upstream-<Header>) and the
+	// proxy forwards it as <Header>, for the headers in CredentialHeaders.
+	// Named connections always use the customer's credentials.
+	NeuBirdCredentials bool     `yaml:"-"`
+	CredentialHeaders  []string `yaml:"-"`
 
 	UpstreamURL *url.URL `yaml:"-"`
 	// ClientTokens are the accepted tokens: this connection's own, or the
@@ -216,7 +205,7 @@ type Connection struct {
 	// connection's headers, with ${VAR} references expanded.
 	ResolvedHeaders map[string]string `yaml:"-"`
 	// CredentialHeaderSet holds the canonical upstream header names NeuBird
-	// may set (credentials: neubird only).
+	// may set (open mode only).
 	CredentialHeaderSet map[string]bool `yaml:"-"`
 }
 
@@ -534,7 +523,7 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			RequestDenyPatterns: d.RequestDenyPatterns,
 			RateLimit:           d.RateLimit,
 			ResponseFields:      d.ResponseFields,
-			Credentials:         CredentialsNeuBird,
+			NeuBirdCredentials:  true,
 			CredentialHeaders:   d.CredentialHeaders,
 		}
 		targets = append(targets, target{d.Conn, "neubird_destinations", true})
@@ -665,23 +654,12 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 				fail("%s: request_headers: %s cannot be forwarded", where, ch)
 			}
 			if strings.HasPrefix(ch, UpstreamCredentialPrefix) {
-				fail("%s: request_headers: %s is a credential header; use credentials: neubird", where, ch)
+				fail("%s: request_headers: %s is a credential header", where, ch)
 			}
 			conn.HeaderSet[ch] = true
 		}
 
-		if conn.Credentials == "" {
-			conn.Credentials = CredentialsCustomer
-		}
-		switch conn.Credentials {
-		case CredentialsCustomer:
-			if len(conn.CredentialHeaders) > 0 {
-				fail("%s: credential_headers only applies to credentials: neubird", where)
-			}
-		case CredentialsNeuBird:
-			if conn.BasicAuth != nil {
-				fail("%s: credentials: neubird and upstream_basic_auth both set the backend credential", where)
-			}
+		if conn.NeuBirdCredentials {
 			hs := conn.CredentialHeaders
 			if len(hs) == 0 {
 				hs = DefaultCredentialHeaders
@@ -697,15 +675,8 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 				case conn.HeaderSet[ch]:
 					fail("%s: credential_headers: %s is also in request_headers", where, ch)
 				}
-				for k := range conn.ResolvedHeaders {
-					if http.CanonicalHeaderKey(k) == ch {
-						fail("%s: credential_headers: %s is already set from the proxy's own config", where, ch)
-					}
-				}
 				conn.CredentialHeaderSet[ch] = true
 			}
-		default:
-			fail("%s: credentials must be customer or neubird", where)
 		}
 		for j, p := range conn.ResponseFields {
 			for _, seg := range strings.Split(p, ".") {

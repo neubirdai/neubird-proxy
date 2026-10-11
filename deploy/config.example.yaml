@@ -23,9 +23,6 @@ admin_listen: ":9090"    # /healthz, /readyz, /metrics (cluster-internal only)
 #   hosts: ["*.corp.example.com"]   # "*" allows any host name
 #   methods: [GET, HEAD]
 
-# GET /_neubird/status lists the connections a token opens, for NeuBird's UI.
-# disable_status_api: true
-
 # Default token for connections that do not set their own (32+ characters).
 client_token_env: NEUBIRD_PROXY_TOKEN
 # During a rotation, the outgoing token is accepted too. Remove afterwards.
@@ -94,10 +91,6 @@ connections:
     # tools/call is refused for any tool not listed. Placeholder names.
     mcp_tools: [get_job_status, list_failed_jobs, get_job_log]
     rate_limit: {requests_per_second: 10, burst: 30}
-  # Backend credential held by NeuBird instead of this Secret (README:
-  # Backend credentials). People then manage it in NeuBird, OAuth included.
-  #   credentials: neubird
-  #   credential_headers: [Authorization]   # the default
   # Fallback for a connector that cannot take a base URL with a path:
   #   host: maestro.proxy.metlife.com
   # Backend not fronted by APIM: inject its credential from the Secret.
