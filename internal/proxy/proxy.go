@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
@@ -41,10 +42,15 @@ import (
 )
 
 type Server struct {
-	cfg      *config.Config
-	engine   *redact.Engine
-	log      *slog.Logger
-	rp       *httputil.ReverseProxy
+	cfg    *config.Config
+	engine *redact.Engine
+	log    *slog.Logger
+	rp     *httputil.ReverseProxy
+	// rpDest serves open mode (neubird_destinations): same hooks, but a
+	// transport that won't dial loopback, link-local or unspecified
+	// addresses, since the host comes from the request.
+	rpDest   *httputil.ReverseProxy
+	dest     *config.NeubirdDestinations
 	byName   map[string]*config.Connection
 	byHost   map[string]*config.Connection
 	tokens   map[string][][32]byte // connection name -> accepted token hashes
@@ -86,12 +92,16 @@ func newMetrics() *Metrics {
 // New builds a Server. The transport is exposed for tests that need to
 // point at an httptest TLS server; nil means the configured default.
 func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport http.RoundTripper) (*Server, error) {
+	destTransport := transport
 	if transport == nil {
 		t, err := newTransport(cfg)
 		if err != nil {
 			return nil, err
 		}
 		transport = t
+		dt := t.Clone()
+		dt.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: destDialControl}).DialContext
+		destTransport = dt
 	}
 	s := &Server{
 		cfg:      cfg,
@@ -108,12 +118,21 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		Metrics:  newMetrics(),
 	}
 	s.maxBuffered = cfg.MaxBodyBytes
+	conns := make([]*config.Connection, 0, len(cfg.Connections)+1)
 	for i := range cfg.Connections {
 		c := &cfg.Connections[i]
 		s.byName[c.Name] = c
 		if c.Host != "" {
 			s.byHost[c.Host] = c
 		}
+		conns = append(conns, c)
+	}
+	if d := cfg.NeubirdDestinations; d != nil {
+		// Registered for tokens, limits and fields, never routable by name.
+		s.dest = d
+		conns = append(conns, d.Conn)
+	}
+	for _, c := range conns {
 		for _, t := range c.ClientTokens {
 			s.tokens[c.Name] = append(s.tokens[c.Name], sha256.Sum256([]byte(t)))
 		}
@@ -141,7 +160,34 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		Transport:      transport,
 		ErrorLog:       slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
+	if s.dest != nil {
+		rp := *s.rp
+		rp.Transport = destTransport
+		s.rpDest = &rp
+	}
 	return s, nil
+}
+
+// destDialControl guards open mode's dials; tests swap it to reach a fake
+// upstream on loopback.
+var destDialControl = refuseInternalAddresses
+
+// refuseInternalAddresses stops open mode from reaching the pod itself, the
+// node's or cloud's metadata service (169.254.169.254) and other link-local
+// or unspecified addresses, whatever the destination host resolved to. It
+// sees the address actually dialed, so a name that resolves there is caught
+// too. (Behind HTTPS_PROXY, that is the outbound proxy's address.)
+func refuseInternalAddresses(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return fmt.Errorf("destination address %s is not allowed", host)
+	}
+	return nil
 }
 
 func newTransport(cfg *config.Config) (*http.Transport, error) {
@@ -176,6 +222,10 @@ type reqState struct {
 	restRaw string // same, escaped as received
 	stats   redact.Stats
 	blocked string
+	// dest is the open-mode destination (scheme://host:port), and destErr
+	// why it can't be used; set only for /_neubird/dest requests.
+	dest    string
+	destErr string
 	// credentials is "neubird" when the request carried a NeuBird-held
 	// backend credential that was forwarded.
 	credentials string
@@ -215,7 +265,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, ok := s.route(r)
+	st, ok := s.routeDest(r)
+	if !ok {
+		st, ok = s.route(r)
+	}
 	if !ok {
 		writeError(rec, http.StatusNotFound, "unknown_connection", "no connection matches this host or path")
 		s.Metrics.Requests.Inc("_unknown", "404")
@@ -262,6 +315,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rec.Header().Set("WWW-Authenticate", `Basic realm="neubird-proxy"`)
 		}
 		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
+		return
+	}
+	if st.destErr != "" {
+		// Checked after the token, so a caller without one learns nothing
+		// about which hosts are allowed.
+		st.blocked = "destination_not_allowed"
+		s.Metrics.Blocked.Inc(name, st.blocked)
+		writeError(rec, http.StatusForbidden, "destination_not_allowed", st.destErr)
 		return
 	}
 	if st.conn.Credentials != config.CredentialsNeuBird && hasCredentialHeader(r.Header) {
@@ -322,7 +383,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.rp.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), stateKey{}, st)))
+	rp := s.rp
+	if st.dest != "" {
+		rp = s.rpDest
+	}
+	rp.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), stateKey{}, st)))
 }
 
 // hasDotSegment reports whether the decoded path, or the path decoded once
@@ -380,6 +445,69 @@ func hasCredentialHeader(h http.Header) bool {
 		}
 	}
 	return false
+}
+
+// DestPathPrefix is where open-mode requests arrive:
+// /_neubird/dest/<path>, with the destination in DestinationHeader.
+const (
+	DestPathPrefix    = "/_neubird/dest"
+	DestinationHeader = "X-Neubird-Destination"
+)
+
+// routeDest handles an open-mode request (neubird_destinations): the
+// destination comes from DestinationHeader and must match the configured
+// host patterns. The returned state carries a per-request copy of the shared
+// policy with that upstream; a destination that can't be used is recorded in
+// destErr and refused once the token has been checked.
+func (s *Server) routeDest(r *http.Request) (*reqState, bool) {
+	if s.dest == nil {
+		return nil, false
+	}
+	p := r.URL.Path
+	if p != DestPathPrefix && !strings.HasPrefix(p, DestPathPrefix+"/") {
+		return nil, false
+	}
+	conn := *s.dest.Conn
+	st := &reqState{conn: &conn, prefix: DestPathPrefix, rest: strings.TrimPrefix(p, DestPathPrefix), stats: redact.Stats{}}
+	if raw := r.URL.EscapedPath(); strings.HasPrefix(raw, DestPathPrefix+"/") || raw == DestPathPrefix {
+		st.restRaw = strings.TrimPrefix(raw, DestPathPrefix)
+	}
+	u, reason := s.parseDestination(r.Header.Get(DestinationHeader))
+	if reason != "" {
+		st.destErr = reason
+		return st, true
+	}
+	conn.UpstreamURL = u
+	st.dest = u.Scheme + "://" + u.Host
+	return st, true
+}
+
+// parseDestination turns DestinationHeader into the upstream base URL, or
+// says why it can't be used.
+func (s *Server) parseDestination(v string) (*url.URL, string) {
+	if v == "" {
+		return nil, DestinationHeader + " is required"
+	}
+	u, err := url.Parse(strings.TrimSpace(v))
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return nil, "destination must be scheme://host[:port]"
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return nil, "destination must be scheme://host[:port], nothing more"
+	}
+	if u.Scheme == "http" && !s.cfg.AllowHTTPUpstreams {
+		return nil, "plain http destinations need allow_http_upstreams"
+	}
+	host, port := u.Hostname(), u.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[u.Scheme]
+	}
+	if !s.dest.MatchDestination(host, port) {
+		return nil, "destination host is not in neubird_destinations.hosts"
+	}
+	// The port was only filled in for matching; the upstream Host header
+	// keeps the destination as given.
+	return &url.URL{Scheme: u.Scheme, Host: strings.ToLower(u.Host)}, ""
 }
 
 func allowHeader(c *config.Connection) string {
@@ -890,6 +1018,9 @@ func (s *Server) audit(r *http.Request, st *reqState, status, nbytes int, d time
 	}
 	if st.credentials != "" {
 		attrs = append(attrs, "credentials", st.credentials)
+	}
+	if st.dest != "" {
+		attrs = append(attrs, "destination", st.dest)
 	}
 	s.log.Info("request", attrs...)
 }

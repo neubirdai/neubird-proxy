@@ -227,12 +227,52 @@ An OAuth token endpoint inside your network is a connection like any other:
 give it `methods: [POST]`, the token path in `paths`, and
 `credentials: neubird`, since the client secret travels in the body.
 
+## Open mode (`neubird_destinations`)
+
+Optional, and off unless configured: NeuBird names the destination host of
+a request instead of a configured connection, within host patterns you set
+once. No per-backend `connections` entries are needed, and people manage
+everything in NeuBird. Credentials are always NeuBird's.
+
+```yaml
+neubird_destinations:
+  hosts: ["*.acme.internal", "splunk.acme.com:8089"]   # or "*" for any host name
+  methods: [GET, HEAD, POST]       # ceiling for every destination (default GET, HEAD)
+  request_deny_patterns: [...]     # optional, as on a connection
+  rate_limit: {requests_per_second: 10, burst: 30}   # optional, shared
+```
+
+A request to `/_neubird/dest/<path>` carries `X-Neubird-Destination:
+https://host[:port]`. It goes there only if the host matches a pattern:
+
+- `*` matches any host **name**; `*.example.com` any name under that domain
+  (needs two or more labels); `host` exactly; any of them may end in
+  `:port`. An IP address is reached only when listed exactly: wildcards never
+  match IP literals.
+- Dials to loopback, link-local (including `169.254.169.254`) and unspecified
+  addresses are refused, whatever the name resolved to.
+- `upstream_defaults.headers` (an APIM key) are never sent to these hosts.
+- The destination must be `scheme://host[:port]` only; a disallowed one gets
+  `403 destination_not_allowed`, but only after the token check.
+- Everything else applies as for a connection: the token, method ceiling,
+  deny patterns, rate limit, redaction, and the audit line (with
+  `destination`).
+
+This relaxes "the destination never comes from the request" to "it must
+match your host patterns", and per-backend `paths`, `mcp_tools` and
+customer-held credentials aren't available for these hosts (use a named
+connection for those; both can be configured together). Every pod start
+warns that open mode is on, and loudly when `*` is listed. Restrict egress at
+the network to what the patterns are meant to cover: `netpol` can't turn
+wildcards into hostname rules.
+
 ## Status API
 
 `GET /_neubird/status` with `Authorization: Bearer <proxy token>` lists the
 connections that token opens: name, how the token is sent (`client_auth`),
 `credentials` and `credential_headers`, methods, MCP tools, and whether
-`paths` and `response_fields` are set. Not the upstreams, the patterns or
+`paths` and `response_fields` are set. With open mode, it also reports
+`destinations`: the host patterns, methods and how to send the token. Not the upstreams, the patterns or
 any secret. NeuBird reads it through the tunnel to offer your connections
 in its UI and to send requests your proxy will accept. A token that opens
 no connection gets a 401. `disable_status_api: true` turns it off.

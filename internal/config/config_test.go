@@ -228,3 +228,73 @@ func TestCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestNeubirdDestinations(t *testing.T) {
+	e := env(map[string]string{"TOKEN": tok, "APIM_KEY": "k"})
+	base := "client_token_env: TOKEN\nupstream_defaults:\n  headers:\n    Ocp-Apim-Subscription-Key: ${APIM_KEY}\n"
+
+	// Open mode alone is a complete config; connections are optional.
+	c, err := Parse([]byte(base+"neubird_destinations:\n  hosts: ['*', '*.acme.internal', 'splunk.acme.com:8089', '10.1.2.3']\n  methods: [GET, POST]\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := c.NeubirdDestinations
+	if d.Conn.Credentials != CredentialsNeuBird || !d.Conn.CredentialHeaderSet["Authorization"] || !d.AnyHost() {
+		t.Fatalf("template: %+v", d.Conn)
+	}
+	// upstream_defaults.headers (the APIM key) must never reach other hosts.
+	if len(d.Conn.ResolvedHeaders) != 0 {
+		t.Fatalf("open mode got upstream_defaults headers: %v", d.Conn.ResolvedHeaders)
+	}
+	for _, tc := range []struct {
+		host, port string
+		want       bool
+	}{
+		{"anything.example.org", "443", true}, // "*"
+		{"jira.acme.internal", "443", true},   // *.acme.internal
+		{"acme.internal", "443", true},        // still "*"
+		{"splunk.acme.com", "8089", true},     // exact host:port
+		{"10.1.2.3", "443", true},             // listed IP
+		{"10.9.9.9", "443", false},            // "*" never covers IPs
+		{"169.254.169.254", "80", false},      // nor metadata
+	} {
+		if got := d.MatchDestination(tc.host, tc.port); got != tc.want {
+			t.Errorf("%s:%s = %v, want %v", tc.host, tc.port, got, tc.want)
+		}
+	}
+
+	c, err = Parse([]byte(base+"neubird_destinations:\n  hosts: ['*.acme.internal', 'splunk.acme.com:8089']\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = c.NeubirdDestinations
+	for _, tc := range []struct {
+		host, port string
+		want       bool
+	}{
+		{"jira.acme.internal", "443", true},
+		{"acme.internal", "443", false}, // the wildcard needs a label
+		{"jira.acme.internal.evil.com", "443", false},
+		{"evilacme.internal", "443", false},
+		{"splunk.acme.com", "443", false}, // wrong port
+		{"10.1.2.3", "443", false},
+	} {
+		if got := d.MatchDestination(tc.host, tc.port); got != tc.want {
+			t.Errorf("%s:%s = %v, want %v", tc.host, tc.port, got, tc.want)
+		}
+	}
+
+	for name, tc := range map[string]struct{ cfg, want string }{
+		"no hosts":        {"neubird_destinations:\n  hosts: []\n", "at least one host pattern"},
+		"tld wildcard":    {"neubird_destinations:\n  hosts: ['*.internal']\n", "two or more labels"},
+		"bad pattern":     {"neubird_destinations:\n  hosts: ['ac me']\n", "not \"*\""},
+		"bad port":        {"neubird_destinations:\n  hosts: ['x.y:99999']\n", "bad port"},
+		"nothing at all":  {"", "at least one connection (or neubird_destinations)"},
+		"customer header": {"neubird_destinations:\n  hosts: ['*']\n  credential_headers: [Cookie]\n", "cannot be set by NeuBird"},
+	} {
+		_, err := Parse([]byte(base+tc.cfg), e)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want %q", name, err, tc.want)
+		}
+	}
+}

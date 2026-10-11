@@ -17,6 +17,12 @@ admin_listen: ":9090"    # /healthz, /readyz, /metrics (cluster-internal only)
 # Optional: extra CA bundle for APIM's internal certificate.
 # upstream_ca_file: /etc/neubird-proxy/ca/ca.crt
 
+# Open mode: NeuBird names the destination host within these patterns, with
+# NeuBird-held credentials and no per-backend entries (README: Open mode).
+# neubird_destinations:
+#   hosts: ["*.corp.example.com"]   # "*" allows any host name
+#   methods: [GET, HEAD]
+
 # GET /_neubird/status lists the connections a token opens, for NeuBird's UI.
 # disable_status_api: true
 

@@ -24,6 +24,20 @@ type Status struct {
 	Version      string             `json:"version,omitempty"`
 	ConfigSHA256 string             `json:"config_sha256,omitempty"`
 	Connections  []ConnectionStatus `json:"connections"`
+	// Destinations is open mode (neubird_destinations), when the token opens
+	// it: NeuBird may name any destination matching Hosts.
+	Destinations *DestinationsStatus `json:"destinations,omitempty"`
+}
+
+// DestinationsStatus describes open mode. The host patterns are the
+// customer's envelope for NeuBird, not a secret; upstream credentials and
+// patterns of the named connections are still never reported.
+type DestinationsStatus struct {
+	Hosts             []string `json:"hosts"`
+	ClientAuth        string   `json:"client_auth"`
+	ClientAuthHeader  string   `json:"client_auth_header,omitempty"`
+	CredentialHeaders []string `json:"credential_headers"`
+	Methods           []string `json:"methods"`
 }
 
 type ConnectionStatus struct {
@@ -78,7 +92,23 @@ func (s *Server) serveStatus(w *recorder, r *http.Request) {
 			st.Connections = append(st.Connections, connectionStatus(c))
 		}
 	}
-	if len(st.Connections) == 0 {
+	if d := s.dest; d != nil {
+		match := 0
+		for _, t := range s.tokens[d.Conn.Name] {
+			match |= subtle.ConstantTimeCompare(sum[:], t[:])
+		}
+		if match == 1 {
+			cs := connectionStatus(d.Conn)
+			st.Destinations = &DestinationsStatus{
+				Hosts:             append([]string(nil), d.Hosts...),
+				ClientAuth:        cs.ClientAuth,
+				ClientAuthHeader:  cs.ClientAuthHeader,
+				CredentialHeaders: cs.CredentialHeaders,
+				Methods:           cs.Methods,
+			}
+		}
+	}
+	if len(st.Connections) == 0 && st.Destinations == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
 		return
 	}
