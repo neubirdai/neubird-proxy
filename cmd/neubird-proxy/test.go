@@ -240,7 +240,7 @@ func (t *tester) send(step string, req *http.Request) *httptest.ResponseRecorder
 	}
 	switch {
 	case rec.Code == 401 || rec.Code == 403:
-		t.line("FAIL", step, "%s; the upstream rejected the credentials the proxy sent (check headers / upstream_basic_auth and their secrets)", summary)
+		t.line("FAIL", step, "%s; the upstream rejected the credentials the proxy sent (check headers / upstream_basic_auth / upstream_oauth2 scopes and their secrets)", summary)
 	case rec.Code == 404:
 		t.line("warn", step, "%s; reached the backend, but it has nothing at this path", summary)
 	case rec.Code >= 500:
@@ -412,6 +412,8 @@ func proxyHint(kind, reason string) string {
 		return "; the probe path isn't in this connection's paths: pass -path"
 	case "method_not_allowed":
 		return "; pass -method with an allowed method"
+	case "upstream_auth_failed":
+		return "; the proxy could not get an access token from upstream_oauth2.token_url: check client_id_env, client_secret_env, scopes and params, and that the pod can reach the token endpoint"
 	case "upstream_unavailable":
 		return "; the proxy could not complete the request to the upstream"
 	case "redaction_blocked":

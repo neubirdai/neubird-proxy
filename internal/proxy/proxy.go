@@ -131,6 +131,9 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 			}
 		}
 	}
+	if sources := oauthSources(cfg, transport); len(sources) > 0 {
+		transport = &oauthTransport{base: transport, sources: sources}
+	}
 	s.rp = &httputil.ReverseProxy{
 		Rewrite:        s.rewrite,
 		ModifyResponse: s.modifyResponse,
@@ -139,6 +142,19 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		ErrorLog:       slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 	return s, nil
+}
+
+// oauthSources builds a token source for each upstream_oauth2 connection.
+// Token requests use the same transport as the upstream, so they trust the
+// same CAs (upstream_ca_file).
+func oauthSources(cfg *config.Config, transport http.RoundTripper) map[string]*tokenSource {
+	out := map[string]*tokenSource{}
+	for i := range cfg.Connections {
+		if o := cfg.Connections[i].OAuth2; o != nil {
+			out[cfg.Connections[i].Name] = newTokenSource(o, transport)
+		}
+	}
+	return out
 }
 
 func newTransport(cfg *config.Config) (*http.Transport, error) {
@@ -176,6 +192,10 @@ type reqState struct {
 	// stream is the redacting reader for a streamed body (SSE or
 	// multi-document JSON); its error explains a cut stream.
 	stream interface{ Err() error }
+	// replayBody reopens the buffered request body, for an upstream_oauth2
+	// retry after a 401. ReverseProxy hides the request's own GetBody from
+	// the transport, so it travels here instead. Nil for a bodyless request.
+	replayBody func() (io.ReadCloser, error)
 }
 
 type stateKey struct{}
@@ -283,8 +303,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(rec, r.Body, s.cfg.MaxBodyBytes)
 	}
-	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil {
+	// upstream_oauth2 connections buffer the body too, so a retry with a new
+	// token can resend it.
+	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil || st.conn.OAuth2 != nil {
 		reason, err := s.checkRequest(st.conn, r)
+		st.replayBody = r.GetBody
 		var mbe *http.MaxBytesError
 		switch {
 		case errors.As(err, &mbe):
@@ -391,6 +414,7 @@ func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, er
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
+		r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	}
 	if tools := s.tools[c.Name]; tools != nil && r.Method == http.MethodPost {
 		if reason := checkMCPTools(body, tools); reason != "" {
@@ -793,6 +817,12 @@ func (s *Server) errorHandler(w http.ResponseWriter, r *http.Request, err error)
 		st.blocked = be.reason
 		s.Metrics.Blocked.Inc(st.conn.Name, be.reason)
 		writeError(w, http.StatusBadGateway, "redaction_blocked", be.reason)
+		return
+	}
+	var oe *oauthError
+	if errors.As(err, &oe) {
+		s.log.Warn("upstream token request failed", "connection", st.conn.Name, "reason", oe.reason)
+		writeError(w, http.StatusBadGateway, "upstream_auth_failed", oe.reason)
 		return
 	}
 	var mbe *http.MaxBytesError

@@ -61,6 +61,8 @@ func newFixture(t *testing.T, yamlTmpl string, handler http.HandlerFunc) *fixtur
 			"REDACTION_HMAC_KEY":    "hmac-key",
 			"SCOPED_TOKEN":          scopedToken,
 			"OLD_TOKEN":             oldToken,
+			"OAUTH_ID":              "client id/1",
+			"OAUTH_SECRET":          "s3cret&key",
 		}[k]
 		return v, ok
 	})

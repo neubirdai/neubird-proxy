@@ -207,7 +207,7 @@ func redactSample(cfg *config.Config, engine *redact.Engine, conn *config.Connec
 		c.UpstreamURL = u
 		c.MethodSet = map[string]bool{http.MethodGet: true}
 		c.PathRes, c.RequestDenyRes, c.MCPTools, c.RateLimit = nil, nil, nil, nil
-		c.Headers, c.ResolvedHeaders, c.BasicAuth = nil, nil, nil
+		c.Headers, c.ResolvedHeaders, c.BasicAuth, c.OAuth2 = nil, nil, nil, nil
 		target = c
 	}
 	p, err := newInProcess(&local, engine)
