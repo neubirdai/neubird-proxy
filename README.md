@@ -50,7 +50,9 @@ In order; the first check that fails ends the request.
    drops the NeuBird token, cookies, `Ocp-Apim-Trace`, a client-supplied
    subscription key, and `Accept-Encoding`/`Range` (bodies must arrive whole
    and uncompressed). The proxy adds the APIM subscription key and an
-   `X-Request-Id`.
+   `X-Request-Id`. A connection with `credentials: neubird` also takes the
+   backend credential NeuBird sends (see Backend credentials); any other
+   connection refuses a request that carries one.
 10. **Response.**
     - Stripped: `Set-Cookie`, all `Ocp-Apim-*` headers, and trailers.
     - Dropped: 1xx informational responses such as 103 Early Hints, whose
@@ -177,6 +179,63 @@ configs should list `paths` from an inventory of what each connector calls
 methods and tools are allowed. Which hosts the pod can reach at all should
 also be enforced below it, so a fault in one layer is still contained by
 the other. See Kubernetes hardening.
+
+## Backend credentials
+
+Each connection says who holds the credential the backend sees, with
+`credentials`:
+
+- **`customer`** (the default): the proxy injects it from its own Secret,
+  through `headers` (an APIM subscription key, an API key) or
+  `upstream_basic_auth`. It never leaves your network, and NeuBird never sees
+  it. A request that carries a NeuBird credential anyway is refused
+  (`400 credentials_not_accepted`), so a misconfigured connection fails
+  instead of quietly using yours.
+- **`neubird`**: NeuBird holds it, as it does for a connection without the
+  proxy: an API key, a password, or an OAuth token that NeuBird refreshes.
+  NeuBird sends it as `X-Neubird-Upstream-<Header>`, and the proxy moves it
+  to `<Header>` upstream. Only the headers in `credential_headers` (default
+  `Authorization`) can be set; anything else in that form is dropped.
+  Everything else still applies: the token check, allowlists, redaction.
+
+```yaml
+  - name: jira
+    upstream: https://jira.corp.example.com
+    credentials: neubird          # NeuBird holds the Jira OAuth token
+  - name: datadog
+    upstream: https://api.datadoghq.com
+    credentials: neubird
+    credential_headers: [DD-API-KEY, DD-APPLICATION-KEY]
+```
+
+With `neubird`, people set up and change the connection's credentials in
+NeuBird, the same way as without the proxy, and only adding a new backend
+needs a config change here. Every pod start logs a warning for each
+`neubird` connection, as for `passthrough`, and `validate` lists them. The
+audit line records `credentials: neubird` for a request that carried one,
+never the value. Headers NeuBird can never set, whatever
+`credential_headers` says: `Host`, `Cookie`, `Proxy-Authorization`,
+`X-Forwarded-*`, APIM's trace and debug headers, the transfer headers, and
+any header the proxy sets itself from `headers`.
+
+NeuBird keeps the backend's real URL as the connection's endpoint and sends
+`/<name>` plus that URL's path, so `upstream` plus the endpoint's path must
+be the backend's path. The simplest setup is an `upstream` with no path
+(`https://jira.corp.example.com`) and the full URL in NeuBird.
+
+An OAuth token endpoint inside your network is a connection like any other:
+give it `methods: [POST]`, the token path in `paths`, and
+`credentials: neubird`, since the client secret travels in the body.
+
+## Status API
+
+`GET /_neubird/status` with `Authorization: Bearer <proxy token>` lists the
+connections that token opens: name, how the token is sent (`client_auth`),
+`credentials` and `credential_headers`, methods, MCP tools, and whether
+`paths` and `response_fields` are set. Not the upstreams, the patterns or
+any secret. NeuBird reads it through the tunnel to offer your connections
+in its UI and to send requests your proxy will accept. A token that opens
+no connection gets a 401. `disable_status_api: true` turns it off.
 
 ## Redaction
 

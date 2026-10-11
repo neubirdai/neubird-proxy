@@ -129,6 +129,11 @@ func (t *tester) connection(c *config.Connection, probe probeSpec) bool {
 	if c.Passthrough {
 		mode = " (passthrough: responses are NOT redacted)"
 	}
+	if c.Credentials == config.CredentialsNeuBird {
+		// NeuBird holds the credential, so the test request has none; a
+		// 401 or 403 from the backend still proves the path works.
+		mode += " (credentials: neubird: sent without a backend credential, expect 401/403 from the backend)"
+	}
 	fmt.Fprintf(t.out, "%s -> %s%s\n", c.Name, c.Upstream, mode)
 	if !t.network(c) {
 		return false

@@ -50,6 +50,34 @@ const (
 	AuthHeader = "header" // <client_auth_header>: <token>
 )
 
+// Credential sources: who supplies the credential the backend sees.
+const (
+	// CredentialsCustomer: the proxy injects it from its own Secret
+	// (headers, upstream_basic_auth); anything NeuBird sends is refused.
+	CredentialsCustomer = "customer"
+	// CredentialsNeuBird: NeuBird holds it, as for a direct connection, and
+	// sends it in X-Neubird-Upstream-<Header>; the proxy moves it to <Header>.
+	CredentialsNeuBird = "neubird"
+)
+
+// UpstreamCredentialPrefix marks a request header carrying a NeuBird-held
+// backend credential: X-Neubird-Upstream-Authorization becomes Authorization.
+const UpstreamCredentialPrefix = "X-Neubird-Upstream-"
+
+// DefaultCredentialHeaders is what credentials: neubird may set when the
+// connection lists no credential_headers.
+var DefaultCredentialHeaders = []string{"Authorization"}
+
+// credentialHeaderDenied are headers NeuBird may never set, whatever
+// credential_headers says: they steer the transport, APIM or the audit trail.
+var credentialHeaderDenied = map[string]bool{
+	"Host": true, "Cookie": true, "Proxy-Authorization": true,
+	"Content-Length": true, "Transfer-Encoding": true, "Connection": true,
+	"Upgrade": true, "Te": true, "Trailer": true, "X-Request-Id": true,
+	"Ocp-Apim-Trace": true, "Apim-Debug-Authorization": true,
+	"Accept-Encoding": true, "Range": true, "If-Range": true,
+}
+
 const (
 	MaskLabel = "label"
 	MaskHMAC  = "hmac"
@@ -73,6 +101,9 @@ type Config struct {
 	UpstreamDefaults       Upstream     `yaml:"upstream_defaults"`
 	Connections            []Connection `yaml:"connections"`
 	Redaction              Redaction    `yaml:"redaction"`
+	// DisableStatusAPI turns off GET /_neubird/status, which tells a token
+	// holder the names and settings of the connections that token opens.
+	DisableStatusAPI bool `yaml:"disable_status_api"`
 	// Tunnel, when set, makes the proxy also (or, with listen: "off",
 	// only) serve NeuBird through outbound connections to a NeuBird relay.
 	// See docs/tunnel-protocol.md.
@@ -158,6 +189,11 @@ type Connection struct {
 	ResponseFields []string `yaml:"response_fields"`
 	// MCPTools allowlists the tools a tools/call request may name.
 	MCPTools []string `yaml:"mcp_tools"`
+	// Credentials is customer (default) or neubird; see CredentialsCustomer.
+	Credentials string `yaml:"credentials"`
+	// CredentialHeaders are the upstream headers NeuBird may set with
+	// credentials: neubird. Default: Authorization.
+	CredentialHeaders []string `yaml:"credential_headers"`
 
 	UpstreamURL *url.URL `yaml:"-"`
 	// ClientTokens are the accepted tokens: this connection's own, or the
@@ -173,6 +209,9 @@ type Connection struct {
 	// ResolvedHeaders is upstream_defaults.headers overlaid with this
 	// connection's headers, with ${VAR} references expanded.
 	ResolvedHeaders map[string]string `yaml:"-"`
+	// CredentialHeaderSet holds the canonical upstream header names NeuBird
+	// may set (credentials: neubird only).
+	CredentialHeaderSet map[string]bool `yaml:"-"`
 }
 
 // RateLimit is a token bucket per connection and per pod, so the
@@ -210,8 +249,9 @@ type CustomRule struct {
 }
 
 var (
-	connNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-	envRefRe   = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	connNameRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	envRefRe     = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	headerNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 	// Paths the proxy answers itself are not valid connection names.
 	reservedNames = map[string]bool{"healthz": true, "readyz": true, "metrics": true}
 )
@@ -458,7 +498,48 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			case "Authorization", "Proxy-Authorization", "Cookie", "Ocp-Apim-Subscription-Key", "Ocp-Apim-Trace", "Apim-Debug-Authorization":
 				fail("%s: request_headers: %s cannot be forwarded", where, ch)
 			}
+			if strings.HasPrefix(ch, UpstreamCredentialPrefix) {
+				fail("%s: request_headers: %s is a credential header; use credentials: neubird", where, ch)
+			}
 			conn.HeaderSet[ch] = true
+		}
+
+		if conn.Credentials == "" {
+			conn.Credentials = CredentialsCustomer
+		}
+		switch conn.Credentials {
+		case CredentialsCustomer:
+			if len(conn.CredentialHeaders) > 0 {
+				fail("%s: credential_headers only applies to credentials: neubird", where)
+			}
+		case CredentialsNeuBird:
+			if conn.BasicAuth != nil {
+				fail("%s: credentials: neubird and upstream_basic_auth both set the backend credential", where)
+			}
+			hs := conn.CredentialHeaders
+			if len(hs) == 0 {
+				hs = DefaultCredentialHeaders
+			}
+			conn.CredentialHeaderSet = map[string]bool{}
+			for _, h := range hs {
+				ch := http.CanonicalHeaderKey(h)
+				switch {
+				case !headerNameRe.MatchString(h):
+					fail("%s: credential_headers: %q is not a header name", where, h)
+				case credentialHeaderDenied[ch], strings.HasPrefix(ch, "X-Forwarded-"), strings.HasPrefix(ch, UpstreamCredentialPrefix):
+					fail("%s: credential_headers: %s cannot be set by NeuBird", where, ch)
+				case conn.HeaderSet[ch]:
+					fail("%s: credential_headers: %s is also in request_headers", where, ch)
+				}
+				for k := range conn.ResolvedHeaders {
+					if http.CanonicalHeaderKey(k) == ch {
+						fail("%s: credential_headers: %s is already set from the proxy's own config", where, ch)
+					}
+				}
+				conn.CredentialHeaderSet[ch] = true
+			}
+		default:
+			fail("%s: credentials must be customer or neubird", where)
 		}
 		for j, p := range conn.ResponseFields {
 			for _, seg := range strings.Split(p, ".") {

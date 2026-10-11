@@ -59,6 +59,9 @@ type Server struct {
 	mem         *memBudget
 	maxBuffered int64
 	Metrics     *Metrics
+	// Version and ConfigSHA256 are reported by the status API.
+	Version      string
+	ConfigSHA256 string
 }
 
 type Metrics struct {
@@ -173,6 +176,9 @@ type reqState struct {
 	restRaw string // same, escaped as received
 	stats   redact.Stats
 	blocked string
+	// credentials is "neubird" when the request carried a NeuBird-held
+	// backend credential that was forwarded.
+	credentials string
 	// stream is the redacting reader for a streamed body (SSE or
 	// multi-document JSON); its error explains a cut stream.
 	stream interface{ Err() error }
@@ -201,6 +207,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// and then normalized by APIM to splunk, skipping redaction.
 		writeError(rec, http.StatusBadRequest, "invalid_path", "path must not contain . or .. segments")
 		s.Metrics.Requests.Inc("_invalid", "400")
+		return
+	}
+
+	if r.URL.Path == statusPath && !s.cfg.DisableStatusAPI {
+		s.serveStatus(rec, r)
 		return
 	}
 
@@ -251,6 +262,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rec.Header().Set("WWW-Authenticate", `Basic realm="neubird-proxy"`)
 		}
 		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
+		return
+	}
+	if st.conn.Credentials != config.CredentialsNeuBird && hasCredentialHeader(r.Header) {
+		// The connection's credential comes from the proxy's own Secret.
+		// Refuse rather than drop, so a NeuBird connection set up as if it
+		// held the credential fails visibly instead of silently using the
+		// customer's.
+		st.blocked = "credentials_not_accepted"
+		s.Metrics.Blocked.Inc(name, st.blocked)
+		writeError(rec, http.StatusBadRequest, "credentials_not_accepted", "this connection uses the proxy's own credentials")
 		return
 	}
 	if !st.conn.MethodSet[r.Method] {
@@ -348,6 +369,17 @@ func (s *Server) route(r *http.Request) (*reqState, bool) {
 		st.restRaw = strings.TrimPrefix(raw, prefix)
 	}
 	return st, true
+}
+
+// hasCredentialHeader reports whether the request carries any
+// X-Neubird-Upstream-* header.
+func hasCredentialHeader(h http.Header) bool {
+	for k := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(k), config.UpstreamCredentialPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func allowHeader(c *config.Connection) string {
@@ -513,6 +545,14 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 		}
 	}
 	h.Set("X-Request-Id", st.id)
+	if c.Credentials == config.CredentialsNeuBird {
+		for k := range c.CredentialHeaderSet {
+			if vs := out.Header.Values(config.UpstreamCredentialPrefix + k); len(vs) > 0 {
+				h[k] = vs
+				st.credentials = config.CredentialsNeuBird
+			}
+		}
+	}
 	out.Header = h
 	// Accept-Encoding, Range and If-Range are not in the allowlist for
 	// redacting connections: bodies must arrive whole and uncompressed, and
@@ -847,6 +887,9 @@ func (s *Server) audit(r *http.Request, st *reqState, status, nbytes int, d time
 	}
 	if st.blocked != "" {
 		attrs = append(attrs, "blocked", st.blocked)
+	}
+	if st.credentials != "" {
+		attrs = append(attrs, "credentials", st.credentials)
 	}
 	s.log.Info("request", attrs...)
 }

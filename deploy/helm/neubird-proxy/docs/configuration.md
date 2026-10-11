@@ -37,6 +37,7 @@ a connection has none.
 | `max_concurrent_requests` | 256 | In-flight requests before `503` |
 | `max_concurrent_buffered` | 4 | Responses buffered for redaction at once |
 | `upstream_defaults.headers` | | Headers on every upstream request; values may use `${VAR}` |
+| `disable_status_api` | `false` | Turn off `GET /_neubird/status`, which lists the connections a token opens (names and settings, no upstreams or secrets) for NeuBird's UI |
 
 ## Connections (`connections[]`)
 
@@ -57,9 +58,15 @@ a connection has none.
 | `rate_limit` | | `{requests_per_second, burst}`, per replica |
 | `response_fields` | | JSON field allowlist: every other field is masked whatever it contains |
 | `passthrough` | `false` | Skip redaction for this connection. Avoid |
+| `credentials` | `customer` | Who holds the backend credential: `customer` (yours, from `headers`/`upstream_basic_auth`) or `neubird` (NeuBird holds it and sends it, OAuth included) |
+| `credential_headers` | `[Authorization]` | With `credentials: neubird`, the upstream headers NeuBird may set |
 
 NeuBird's token is checked and removed; your credentials (`headers`,
-`upstream_basic_auth`) are added here and never leave the cluster. Every
+`upstream_basic_auth`) are added here and never leave the cluster. With
+`credentials: neubird`, NeuBird holds the backend credential instead and
+sends it as `X-Neubird-Upstream-<Header>`; the proxy forwards it only as the
+headers in `credential_headers`, warns at every start, and refuses
+NeuBird-sent credentials on every other connection. Every
 `${VAR}` and `*_env` must be set in your `env.existingSecret`, or the proxy
 refuses to start and names the missing one.
 
