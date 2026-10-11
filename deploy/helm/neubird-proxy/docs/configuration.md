@@ -37,7 +37,7 @@ a connection has none.
 | `max_concurrent_requests` | 256 | In-flight requests before `503` |
 | `max_concurrent_buffered` | 4 | Responses buffered for redaction at once |
 | `upstream_defaults.headers` | | Headers on every upstream request; values may use `${VAR}` |
-| `neubird_destinations` | off | Open mode: `{hosts, methods, request_deny_patterns, rate_limit, credential_headers, client_token_env, client_auth}`. NeuBird names the destination host within `hosts` (`*`, `*.domain`, `host[:port]`, exact IPs) and sends its own credentials; no per-backend entries (README: Open mode) |
+| `neubird_destinations` | off | Open mode: `{hosts, methods, request_deny_patterns, rate_limit, credential_headers, client_token_env, client_auth}`. NeuBird names the destination host within `hosts` (optional, default `*`; or `*.domain`, `host[:port]`, exact IPs) and sends its own credentials; no per-backend entries (README: Open mode) |
 
 ## Connections (`connections[]`)
 

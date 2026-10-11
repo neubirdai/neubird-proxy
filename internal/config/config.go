@@ -214,7 +214,7 @@ type Connection struct {
 // matches Hosts. Everything a connection applies applies here too, from one
 // shared policy.
 type NeubirdDestinations struct {
-	// Hosts are patterns: "*" (any host name), "*.example.com" (any name
+	// Hosts are patterns (default "*"): "*" (any host name), "*.example.com" (any name
 	// under it), "host.example.com", or an IP address; each may end in
 	// ":port". An IP address is reached only when listed exactly; "*" and
 	// "*.domain" match names, never IP literals.
@@ -499,7 +499,9 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 	}
 	if d := c.NeubirdDestinations; d != nil {
 		if len(d.Hosts) == 0 {
-			fail("neubird_destinations.hosts: at least one host pattern is required")
+			// Not restricting is the customer's call: any host name, with
+			// the same guard rails (no IP literals, no internal addresses).
+			d.Hosts = []string{"*"}
 		}
 		d.Patterns = nil
 		for i, h := range d.Hosts {

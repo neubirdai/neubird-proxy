@@ -187,14 +187,16 @@ everything in NeuBird. Credentials are always NeuBird's.
 
 ```yaml
 neubird_destinations:
-  hosts: ["*.acme.internal", "splunk.acme.com:8089"]   # or "*" for any host name
+  hosts: ["*.acme.internal", "splunk.acme.com:8089"]   # optional; omitted means "*"
   methods: [GET, HEAD, POST]       # ceiling for every destination (default GET, HEAD)
   request_deny_patterns: [...]     # optional, as on a connection
   rate_limit: {requests_per_second: 10, burst: 30}   # optional, shared
 ```
 
-A request to `/_neubird/dest/<path>` carries `X-Neubird-Destination:
-https://host[:port]`. It goes there only if the host matches a pattern:
+`hosts` is optional: without it (`neubird_destinations: {}`), NeuBird may
+reach any host name, and the guard rails below still apply. A request to
+`/_neubird/dest/<path>` carries `X-Neubird-Destination: https://host[:port]`.
+It goes there only if the host matches a pattern:
 
 - `*` matches any host **name**; `*.example.com` any name under that domain
   (needs two or more labels); `host` exactly; any of them may end in

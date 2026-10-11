@@ -213,6 +213,15 @@ func TestNeubirdDestinations(t *testing.T) {
 		}
 	}
 
+	// hosts is optional: omitted means any host name.
+	c, err = Parse([]byte(base+"neubird_destinations: {}\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := c.NeubirdDestinations; !d.AnyHost() || !d.MatchDestination("jira.acme.internal", "443") || d.MatchDestination("10.1.2.3", "443") {
+		t.Fatalf("default hosts: %v", d.Hosts)
+	}
+
 	c, err = Parse([]byte(base+"neubird_destinations:\n  hosts: ['*.acme.internal', 'splunk.acme.com:8089']\n"), e)
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +244,6 @@ func TestNeubirdDestinations(t *testing.T) {
 	}
 
 	for name, tc := range map[string]struct{ cfg, want string }{
-		"no hosts":        {"neubird_destinations:\n  hosts: []\n", "at least one host pattern"},
 		"tld wildcard":    {"neubird_destinations:\n  hosts: ['*.internal']\n", "two or more labels"},
 		"bad pattern":     {"neubird_destinations:\n  hosts: ['ac me']\n", "not \"*\""},
 		"bad port":        {"neubird_destinations:\n  hosts: ['x.y:99999']\n", "bad port"},

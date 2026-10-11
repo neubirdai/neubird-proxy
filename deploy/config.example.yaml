@@ -20,7 +20,7 @@ admin_listen: ":9090"    # /healthz, /readyz, /metrics (cluster-internal only)
 # Open mode: NeuBird names the destination host within these patterns, with
 # NeuBird-held credentials and no per-backend entries (README: Open mode).
 # neubird_destinations:
-#   hosts: ["*.corp.example.com"]   # "*" allows any host name
+#   hosts: ["*.corp.example.com"]   # optional; omitted means any host name
 #   methods: [GET, HEAD]
 
 # Default token for connections that do not set their own (32+ characters).
