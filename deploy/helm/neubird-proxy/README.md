@@ -34,9 +34,12 @@ you.
    kubectl -n neubird create secret generic neubird-proxy-env \
      --from-literal=NEUBIRD_PROXY_TOKEN=$(openssl rand -hex 32) \
      --from-literal=REDACTION_HMAC_KEY=$(openssl rand -hex 32) \
-     --from-literal=NEUBIRD_JOIN_TOKEN=nbjt_...     # from NeuBird
-     --from-literal=APIM_SUBSCRIPTION_KEY=...      # whatever your connections use
+     --from-literal=NEUBIRD_JOIN_TOKEN=nbjt_... \
+     --from-literal=APIM_SUBSCRIPTION_KEY=...
    ```
+   `NEUBIRD_JOIN_TOKEN` is the token NeuBird gave you; add one
+   `--from-literal` per credential your connections use (here an API gateway
+   key).
 2. Write your values (start from `examples/splunk-apim.yaml`) and install:
    ```sh
    helm install neubird-proxy ./neubird-proxy -n neubird -f my-values.yaml \
