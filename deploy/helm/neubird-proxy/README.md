@@ -1,13 +1,17 @@
 # neubird-proxy Helm chart
 
 NeuBird's proxy, run in **your** cluster. It opens outbound mTLS tunnels to
-your dedicated NeuBird relay (port 443) and serves NeuBird's requests to the
-internal APIs you allow, with your credentials added here and sensitive
-values redacted before anything leaves. Nothing connects in to it.
+your dedicated NeuBird relay (port 443) and forwards NeuBird's requests to
+the internal systems you allow, by host, redacting sensitive values before
+anything leaves. Nothing connects in to it.
 
 ```
-NeuBird ── relay ⇄ (tunnel, opened from your side, :443) ⇄ neubird-proxy ──▶ your API (Splunk, ...)
+NeuBird ── relay ⇄ (tunnel, opened from your side, :443) ⇄ neubird-proxy ──▶ your systems (Splunk, ...)
 ```
+
+You set once which hosts NeuBird may reach (`neubird_destinations`). Systems
+are then added, changed and removed in NeuBird, each as a connection with
+its own URL and credentials, without changing the proxy.
 
 ## What you get from NeuBird
 
@@ -23,9 +27,12 @@ NeuBird ── relay ⇄ (tunnel, opened from your side, :443) ⇄ neubird-proxy
 
 **Nothing**, with a join token: the proxy enrolls its own key on first
 connect. (Without one, only the key's **fingerprint**, after install.) The
-key itself, the proxy token's value, and your API credentials stay with
-you. (In open mode, `neubird_destinations`, NeuBird holds the credentials
-for those hosts instead; see the proxy README.)
+tunnel key stays with you.
+
+Your systems' credentials and URLs are entered in NeuBird's connections:
+NeuBird holds them and sends them with each request, and the proxy forwards
+them only to the hosts you allow ([configuration.md](docs/configuration.md),
+Credentials).
 
 ## Install
 
@@ -35,21 +42,19 @@ for those hosts instead; see the proxy README.)
    kubectl -n neubird create secret generic neubird-proxy-env \
      --from-literal=NEUBIRD_PROXY_TOKEN=$(openssl rand -hex 32) \
      --from-literal=REDACTION_HMAC_KEY=$(openssl rand -hex 32) \
-     --from-literal=NEUBIRD_JOIN_TOKEN=nbjt_... \
-     --from-literal=APIM_SUBSCRIPTION_KEY=...
+     --from-literal=NEUBIRD_JOIN_TOKEN=nbjt_...
    ```
-   `NEUBIRD_JOIN_TOKEN` is the token NeuBird gave you; add one
-   `--from-literal` per credential your connections use (here an API gateway
-   key).
-2. Write your values (start from `examples/splunk-apim.yaml`) and install:
+   `NEUBIRD_JOIN_TOKEN` is the token NeuBird gave you.
+2. Write your values (start from `examples/values.yaml`) and install:
    ```sh
    helm install neubird-proxy ./neubird-proxy -n neubird -f my-values.yaml \
      --set-file relayCA.cert=relay-ca.crt
    ```
    The proxy enrolls its key with the join token and the pods turn Ready
    within seconds (their log says `enrolled with the join token`).
-3. Create the connection in NeuBird's UI with the URL NeuBird gives you and,
-   as its token, `NEUBIRD_PROXY_TOKEN` from step 1.
+3. In NeuBird, add each system as a connection with its URL and
+   credentials, access through the NeuBird proxy, the relay URL NeuBird
+   gives you, and `NEUBIRD_PROXY_TOKEN` from step 1 as the proxy token.
 
 Once enrolled, you may delete `NEUBIRD_JOIN_TOKEN` from the Secret: the
 relay knows the key. **Without a join token**, install without `--wait`,
@@ -65,12 +70,12 @@ records it.
 | `image.repository`, `image.digest` (or `image.tag`) | yes | Where you loaded the image |
 | `tunnel.relays`, `tunnel.tenant`, `tunnel.proxy` | yes | From NeuBird; `proxy` is your name for this deployment |
 | `relayCA.cert` or `relayCA.existingConfigMap` | yes | The relay CA NeuBird sent (key `relay-ca.crt`) |
-| `env.existingSecret` | yes | Your Secret: `NEUBIRD_PROXY_TOKEN`, `REDACTION_HMAC_KEY`, connection credentials |
-| `config` | yes | Connections, redaction, limits: see `config.example.yaml` in the neubird-proxy repository. `${VAR}` comes from `env` |
+| `env.existingSecret` | yes | Your Secret: `NEUBIRD_PROXY_TOKEN`, `REDACTION_HMAC_KEY`, `NEUBIRD_JOIN_TOKEN` |
+| `config` | yes | `neubird_destinations` (the hosts NeuBird may reach), redaction, limits: see [configuration.md](docs/configuration.md). `${VAR}` comes from `env` |
 | `tunnel.joinTokenEnv` | default `NEUBIRD_JOIN_TOKEN` | Env var with NeuBird's join token; empty or missing means send the fingerprint instead |
 | `tunnelKey.generate` | default `true` | Key generated in a Secret at install, kept on upgrade and uninstall |
 | `tunnelKey.existingSecret` | | Bring your own key (`neubird-proxy keygen`), key `tunnel.key` |
-| `networkPolicy.enabled` | default `false` | No inbound; outbound only DNS, `relayCIDRs`:443, `upstreams` |
+| `networkPolicy.enabled` | default `false` | No inbound; outbound only DNS, `relayCIDRs`:443, and your systems' ranges (`upstreams`) |
 | `replicaCount` | default `2` | NeuBird monitors `replicaCount × tunnel.connectionsPerRelay` tunnels |
 | `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `imagePullSecrets` | | As usual |
 

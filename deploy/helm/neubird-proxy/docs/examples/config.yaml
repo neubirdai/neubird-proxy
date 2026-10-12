@@ -5,25 +5,17 @@
 # them from environment variables, which come from a Kubernetes Secret.
 client_token_env: NEUBIRD_PROXY_TOKEN
 
-connections:
-  # NeuBird's connection URL ends in /splunk/services/mcp
-  - name: splunk
-    upstream: https://splunk.example.com
-    client_auth: bearer
-    methods: [POST, DELETE]            # MCP uses POST for every call
-    paths: [/services/mcp]             # nothing else on this host is reachable
-    headers:
-      Authorization: Bearer ${SPLUNK_MCP_TOKEN}   # sent to Splunk, never to NeuBird
-
-  # NeuBird's connection URL ends in /servicenow
-  - name: servicenow
-    upstream: https://yourinstance.service-now.com
-    client_auth: basic                 # NeuBird sends its token as a Basic password
-    paths:                             # GET and HEAD only, by default
-      - /api/now/table/(incident|problem|change_request)(/[0-9a-f]{32})?
-    upstream_basic_auth:
-      username_env: SN_USER
-      password_env: SN_PASSWORD
+# NeuBird names the system each request is for (the endpoint URL of its
+# connection, such as https://splunk.example.com) and sends that system's
+# credentials. The proxy only forwards to hosts that match these patterns.
+neubird_destinations:
+  hosts:
+    - splunk.example.com
+    - yourinstance.service-now.com
+  methods: [GET, HEAD, POST, DELETE]   # Splunk MCP uses POST, and DELETE to end a session
+  # SPL commands that write, send, delete or reach other systems.
+  request_deny_patterns:
+    - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
 
 redaction:
   # All built-in rules are on by default: emails, SSNs, phones, cards, IP
