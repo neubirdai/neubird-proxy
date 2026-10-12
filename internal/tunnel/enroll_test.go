@@ -113,7 +113,7 @@ func TestJoinTokenRefused(t *testing.T) {
 	cfg := p.proxyConfig(t, relay.ln.Addr().String())
 	cfg.JoinToken = testJoinToken
 	c, reg := newClient(t, cfg, http.NotFoundHandler())
-	_, err := c.connect(context.Background(), relay.ln.Addr().String())
+	_, err := c.connect(context.Background(), relay.ln.Addr().String(), true)
 	if err == nil || !strings.Contains(err.Error(), "relay refused: join token expired") {
 		t.Fatalf("err = %v", err)
 	}
@@ -133,7 +133,7 @@ func TestJoinTokenRelayWithoutEnrollment(t *testing.T) {
 	cfg := p.proxyConfig(t, relay.ln.Addr().String())
 	cfg.JoinToken = testJoinToken
 	c, _ := newClient(t, cfg, http.NotFoundHandler())
-	_, err := c.connect(context.Background(), relay.ln.Addr().String())
+	_, err := c.connect(context.Background(), relay.ln.Addr().String(), true)
 	if err == nil || !strings.Contains(err.Error(), "doesn't accept join tokens") {
 		t.Fatalf("err = %v", err)
 	}
@@ -147,5 +147,49 @@ func TestNoJoinTokenNoEnrollment(t *testing.T) {
 	relay.next(t)
 	if n := len(relay.presented()); n != 0 {
 		t.Fatalf("enrolled without a join token: %d", n)
+	}
+}
+
+func TestCheckDoesNotSpendJoinToken(t *testing.T) {
+	p := newPKI(t)
+	relay := newEnrollRelay(t, p, "ok enrolled", ALPN, EnrollALPN)
+	cfg := p.proxyConfig(t, relay.ln.Addr().String())
+	cfg.JoinToken = testJoinToken
+	c, _ := newClient(t, cfg, http.NotFoundHandler())
+	if _, err := c.Check(context.Background(), relay.ln.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(relay.presented()); n != 0 {
+		t.Fatalf("test enrolled the key: %d tokens presented", n)
+	}
+}
+
+func TestNewKeyEnrollsAgain(t *testing.T) {
+	p := newPKI(t)
+	relay := newEnrollRelay(t, p, "ok enrolled", ALPN, EnrollALPN)
+	addr := relay.ln.Addr().String()
+	cfg := p.proxyConfig(t, addr)
+	cfg.JoinToken = testJoinToken
+	c, _ := newClient(t, cfg, http.NotFoundHandler())
+	for range 2 {
+		conn, err := c.connect(context.Background(), addr, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+	}
+	if n := len(relay.presented()); n != 1 {
+		t.Fatalf("same key: %d enrollments, want 1", n)
+	}
+	// The key enrolled before is not the one loaded now.
+	old := "SHA256:previous"
+	c.enrolled[addr].Store(&old)
+	conn, err := c.connect(context.Background(), addr, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if n := len(relay.presented()); n != 2 {
+		t.Fatalf("new key: %d enrollments, want 2", n)
 	}
 }

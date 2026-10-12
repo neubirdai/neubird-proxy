@@ -157,7 +157,8 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 	if knownLen > 0 && knownLen <= maxDoc+readSlack {
 		head.Grow(int(knownLen))
 	}
-	cr := &countingReader{r: io.TeeReader(src, &head), max: maxDoc}
+	lr := skipBOM(src)
+	cr := &countingReader{r: io.TeeReader(lr, &head), max: maxDoc}
 	dec := json.NewDecoder(cr)
 	dec.UseNumber()
 	w := &jsonWriter{e: e, fields: fields}
@@ -190,7 +191,7 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 	w.out = bytes.Buffer{}
 
 	// Raw bytes are only needed for the first document.
-	cr.r = src
+	cr.r = lr
 	cr.docStart = dec.InputOffset()
 	s.lastDoc = dec.InputOffset()
 	// More peeks past whitespace, reading if it must: only safe when the
@@ -353,4 +354,37 @@ func (s *JSONStream) Err() error {
 		return nil
 	}
 	return s.err
+}
+
+// leadReader returns lead, then err if set, then reads r.
+type leadReader struct {
+	lead []byte
+	err  error
+	r    io.Reader
+}
+
+func (l *leadReader) Read(p []byte) (int, error) {
+	if len(l.lead) > 0 {
+		n := copy(p, l.lead)
+		l.lead = l.lead[n:]
+		return n, nil
+	}
+	if l.err != nil {
+		return 0, l.err
+	}
+	return l.r.Read(p)
+}
+
+// skipBOM drops a UTF-8 BOM at the start of src (see JSONFields).
+func skipBOM(src io.Reader) io.Reader {
+	var pre [3]byte
+	n, err := io.ReadFull(src, pre[:])
+	lead := pre[:n]
+	if bytes.Equal(lead, utf8BOM) {
+		lead = nil
+	}
+	if err == io.ErrUnexpectedEOF {
+		err = io.EOF
+	}
+	return &leadReader{lead: lead, err: err, r: src}
 }

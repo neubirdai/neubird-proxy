@@ -335,6 +335,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		rec.requestID = requestID(r.Header.Get("X-Request-Id"))
 		writeError(rec, http.StatusNotFound, "unknown_connection", "no connection matches this host or path")
 		s.Metrics.Requests.Inc("_unknown", "404")
 		return
@@ -382,7 +383,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
 		return
 	}
-	rec.Header().Set("X-Request-Id", st.id)
+	rec.requestID = st.id
 	if st.destErr != "" {
 		// Checked after the token, so a caller without one learns nothing
 		// about which hosts are allowed.
@@ -1098,6 +1099,10 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 		}
 	}
 	out.Header = h
+	// Request trailers would carry any header past the allowlist (the
+	// body is read whole first when deny patterns or MCP tools are set, so
+	// they arrive filled in).
+	out.Trailer = nil
 	// Accept-Encoding, Range and If-Range are not in the allowlist for
 	// redacting connections: bodies must arrive whole and uncompressed, and
 	// a value split across two partial bodies matches in neither.
@@ -1118,6 +1123,9 @@ func (e *blockError) Error() string { return "redaction blocked: " + e.reason }
 func (s *Server) modifyResponse(resp *http.Response) error {
 	st := state(resp.Request.Context())
 	s.rewriteLocation(resp, st)
+	// The proxy's request id, not the upstream's. A 101 is written by
+	// ReverseProxy itself from these headers, without WriteHeader.
+	resp.Header.Set("X-Request-Id", st.id)
 	// Backend session cookies would let the holder reach the backend
 	// without the proxy (a ServiceNow session works directly against the
 	// SaaS instance). APIM's own headers describe MetLife's gateway.
@@ -1549,6 +1557,9 @@ type recorder struct {
 	status   int
 	bytes    int
 	hijacked bool // a passthrough upgrade took the connection over
+	// requestID is put on the final response header: ReverseProxy clears
+	// the header after relaying a 1xx, and an upstream may send its own.
+	requestID string
 }
 
 // Hijack hands the connection to ReverseProxy for an upgrade, and notes it:
@@ -1570,6 +1581,9 @@ func (r *recorder) WriteHeader(code int) {
 	}
 	if r.status == 0 {
 		r.status = code
+	}
+	if r.requestID != "" {
+		r.Header().Set("X-Request-Id", r.requestID)
 	}
 	r.ResponseWriter.WriteHeader(code)
 }

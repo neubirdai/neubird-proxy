@@ -39,10 +39,13 @@ Credentials).
 1. Create the environment Secret (or sync it from your secret store):
    ```sh
    kubectl create namespace neubird
+   kubectl label namespace neubird pod-security.kubernetes.io/enforce=restricted
+   printf 'NeuBird join token: '; read -rs JOIN; echo
    kubectl -n neubird create secret generic neubird-proxy-env \
      --from-literal=NEUBIRD_PROXY_TOKEN=$(openssl rand -hex 32) \
      --from-literal=REDACTION_HMAC_KEY=$(openssl rand -hex 32) \
-     --from-literal=NEUBIRD_JOIN_TOKEN=nbjt_...
+     --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN"
+   unset JOIN
    ```
    `NEUBIRD_JOIN_TOKEN` is the token NeuBird gave you.
 2. Write your values (start from `examples/values.yaml`) and install:
@@ -79,22 +82,30 @@ records it.
 | `replicaCount` | default `2` | NeuBird monitors `replicaCount × tunnel.connectionsPerRelay` tunnels |
 | `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `imagePullSecrets` | | As usual |
 
-With `helm template` (GitOps), the generated key would land in your rendered
-YAML: use `tunnelKey.existingSecret` with a key made by `neubird-proxy keygen`.
+With `helm template` or a GitOps tool that renders with it (Argo CD), the
+chart can't see the existing Secret, so it would generate a new key on every
+render and replace the one in use, dropping every tunnel; the key would also
+land in your rendered YAML. Use `tunnelKey.existingSecret` with a key made by
+`neubird-proxy keygen`. With `helm install`, the generated key is also stored
+in Helm's release record (`helm get manifest` shows it), so whoever can read
+Secrets in the namespace can read it either way.
 
 ## Security properties
 
 - Runs as non-root (65532), read-only root filesystem, no capabilities,
   `RuntimeDefault` seccomp: fits Pod Security `restricted`.
 - No service-account token, no RBAC, no CRDs, no cluster-scoped objects.
-- Only outbound connections; the admin port (9090: health, metrics) isn't exposed.
+- Only outbound connections. The admin port (9090: health, metrics) has no
+  Service; with `networkPolicy.enabled` only `metricsFrom` reaches it.
 - Rollouts wait for a tunnel on each new replica, so a bad key or CA stops
   the rollout instead of taking the proxy down.
 
 ## Operate
 
-- **Cut NeuBird off**: change `NEUBIRD_PROXY_TOKEN` (requests fail at once),
-  or scale to 0 (tunnels close).
+- **Cut NeuBird off**: scale to 0 (tunnels close at once), or change
+  `NEUBIRD_PROXY_TOKEN` and `kubectl rollout restart` the Deployment: the
+  token is read at startup, so running pods accept the old one until they
+  restart.
 - **Rotate the key**: create a new key Secret, send NeuBird its fingerprint,
   switch `tunnelKey.existingSecret` once NeuBird confirms.
 - **Upgrade**: load the new image, set `image.digest`, `helm upgrade`. The key is kept.

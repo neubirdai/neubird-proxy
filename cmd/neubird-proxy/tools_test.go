@@ -443,7 +443,7 @@ func TestPreviewHMACKeyNote(t *testing.T) {
 		t.Fatalf("no note without the key:\n%s", out)
 	}
 	// Key supplied, token still missing: no note, and stable codes.
-	_, out, _ = runCmd(t, cmdPreview, "-config", cfg, "-env-file", writeFile(t, "k.env", "HMAC_KEY=k1\n"), sample)
+	_, out, _ = runCmd(t, cmdPreview, "-config", cfg, "-env-file", writeFile(t, "k.env", "HMAC_KEY=k1-0123456789abcdef0123456789abcdef\n"), sample)
 	if strings.Contains(out, "placeholder key") {
 		t.Fatalf("note despite the key:\n%s", out)
 	}
@@ -457,4 +457,23 @@ func TestPreviewExplainsFieldMask(t *testing.T) {
 	cfg := writeFile(t, "config.yaml", "client_token_env: T\nconnections: [{name: api, upstream: 'https://x', response_fields: [id]}]\n")
 	_, out, _ := runCmd(t, cmdPreview, "-config", cfg, writeFile(t, "s.json", `{"id":1,"note":"jane@example.com"}`))
 	matches(t, out, `field_not_allowed: a field not in response_fields, masked whole`)
+}
+
+// Offline, a missing join token gets a placeholder that passes its format
+// check, and the destinations row reports the field allowlist.
+func TestValidateOfflineDestinationsTunnel(t *testing.T) {
+	t.Setenv("NEUBIRD_JOIN_TOKEN", "")
+	cfg := writeFile(t, "config.yaml", `
+client_token_env: PROXY_TOKEN
+listen: "off"
+tunnel: {relays: ['r:443'], tenant: swift, proxy: p, key_file: k, ca_file: ca, join_token_env: NEUBIRD_JOIN_TOKEN}
+neubird_destinations:
+  hosts: ["*.acme.internal"]
+  response_fields: [id, name]
+`)
+	code, out, _ := runCmd(t, cmdValidate, "-offline", "-config", cfg)
+	if code != 0 || !strings.Contains(out, "NEUBIRD_JOIN_TOKEN, PROXY_TOKEN") {
+		t.Fatalf("code %d out %s", code, out)
+	}
+	matches(t, out, `neubird_destinations\s.*\s2 allowed\s`)
 }

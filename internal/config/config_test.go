@@ -82,6 +82,10 @@ func TestParseErrors(t *testing.T) {
 		"no connections":      {"client_token_env: TOKEN\n", base, "at least one connection"},
 		"hmac without key":    {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\nredaction: {mask: hmac}", base, "REDACTION_HMAC_KEY is not set"},
 		"bad mask":            {"client_token_env: TOKEN\nconnections: [{name: a, upstream: 'https://x'}]\nredaction: {mask: blur}", base, "mask must be"},
+		"short hmac key":      {"client_token_env: TOKEN\nneubird_destinations: {}\nredaction: {mask: hmac, hmac_key_env: APIM_KEY}", base, "at least 32 are required"},
+		"range header":        {"client_token_env: TOKEN\nneubird_destinations: {request_headers: [range]}", base, "Range cannot be forwarded"},
+		"encoding header":     {"client_token_env: TOKEN\nneubird_destinations: {request_headers: [Accept-Encoding]}", base, "Accept-Encoding cannot be forwarded"},
+		"forwarded header":    {"client_token_env: TOKEN\nneubird_destinations: {request_headers: [X-Forwarded-Host]}", base, "X-Forwarded-Host cannot be forwarded"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -158,6 +158,7 @@ func run(configPath string, check bool, log *slog.Logger) error {
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 		// No WriteTimeout: MCP SSE streams and Splunk exports are long-lived.
 	}
 	adminSrv := &http.Server{Addr: cfg.AdminListen, Handler: admin, ReadHeaderTimeout: 5 * time.Second}

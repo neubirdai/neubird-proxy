@@ -3,16 +3,20 @@
 # Hostnames, allowlists and the member_id pattern are placeholders for
 # MetLife to confirm.
 
-listen: ":8443"          # NeuBird-facing listener (exposed via the load balancer)
-admin_listen: ":9090"    # /healthz, /readyz, /metrics (cluster-internal only)
+# The Helm chart sets listen, admin_listen and tunnel itself; they are here
+# for running the proxy without it.
+listen: "off"            # no inbound listener: requests arrive over the tunnel
+admin_listen: ":9090"    # /healthz, /readyz, /metrics, without auth: keep it off the network
 
-# Optional: terminate TLS in the pod. Omit if the load balancer terminates.
-# With client_ca_file, NeuBird must also present a client certificate from
-# that CA (mutual TLS), in addition to the token.
-# tls:
-#   cert_file: /etc/neubird-proxy/tls/tls.crt
-#   key_file: /etc/neubird-proxy/tls/tls.key
-#   client_ca_file: /etc/neubird-proxy/tls/neubird-client-ca.crt
+# The outbound tunnel to NeuBird's relay. NeuBird gives you the relay
+# address, the tenant and proxy names, the relay CA and a join token.
+tunnel:
+  relays: ["relay.example.com:443"]   # placeholders: use the values NeuBird gives you
+  tenant: metlife
+  proxy: prod-1
+  key_file: /etc/neubird-proxy/tunnel/tunnel.key   # neubird-proxy keygen; guard it like a credential
+  ca_file: /etc/neubird-proxy/ca/relay-ca.crt
+  join_token_env: NEUBIRD_JOIN_TOKEN
 
 # Optional: extra CA bundle for internal certificates on your systems.
 # upstream_ca_file: /etc/neubird-proxy/ca/ca.crt
@@ -36,8 +40,9 @@ neubird_destinations:
   hosts:
     - "*.apis.metlife.com"
     - "maestro.corp.metlife.com"
-  # A ceiling for every destination: Splunk search jobs and MCP need POST,
-  # MCP sessions end with DELETE.
+  # A ceiling for every destination. Splunk search jobs and MCP need POST,
+  # MCP sessions end with DELETE; with only REST reads, use [GET, HEAD], as
+  # the deny patterns below only cover SPL.
   methods: [GET, HEAD, POST, DELETE]
   # The headers NeuBird may set for the destination, sent as
   # X-Neubird-Upstream-<Header>. Here the backend's token and the APIM
@@ -66,6 +71,7 @@ redaction:
     - us_ssn
     - credit_card
     - phone_us
+    - ipv4
     - date_of_birth
   blocked_key_patterns: ["(?i).*ssn.*", "(?i).*password.*", "(?i).*dob.*"]
   custom:
@@ -74,5 +80,7 @@ redaction:
     # Internal hostnames, if MetLife wants topology masked too:
     # - name: internal_host
     #   regex: "\\b[a-z0-9-]+\\.corp\\.metlife\\.com\\b"
-  allowed_values: ["(?i)[a-z0-9._-]+@metlife\\.com"]
+  # Values never masked. Employee addresses are personal data too: exempt
+  # only shared mailboxes NeuBird needs to see.
+  # allowed_values: ["(?i)^(it-ops|noc)@metlife\\.com$"]
   mask: label   # or hmac, keyed by REDACTION_HMAC_KEY

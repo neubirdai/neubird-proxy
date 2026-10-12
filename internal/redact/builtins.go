@@ -13,6 +13,15 @@ import "regexp"
 type pattern struct {
 	re       *regexp.Regexp
 	validate func(string) bool // optional; runs on the masked text
+	// find, when set, finds the matches instead of re, which then only
+	// documents them (see findPrivateKeys).
+	find func(s string, n int) [][]int
+	// raw also runs the pattern on the text as written, before decoding:
+	// a decoded %40 or %2F in a password ends the value class, so on the
+	// decoded text the match stops short of the rest of the secret. rawRe,
+	// if set, replaces re there.
+	raw   bool
+	rawRe *regexp.Regexp
 	// Prefilter, so the regex only runs on text that could match: at least
 	// one of needles (lowercase) must appear case-insensitively, and the
 	// text must hold at least minDigits digits.
@@ -90,10 +99,10 @@ var builtins = map[string]builtin{
 
 	// Secrets
 	"private_key": {values: []pattern{
-		{re: regexp.MustCompile(`-----BEGIN[A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s]*)`), needles: []string{"private key-----"}},
+		{re: privateKeyRe, find: findPrivateKeys, needles: []string{"private key-----"}},
 	}},
 	"url_credentials": {values: []pattern{
-		{re: regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,20}://[^\s/:@"'<>]+:(?P<v>[^\s/@"'<>]+)@`), needles: []string{"://"}, scope: scopeNeedles},
+		{re: regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,20}://[^\s/:@"'<>]+:(?P<v>[^\s/@"'<>]+)@`), needles: []string{"://"}, scope: scopeNeedles, raw: true},
 	}},
 	"jwt": {values: []pattern{
 		{re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*`), needles: []string{"eyj"}, scope: scopeNeedles},
@@ -118,7 +127,10 @@ var builtins = map[string]builtin{
 		values: []pattern{
 			// A non-alphanumeric boundary (not \b) so db_password=... matches.
 			{re: regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?key|credentials?)["']?\s*[:=]\s*["']?(?P<v>[^\s"'&;,<>]{3,})`),
-				needles: []string{"passw", "pwd", "secret", "key", "token", "credential"}, scope: scopeNeedles, before: 16, after: 32},
+				needles: []string{"passw", "pwd", "secret", "key", "token", "credential"}, scope: scopeNeedles, before: 16, after: 32,
+				// As written, an HTML entity (&amp; &#59;) is part of the
+				// value: its & and ; would end it otherwise.
+				raw: true, rawRe: regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?key|credentials?)["']?\s*[:=]\s*["']?(?P<v>(?:[^\s"'&;,<>]|&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,8});)(?:[^\s"'&;,<>]|&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,8});){2,})`)},
 		},
 		key: regexp.MustCompile(`(?i)(?:password|passwd|secret|api_?key|apikey|access_?token|auth_?token|refresh_?token|private_?key|client_?secret|credential)`),
 	},

@@ -40,8 +40,13 @@ func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, erro
 	if !utf8.Valid(body) {
 		return nil, ErrNotText
 	}
+	// A leading BOM fails the decoder, which would leave the body to the
+	// text rules alone, while clients that skip it read the JSON.
+	body = bytes.TrimPrefix(body, utf8BOM)
 	return e.jsonFields(bytes.NewReader(body), len(body), st, fields, false)
 }
+
+var utf8BOM = []byte("\xef\xbb\xbf")
 
 // innerJSON redacts JSON held in a string value (MCP tool text, Splunk
 // _raw). Its numbers get the value rules too: the outer value stays a

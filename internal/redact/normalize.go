@@ -3,6 +3,7 @@ package redact
 import (
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -12,8 +13,10 @@ import (
 //
 //   - percent-escapes (%40), once
 //   - HTML numeric entities (&#64; &#x40;) and a few named ones (&amp; &commat;)
-//   - full-width ASCII (２１９ → 219)
-//   - invisible format characters (zero-width space, soft hyphen, BOM), removed
+//   - full-width ASCII (２１９ → 219), and decimal digits of other scripts
+//     (٢١٩, 𝟐𝟏𝟗 → 219)
+//   - invisible characters (format characters such as zero-width space,
+//     soft hyphen, BOM and bidi marks; variation selectors), removed
 //
 // off maps each byte of the result to the offset in s of the input that
 // produced it, with off[len(result)] == len(s), so a match in the result
@@ -54,6 +57,8 @@ func normalize(s string) (string, []int32) {
 			case r >= 0xFF01 && r <= 0xFF5E: // full-width ! through ~
 				emit(i, byte(r-0xFF01+'!'))
 			case invisible(r):
+			case unicode.Is(unicode.Nd, r):
+				emit(i, digitValue(r))
 			default:
 				for k := 0; k < n; k++ {
 					emit(i+k, s[i+k])
@@ -81,7 +86,7 @@ func needsNormalize(s string) bool {
 			return true
 		case c >= utf8.RuneSelf:
 			r, n := utf8.DecodeRuneInString(s[i:])
-			if (r >= 0xFF01 && r <= 0xFF5E) || invisible(r) {
+			if (r >= 0xFF01 && r <= 0xFF5E) || invisible(r) || unicode.Is(unicode.Nd, r) {
 				return true
 			}
 			i += n
@@ -92,12 +97,33 @@ func needsNormalize(s string) bool {
 	return false
 }
 
+// invisible reports a rune that renders as nothing: a format character
+// (Cf: soft hyphen, zero-width space and joiners, bidi marks and isolates,
+// word joiner, BOM, tag characters), the combining grapheme joiner or a
+// variation selector.
 func invisible(r rune) bool {
-	switch r {
-	case 0x00AD, 0x180E, 0x200B, 0x200C, 0x200D, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xFEFF:
+	switch {
+	case r == 0x034F, r >= 0x180B && r <= 0x180F, r >= 0xFE00 && r <= 0xFE0F, r >= 0xE0100 && r <= 0xE01EF:
 		return true
 	}
-	return false
+	return unicode.Is(unicode.Cf, r)
+}
+
+// digitValue returns the ASCII digit for a decimal digit (Nd) of any
+// script. Unicode allocates each script's digits as a contiguous run from
+// zero to nine, so a range in the Nd table is whole runs of ten.
+func digitValue(r rune) byte {
+	for _, rg := range unicode.Nd.R16 {
+		if lo, hi := rune(rg.Lo), rune(rg.Hi); r >= lo && r <= hi {
+			return byte('0' + (r-lo)%10)
+		}
+	}
+	for _, rg := range unicode.Nd.R32 {
+		if lo, hi := rune(rg.Lo), rune(rg.Hi); r >= lo && r <= hi {
+			return byte('0' + (r-lo)%10)
+		}
+	}
+	return '0'
 }
 
 var namedEntities = map[string]rune{
@@ -108,7 +134,9 @@ var namedEntities = map[string]rune{
 // entity decodes an HTML entity at the start of s, returning the rune and
 // the number of bytes consumed, or 0 if s does not start with one.
 func entity(s string) (rune, int) {
-	end := strings.IndexByte(s, ';')
+	// An entity is at most 11 bytes: looking further for ';' would scan to
+	// the end of the text for every '&'.
+	end := strings.IndexByte(s[:min(len(s), 11)], ';')
 	if end < 2 || end > 10 {
 		return 0, 0
 	}

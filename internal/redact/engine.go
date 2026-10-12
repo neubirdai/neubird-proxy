@@ -30,13 +30,16 @@ type valueRule struct {
 	before    int
 	after     int
 	re        *regexp.Regexp
-	group     int            // submatch to mask; 0 is the whole match
-	anchored  *regexp.Regexp // re matching a whole string; for validated whole-match rules
+	find      func(s string, n int) [][]int // replaces re's FindAllStringSubmatchIndex when set
+	raw       bool                          // also matched on the undecoded text
+	rawRe     *regexp.Regexp                // re for the undecoded text, if not re
+	group     int                           // submatch to mask; 0 is the whole match
+	anchored  *regexp.Regexp                // re matching a whole string; for validated whole-match rules
 	validate  func(string) bool
 }
 
 func newValueRule(name string, p pattern) valueRule {
-	r := valueRule{name: name, label: strings.ToUpper(name), re: p.re, validate: p.validate, needles: p.needles, minDigits: p.minDigits, scope: p.scope, before: p.before, after: p.after}
+	r := valueRule{name: name, label: strings.ToUpper(name), re: p.re, find: p.find, raw: p.raw, rawRe: p.rawRe, validate: p.validate, needles: p.needles, minDigits: p.minDigits, scope: p.scope, before: p.before, after: p.after}
 	re, validate := p.re, p.validate
 	if g := re.SubexpIndex("v"); g > 0 {
 		r.group = g
@@ -248,6 +251,9 @@ func (e *Engine) String(orig string, st Stats) string {
 			spans = append(spans, span{int32(a), int32(z), int32(i)})
 		})
 	}
+	if off != nil && encodesDelimiters(orig) {
+		spans = e.rawMatches(orig, off, spans)
+	}
 	if len(spans) == 0 {
 		return orig
 	}
@@ -285,6 +291,71 @@ func (e *Engine) String(orig string, st Stats) string {
 	}
 	b.WriteString(orig[pos:])
 	return b.String()
+}
+
+// rawMatches runs the raw rules over orig, the text as written, and adds
+// their matches as spans of the normalized text that cover them.
+func (e *Engine) rawMatches(orig string, off []int32, spans []span) []span {
+	var lower string
+	folds := hasFoldRunes(orig)
+	for i, r := range e.rules {
+		if !r.raw {
+			continue
+		}
+		if r.rawRe != nil {
+			r.re, r.group = r.rawRe, r.rawRe.SubexpIndex("v")
+		}
+		if len(r.needles) > 0 && !folds {
+			if lower == "" {
+				lower = asciiLower(orig)
+			}
+			if !containsAny(lower, r.needles) {
+				continue
+			}
+		}
+		regions := [][2]int{{0, len(orig)}}
+		if r.scope == scopeNeedles && !folds {
+			regions = needleWindows(orig, lower, r.needles, r.before, r.after)
+		}
+		forEachMatch(r, orig, regions, func(loc []int) {
+			a, z := loc[2*r.group], loc[2*r.group+1]
+			// A match with nothing decoded in it is the normalized pass's
+			// match again.
+			if a < 0 || a == z || !needsNormalize(orig[loc[0]:loc[1]]) {
+				return
+			}
+			if m := orig[a:z]; (r.validate != nil && !r.validate(m)) || e.isAllowed(m) {
+				return
+			}
+			// The normalized span starts with the first byte produced at
+			// or before a and ends with the first produced at or after z.
+			from := off[sort.Search(len(off), func(k int) bool { return int(off[k]) > a })-1]
+			na := sort.Search(len(off), func(k int) bool { return off[k] >= from })
+			nz := sort.Search(len(off), func(k int) bool { return int(off[k]) >= z })
+			spans = append(spans, span{int32(na), int32(nz), int32(i)})
+		})
+	}
+	return spans
+}
+
+// encodesDelimiters reports whether s holds an encoding that decodes to a
+// character that can end a value: a percent-escape or entity candidate, or
+// full-width punctuation (U+FF01 to U+FF5E are EF BC 81 to EF BD 9E).
+func encodesDelimiters(s string) bool {
+	if strings.ContainsAny(s, "%&") {
+		return true
+	}
+	for i := strings.IndexByte(s, 0xEF); i >= 0 && i+1 < len(s); {
+		if c := s[i+1]; c == 0xBC || c == 0xBD {
+			return true
+		}
+		k := strings.IndexByte(s[i+1:], 0xEF)
+		if k < 0 {
+			break
+		}
+		i += 1 + k
+	}
+	return false
 }
 
 // subMatches retries a match that failed validation, over runs of its
@@ -340,9 +411,12 @@ func (e *Engine) Text(body []byte, st Stats) []byte {
 }
 
 // blockedKey returns the key rule that masks the value under key, if any.
+// The key is matched as written and normalized, so ｐａｓｓｗｏｒｄ or a soft
+// hyphen inside "password" is still the password key.
 func (e *Engine) blockedKey(key string) *keyRule {
+	norm, _ := normalize(key)
 	for i := range e.keyRules {
-		if e.keyRules[i].re.MatchString(key) {
+		if e.keyRules[i].re.MatchString(key) || (norm != key && e.keyRules[i].re.MatchString(norm)) {
 			return &e.keyRules[i]
 		}
 	}
@@ -414,6 +488,15 @@ func containsAny(s string, needles []string) bool {
 // at once, for text dense with matches, would cost several times its size.
 const matchChunk = 1024
 
+// findAll returns up to n matches of r in s (all of them for n < 0), as
+// regexp's FindAllStringSubmatchIndex does.
+func (r valueRule) findAll(s string, n int) [][]int {
+	if r.find != nil {
+		return r.find(s, n)
+	}
+	return r.re.FindAllStringSubmatchIndex(s, n)
+}
+
 // forEachMatch calls f with every match of r within the regions of s, a
 // chunk at a time. Each search starts one byte before where it may match,
 // so \b sees the byte before; a match starting on that byte is skipped.
@@ -432,7 +515,7 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 		for start <= z {
 			ca := max(0, start-1)
 			n := matchChunk
-			locs := r.re.FindAllStringSubmatchIndex(s[ca:cz], n)
+			locs := r.findAll(s[ca:cz], n)
 			for _, loc := range locs {
 				for k := range loc {
 					if loc[k] >= 0 {
@@ -445,7 +528,7 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 				// rule): finish the region from its start in one search,
 				// reporting only what follows the resume point.
 				ra := max(0, reg[0]-1)
-				locs = r.re.FindAllStringSubmatchIndex(s[ra:cz], -1)
+				locs = r.findAll(s[ra:cz], -1)
 				for _, loc := range locs {
 					for k := range loc {
 						if loc[k] >= 0 {
@@ -470,7 +553,7 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 				if cut == 0 {
 					// No gap: every match touches the next. Finish the
 					// region in one search.
-					locs = r.re.FindAllStringSubmatchIndex(s[ca:cz], -1)
+					locs = r.findAll(s[ca:cz], -1)
 					for _, loc := range locs {
 						for k := range loc {
 							if loc[k] >= 0 {
@@ -549,6 +632,11 @@ func isSpace(c byte) bool {
 func needleWindows(s, lower string, needles []string, before, after int) [][2]int {
 	var ws [][2]int
 	for _, n := range needles {
+		// Occurrences come in order, so the unwidened bounds only grow.
+		// Widening stops where the previous window's did once it reaches
+		// the previous unwidened bound: text without whitespace would
+		// otherwise be rescanned for every occurrence.
+		prevA, prevZ, wa, wz := -1, -1, 0, 0
 		for from := 0; ; {
 			k := strings.Index(lower[from:], n)
 			if k < 0 {
@@ -569,12 +657,21 @@ func needleWindows(s, lower string, needles []string, before, after int) [][2]in
 					c++
 				}
 			}
+			ua, uz := a, z
 			for a > 0 && !isSpace(s[a-1]) {
+				if a <= prevA {
+					a = wa
+					break
+				}
 				a--
+			}
+			if z <= wz && prevZ >= 0 && z >= prevZ {
+				z = wz
 			}
 			for z < len(s) && !isSpace(s[z]) {
 				z++
 			}
+			prevA, prevZ, wa, wz = ua, uz, a, z
 			ws = append(ws, [2]int{a, z})
 			if len(ws) > maxWindows(s) {
 				return [][2]int{{0, len(s)}}

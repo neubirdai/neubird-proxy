@@ -65,8 +65,9 @@ func loadSecrets(envFile string, offline bool) (*secrets, error) {
 	return s, sc.Err()
 }
 
-// placeholder satisfies every length rule (tokens need 32 characters).
-var placeholder = strings.Repeat("x", config.MinTokenLength)
+// placeholder satisfies every rule a secret is checked against: tokens need
+// 32 characters, and a join token is nbjt_ and 43 more.
+var placeholder = "nbjt_" + strings.Repeat("x", 43)
 
 func (s *secrets) lookup(name string) (string, bool) {
 	if v, ok := s.file[name]; ok && v != "" {

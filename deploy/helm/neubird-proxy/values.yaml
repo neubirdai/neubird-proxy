@@ -38,9 +38,10 @@ upstreamCA:
 # send NeuBird only its fingerprint (see the install notes).
 tunnelKey:
   # Generate a P-256 key in a Secret at install, kept across upgrades and
-  # left in place on uninstall. With `helm template`, generate it yourself
-  # (neubird-proxy keygen) and use existingSecret, or the key lands in your
-  # rendered YAML.
+  # left in place on uninstall. With `helm template` or Argo CD, generate it
+  # yourself (neubird-proxy keygen) and use existingSecret: they can't see
+  # the existing Secret, so every render would replace the key (dropping the
+  # tunnels), and the key would land in your rendered YAML.
   generate: true
   existingSecret: ""      # a Secret with key tunnel.key
 

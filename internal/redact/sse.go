@@ -41,6 +41,8 @@ type SSEReader struct {
 	out   []byte
 	chunk []byte
 	err   error
+
+	bomDone bool // a leading BOM has been looked for
 }
 
 func NewSSEReader(src io.ReadCloser, e *Engine, st Stats, maxEvent int64) *SSEReader {
@@ -235,6 +237,17 @@ func (r *SSEReader) Err() error {
 // event over the cap or not text, so the checks hold whether an event
 // arrives in pieces or in a single read.
 func (r *SSEReader) drain() error {
+	if !r.bomDone {
+		// The stream may start with a BOM, which EventSource skips; left
+		// in, it would make the first field name unknown.
+		if len(r.in) < len(utf8BOM) && bytes.HasPrefix(utf8BOM, r.in) {
+			return nil
+		}
+		if bytes.HasPrefix(r.in, utf8BOM) {
+			r.compactIn(len(utf8BOM))
+		}
+		r.bomDone = true
+	}
 	for {
 		end, next, resume := eventEnd(r.in, r.scan)
 		if end < 0 {

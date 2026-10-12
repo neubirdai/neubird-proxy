@@ -150,7 +150,7 @@ egress rules.
 
 **Behavior:**
 - Each pod keeps `connections_per_relay` tunnels to every relay address.
-- A dropped tunnel reconnects with exponential backoff (1 s to 60 s, with
+- A dropped tunnel reconnects with exponential backoff (1 s to 15 s, with
   jitter).
 - An outbound HTTP proxy from `HTTPS_PROXY` or `NO_PROXY` is used with
   `CONNECT`.
@@ -213,7 +213,7 @@ Who holds what, and what NeuBird sees:
 |---|---|---|
 | The systems' credentials (API tokens, OAuth tokens, APIM subscription keys) | NeuBird, in each of its connections | Yes: it sends them with each request |
 | Proxy token (`client_token_env`) | Both: the customer generates it (`neubird-proxy token`) and gives it to NeuBird | Yes. The proxy checks it and removes it; it never reaches a system |
-| Tunnel key | The customer; made in the cluster, never sent | No; only its public fingerprint |
+| Tunnel key | The customer; made in the cluster, never sent | No; only its public fingerprint. Guard it like the proxy token: whoever holds it can open a tunnel as this proxy and receive a share of NeuBird's requests, with the proxy token and the systems' credentials in them |
 | Join token | Issued by NeuBird, used once by the proxy | Yes (NeuBird issued it); the relay keeps only its hash |
 | `REDACTION_HMAC_KEY` | The customer | No |
 
@@ -231,8 +231,8 @@ How the proxy handles the systems' credentials:
   never carries a credential to another host.
 - **Nothing echoes or logs them.** `Set-Cookie` and `Ocp-Apim-*` response
   headers are stripped, secrets that appear in response bodies are masked
-  by the secret rules (see Rules), and the audit line holds no header
-  values, query values or credentials.
+  by the secret rules (see Rules), and the audit line holds no credentials,
+  query values or header values other than the sanitized `X-Forwarded-For`.
 - **Proxy values only from the environment.** Every `*_env` field and
   `${VAR}` resolves from the pod's environment; the config file holds
   names, never values.
@@ -274,9 +274,13 @@ secrets. Any other token gets a 401.
   allowlist, SSE comment and unknown lines are dropped, `id:` values and
   event names that aren't short names are masked.
 - **Before matching**, text is normalized: percent-escapes (`%40`), HTML
-  entities (`&#64;`, `&commat;`), full-width characters (`２１９`), and
-  invisible characters (zero-width space, soft hyphen) are decoded or
-  removed. The mask replaces the original bytes.
+  entities (`&#64;`, `&commat;`), full-width characters (`２１９`), other
+  scripts' digits (`٢١٩`, `𝟐𝟏𝟗`), and invisible characters (zero-width
+  space, soft hyphen, bidi marks, variation selectors) are decoded or
+  removed, in values and in JSON keys. URL credentials and `password=`-style
+  values are also matched as written, so an encoded `%40` or `%2F` in a
+  password doesn't end the match. A leading BOM doesn't stop a JSON body or
+  SSE stream from being read as one. The mask replaces the original bytes.
 
 ### Fail closed
 
@@ -366,8 +370,8 @@ neubird-proxy -config config.yaml -redact sample.json > redacted.json   # counts
 
 ## Config
 
-See [`deploy/config.example.yaml`](deploy/config.example.yaml), which is a
-locked-down example. Secrets never appear in the file. Every `*_env` field and
+See [`deploy/config.example.yaml`](deploy/config.example.yaml), a complete
+example for the tunnel. Secrets never appear in the file. Every `*_env` field and
 every `${VAR}` must resolve to a non-empty environment variable, or the proxy
 refuses to start. Unknown YAML fields are errors.
 
@@ -405,7 +409,7 @@ refuses to start. Unknown YAML fields are errors.
 | `redaction.custom[]` | none | `{name, regex}` value rules, applied after the builtins |
 | `redaction.allowed_values` | none | RE2 patterns; a match is left unmasked when a pattern matches all of it |
 | `redaction.mask` | `label` | `label` or `hmac` |
-| `redaction.hmac_key_env` | `REDACTION_HMAC_KEY` | Env var holding the HMAC key when `mask: hmac` |
+| `redaction.hmac_key_env` | `REDACTION_HMAC_KEY` | Env var holding the HMAC key when `mask: hmac`; at least 32 characters (`neubird-proxy token` makes one) |
 
 Validate before rolling out a ConfigMap change (v1 has no hot reload, so
 restart the pods); see Tools.
@@ -530,8 +534,9 @@ the relay's log, the audit line and the system), otherwise a new one.
 
 - **Tunnel only** (the Helm chart): no proxy port at all; requests arrive
   over the outbound tunnel.
-- **`:9090`** serves `/healthz`, `/readyz` and `/metrics`, cluster-internal
-  only.
+- **`:9090`** serves `/healthz`, `/readyz` and `/metrics` without auth. It
+  has no Service; the chart's NetworkPolicy (`networkPolicy.enabled`) limits
+  it to `metricsFrom`.
 - **Startup** logs the config's SHA-256, so every ConfigMap change is visible
   in the logs. It also logs a warning naming the hosts NeuBird may reach
   (and another when `hosts` includes `*`), `allow_http_upstreams`, and a

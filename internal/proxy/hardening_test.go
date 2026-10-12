@@ -346,7 +346,7 @@ func TestUpgradeThenNoFlush(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nhello")
+		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nX-Request-Id: upstream\r\n\r\nhello")
 		rw.Flush()
 	})
 	errLog := &syncBuffer{}
@@ -358,12 +358,16 @@ func TestUpgradeThenNoFlush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.WriteString(conn, "GET /elastic/ws HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "+token+"\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+	io.WriteString(conn, "GET /elastic/ws HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "+token+"\r\nX-Request-Id: abc-123\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
 	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	b, _ := io.ReadAll(conn)
 	conn.Close()
 	if !strings.Contains(string(b), "101") || !strings.Contains(string(b), "hello") {
 		t.Fatalf("upgrade: %q", b)
+	}
+	// The proxy's request id, once, on the 101 too.
+	if !strings.Contains(string(b), "X-Request-Id: abc-123\r\n") || strings.Contains(string(b), "upstream") {
+		t.Fatalf("upgrade request id: %q", b)
 	}
 	// The handler returns once the upgraded connection ends.
 	f.waitForAudit(t)
@@ -445,5 +449,52 @@ func TestLargeSSEEventFitsBudget(t *testing.T) {
 	// Delivered, or refused at once as too large: never stuck.
 	if resp.StatusCode == 200 && !strings.Contains(body, "data: aaa") && len(body) > 0 {
 		t.Fatalf("%d: %.100q", resp.StatusCode, body)
+	}
+}
+
+// Request trailers are headers too: with deny patterns set the body is read
+// whole, which fills them in, and none may reach the upstream.
+func TestRequestTrailersNotForwarded(t *testing.T) {
+	got := make(chan http.Header, 1)
+	f := newFixture(t, lockedConfig, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		got <- r.Trailer
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{}`)
+	})
+	req, _ := http.NewRequest("POST", f.proxy.URL+"/splunk/services/search/jobs", io.MultiReader(strings.NewReader("search=index%3Dmain")))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Trailer = http.Header{"Cookie": {"session=evil"}, "Authorization": {"Bearer smuggled"}}
+	resp, err := f.proxy.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if tr := <-got; len(tr) != 0 {
+		t.Fatalf("trailers forwarded: %v", tr)
+	}
+}
+
+// ReverseProxy clears the response header after relaying a 1xx; the
+// request id must still be on the final response.
+func TestRequestIDAfterEarlyHints(t *testing.T) {
+	f := newFixture(t, lockedConfig, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Link", "</a.css>; rel=preload")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Del("Link")
+		w.Header().Set("X-Request-Id", "upstream")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{}`)
+	})
+	resp, _ := f.do(t, "GET", "/splunk/services/search/jobs", map[string]string{"Authorization": "Bearer " + token, "X-Request-Id": "abc-123"})
+	if v := resp.Header.Values("X-Request-Id"); len(v) != 1 || v[0] != "abc-123" {
+		t.Fatalf("X-Request-Id = %q", v)
+	}
+	if resp.Header.Get("Link") != "" {
+		t.Fatal("1xx header leaked")
 	}
 }

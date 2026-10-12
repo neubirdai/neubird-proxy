@@ -76,8 +76,8 @@ one. Credential values are never logged.
 
 Responses are redacted before they leave: JSON value by value (including
 JSON inside strings), text and CSV whole-body, MCP event streams event by
-event, gzip decoded first. Encoded forms (`%40`, `&#64;`, full-width digits,
-zero-width characters) are normalized before matching.
+event, gzip decoded first. Encoded forms (`%40`, `&#64;`, full-width and other scripts' digits,
+zero-width and other invisible characters) are normalized before matching.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -86,7 +86,7 @@ zero-width characters) are normalized before matching.
 | `blocked_key_patterns` | | JSON keys whose values are always masked |
 | `allowed_values` | | Values left unmasked when a pattern matches all of them |
 | `mask` | `label` | `label` → `[REDACTED:EMAIL]`; `hmac` → `[REDACTED:EMAIL:3f1c…]`, the same value always giving the same token |
-| `hmac_key_env` | `REDACTION_HMAC_KEY` | Env var with the HMAC key, for `mask: hmac` |
+| `hmac_key_env` | `REDACTION_HMAC_KEY` | Env var with the HMAC key (32+ characters), for `mask: hmac` |
 
 **Fail closed.** A response the proxy can't redact (too large, binary,
 unsupported type or encoding, partial) is refused with `502 redaction_blocked`,
@@ -105,7 +105,7 @@ Write `config.yaml` (your `config` value, without the chart's part), then:
 ```sh
 IMG=<your registry>/neubird-proxy@sha256:...
 docker run --rm --entrypoint /neubird-proxy -v $PWD:/w -w /w \
-  -e NEUBIRD_PROXY_TOKEN=check-only-0123456789abcdef0123456 -e REDACTION_HMAC_KEY=x \
+  -e NEUBIRD_PROXY_TOKEN=check-only-0123456789abcdef0123456 -e REDACTION_HMAC_KEY=check-only-0123456789abcdef0123456 \
   $IMG validate -config config.yaml           # hosts, methods, risky settings
 # Ignore "tls is not set": that's the request listener, which the chart turns off.
 
@@ -140,5 +140,6 @@ becomes an FQDN pattern, which matches one label only (`a.domain`, not
 resolve a pattern, and no format can express `*`: allow your systems'
 address ranges instead (the chart's `networkPolicy.upstreams`, or your
 firewall). The policy selects the chart's pods by their
-`app: neubird-proxy` label. Apply it instead of the chart's `networkPolicy`
-(leave that disabled), and regenerate it when `hosts` changes.
+`app: neubird-proxy` label. It covers egress only: keep the chart's
+`networkPolicy` for ingress, or add your own, and regenerate the egress
+policy when `hosts` changes.
