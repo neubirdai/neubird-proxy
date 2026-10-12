@@ -73,6 +73,10 @@ func cmdPreview(args []string, stdout, stderr io.Writer) int {
 	sampleType := *ct
 	source := ""
 	if *live {
+		if conn.Name == config.DestinationsConnName {
+			fmt.Fprintln(stderr, "error: -live needs a connection; for neubird_destinations, capture a response and preview the file")
+			return 2
+		}
 		sample, sampleType, err = capture(cfg, engine, conn, *method, *path, *data)
 		if err != nil {
 			fmt.Fprintln(stderr, "error:", err)
@@ -106,6 +110,9 @@ func cmdPreview(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	res.source, res.connection, res.mask = source, conn.Name, cfg.Redaction.Mask
+	if conn.Name == config.DestinationsConnName {
+		res.connection = "neubird_destinations"
+	}
 	if cfg.Redaction.Mask == config.MaskHMAC && sec.missing[cfg.Redaction.HMACKeyEnv] {
 		res.notes = append(res.notes, "mask: hmac with a placeholder key: codes differ from production (pass the real key with -env-file)")
 	}
@@ -136,6 +143,10 @@ func pickConnection(cfg *config.Config, name string) (*config.Connection, error)
 	}
 	if len(cfg.Connections) == 1 {
 		return &cfg.Connections[0], nil
+	}
+	if len(cfg.Connections) == 0 && cfg.NeubirdDestinations != nil {
+		// The rules for every destination NeuBird names.
+		return cfg.NeubirdDestinations.Conn, nil
 	}
 	var names []string
 	for _, c := range cfg.Connections {
@@ -198,6 +209,12 @@ func redactSample(cfg *config.Config, engine *redact.Engine, conn *config.Connec
 
 	local := *cfg
 	local.Connections = append([]config.Connection(nil), cfg.Connections...)
+	if conn.Name == config.DestinationsConnName {
+		// Serve neubird_destinations' rules as a connection, so the sample
+		// comes from the local stand-in rather than a named destination.
+		local.Connections = append(local.Connections, *conn)
+		local.NeubirdDestinations = nil
+	}
 	var target *config.Connection
 	for i := range local.Connections {
 		if local.Connections[i].Name != conn.Name {

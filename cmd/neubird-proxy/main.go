@@ -261,7 +261,7 @@ func warnings(cfg *config.Config) []string {
 		out = append(out, "client_token_previous_env is set: two tokens are accepted until rotation is finished")
 	}
 	if d := cfg.NeubirdDestinations; d != nil {
-		out = append(out, fmt.Sprintf("neubird_destinations: open mode, NeuBird chooses the destination host within %s and supplies the credentials", strings.Join(d.Hosts, ", ")))
+		out = append(out, fmt.Sprintf("neubird_destinations: NeuBird chooses the destination host within %s and supplies the credentials", strings.Join(d.Hosts, ", ")))
 		if d.AnyHost() {
 			out = append(out, "neubird_destinations: hosts includes \"*\": any host name the pod can reach (only loopback, link-local and unspecified addresses are refused); restrict egress at the network")
 		}

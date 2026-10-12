@@ -226,6 +226,55 @@ func TestPreviewSample(t *testing.T) {
 	}
 }
 
+// With only neubird_destinations, preview applies its rules (here its field
+// allowlist); -live needs a connection.
+func TestPreviewDestinations(t *testing.T) {
+	cfg := writeFile(t, "config.yaml", `
+client_token_env: PROXY_TOKEN
+neubird_destinations:
+  hosts: ["*.acme.internal"]
+  response_fields: [id]
+`)
+	sample := writeFile(t, "sample.json", `{"id":"jane@example.com","note":"free text"}`)
+	code, out, _ := runCmd(t, cmdPreview, "-config", cfg, sample)
+	if code != 0 {
+		t.Fatalf("code %d:\n%s", code, out)
+	}
+	for _, pat := range []string{
+		`neubird_destinations,`, `\+\s+"id": "\[REDACTED:EMAIL\]"`, `\+\s+"note": "\[REDACTED:FIELD\]"`,
+	} {
+		matches(t, out, pat)
+	}
+	if code, _, errOut := runCmd(t, cmdPreview, "-config", cfg, "-env-file", envFile(t, "k"), "-live"); code != 2 || !strings.Contains(errOut, "-live needs a connection") {
+		t.Fatalf("-live: code %d, %s", code, errOut)
+	}
+}
+
+// A URL argument checks a neubird_destinations host: the patterns, then the
+// network.
+func TestTestDestination(t *testing.T) {
+	up := httptest.NewServer(http.NotFoundHandler())
+	defer up.Close()
+	cfg := writeFile(t, "config.yaml", `
+client_token_env: PROXY_TOKEN
+allow_http_upstreams: true
+neubird_destinations:
+  hosts: ["127.0.0.1", "*.acme.internal"]
+`)
+	env := envFile(t, "k")
+	code, out, _ := runCmd(t, cmdTest, "-config", cfg, "-env-file", env, up.URL)
+	if code != 0 {
+		t.Fatalf("code %d:\n%s", code, out)
+	}
+	for _, pat := range []string{`-> neubird_destinations`, `ok\s+hosts`, `ok\s+tcp`, `all 1 destinations OK`} {
+		matches(t, out, pat)
+	}
+	code, out, _ = runCmd(t, cmdTest, "-config", cfg, "-env-file", env, "https://other.example.com")
+	if code != 1 || !strings.Contains(out, "not in neubird_destinations.hosts") {
+		t.Fatalf("disallowed host: code %d:\n%s", code, out)
+	}
+}
+
 func TestPreviewRefusedAndText(t *testing.T) {
 	cfg := toolsConfig(t, "http://127.0.0.1:1")
 	bin := writeFile(t, "blob", "\x1f\x8b\x08\x00binary")

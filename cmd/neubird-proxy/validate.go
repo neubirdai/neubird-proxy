@@ -83,7 +83,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, c.Upstream, c.ClientAuth, methods, paths, tools, fields, mode)
 	}
 	if d := cfg.NeubirdDestinations; d != nil {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "(open mode)", strings.Join(d.Hosts, ","), d.Conn.ClientAuth,
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "neubird_destinations", strings.Join(d.Hosts, ","), d.Conn.ClientAuth,
 			allowHeaderOf(d.Conn.MethodSet), "any", "-", "all", "NeuBird credentials")
 	}
 	tw.Flush()
