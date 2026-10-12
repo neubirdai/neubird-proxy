@@ -638,42 +638,58 @@ func (s *Server) checkRequest(w http.ResponseWriter, c *config.Connection, r *ht
 			return reason, release, nil
 		}
 	}
-	candidates := []string{r.URL.RawQuery, string(body)}
-	for _, raw := range []string{r.URL.RawQuery, string(body)} {
+	if len(c.RequestDenyRes) == 0 {
+		return "", release, nil
+	}
+	// Each form the upstream might decode the request into is built,
+	// matched and dropped in turn, so at most one decoded copy is held
+	// (see requestBufferFactor).
+	match := func(cand string) string {
+		for i, re := range c.RequestDenyRes {
+			if re.MatchString(cand) {
+				return fmt.Sprintf("request matches request_deny_patterns[%d]", i)
+			}
+		}
+		return ""
+	}
+	bodyStr := string(body)
+	forms := []func() string{
+		func() string { return r.URL.RawQuery },
+		func() string { return bodyStr },
 		// Decoded leniently: one bad escape must not hide the rest from
 		// the patterns, since upstream decoders are lenient too.
-		if dec := lenientUnescape(raw); dec != raw {
-			candidates = append(candidates, dec)
+		func() string { return lenientUnescape(r.URL.RawQuery) },
+		func() string { return lenientUnescape(bodyStr) },
+	}
+	for _, form := range forms {
+		if reason := match(form()); reason != "" {
+			return reason, release, nil
 		}
 	}
 	// JSON string escapes (\u007c for |) are decoded by the upstream too.
-	if len(c.RequestDenyRes) > 0 {
-		dec, ok, err := jsonStrings(body)
-		if err != nil {
-			return "request body: " + err.Error(), release, nil
-		}
-		if ok {
-			candidates = append(candidates, dec)
-		}
-		// Lexically too, so a token a lenient upstream parser accepts and
-		// encoding/json doesn't (NaN, comments) can't stop the decoding.
-		if bytes.Contains(body, []byte(`\`)) {
-			candidates = append(candidates, jsonUnescapeLexical(body))
+	dec, ok, err := jsonStrings(body)
+	if err != nil {
+		return "request body: " + err.Error(), release, nil
+	}
+	if ok {
+		if reason := match(dec); reason != "" {
+			return reason, release, nil
 		}
 	}
-	for i, re := range c.RequestDenyRes {
-		for _, cand := range candidates {
-			if re.MatchString(cand) {
-				return fmt.Sprintf("request matches request_deny_patterns[%d]", i), release, nil
-			}
+	// Lexically too, so a token a lenient upstream parser accepts and
+	// encoding/json doesn't (NaN, comments) can't stop the decoding.
+	if bytes.Contains(body, []byte(`\`)) {
+		if reason := match(jsonUnescapeLexical(body)); reason != "" {
+			return reason, release, nil
 		}
 	}
 	return "", release, nil
 }
 
 // requestBufferFactor is how many times its size a request body may take
-// while checked: the body and its decoded copies.
-const requestBufferFactor = 4
+// while checked: the body, a string copy, and one decoded form at a time
+// (jsonStrings also holds its decoder's buffer while it builds its own).
+const requestBufferFactor = 5
 
 // lenientUnescape decodes %XX escapes and + as a space, leaving any
 // malformed escape as it is, as most form decoders do.

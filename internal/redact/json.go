@@ -31,9 +31,20 @@ func (e *Engine) JSON(body []byte, st Stats) ([]byte, error) {
 
 // JSONFields is JSON with a field allowlist; nil means no allowlist.
 func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, error) {
+	return e.jsonFields(body, st, fields, false)
+}
+
+// innerJSON redacts JSON held in a string value (MCP tool text, Splunk
+// _raw). Its numbers get the value rules too: the outer value stays a
+// string whatever they become, so there's no type to keep.
+func (e *Engine) innerJSON(body []byte, st Stats) ([]byte, error) {
+	return e.jsonFields(body, st, nil, true)
+}
+
+func (e *Engine) jsonFields(body []byte, st Stats, fields *Fields, numbersAsText bool) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
-	w := &jsonWriter{e: e, st: st, fields: fields}
+	w := &jsonWriter{e: e, st: st, fields: fields, numbersAsText: numbersAsText}
 	w.out.Grow(len(body))
 	w.enc = json.NewEncoder(&w.scratch)
 	w.enc.SetEscapeHTML(false)
@@ -77,6 +88,9 @@ type jsonWriter struct {
 	scratch bytes.Buffer
 	enc     *json.Encoder
 	depth   int
+	// numbersAsText applies value rules to numbers, writing a changed one
+	// as a string (see innerJSON).
+	numbersAsText bool
 }
 
 // MaxJSONDepth is the deepest nesting redacted as JSON. Deeper input isn't
@@ -177,7 +191,7 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 		case blocked != nil:
 			w.blocked(blocked, t)
 		case looksLikeJSON(t):
-			if inner, err := w.e.JSON([]byte(t), w.st); err == nil {
+			if inner, err := w.e.innerJSON([]byte(t), w.st); err == nil {
 				w.str(string(inner))
 				break
 			}
@@ -190,6 +204,12 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 			w.fieldMask(t.String())
 		} else if blocked != nil {
 			w.blocked(blocked, t.String())
+		} else if r := t.String(); w.numbersAsText {
+			if m := w.e.String(r, w.st); m != r {
+				w.str(m)
+			} else {
+				w.out.WriteString(r)
+			}
 		} else {
 			w.out.WriteString(t.String())
 		}

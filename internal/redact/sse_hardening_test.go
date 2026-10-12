@@ -176,3 +176,19 @@ func TestScalarDocumentsRedactedAsText(t *testing.T) {
 		t.Fatal("bare number accepted as a JSON document")
 	}
 }
+
+// Numbers in JSON held in a string get the value rules: the outer value
+// is a string either way.
+func TestInnerJSONNumbersRedacted(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for _, in := range []string{`{"s":"{\"cc\":4111111111111111}"}`, `{"s":"[4111111111111111]"}`} {
+		out, err := e.JSON([]byte(in), Stats{})
+		if err != nil || strings.Contains(string(out), "4111") {
+			t.Errorf("%s: %s %v", in, out, err)
+		}
+	}
+	// A real JSON document keeps its numbers (and their type).
+	if out, _ := e.JSON([]byte(`{"n":4111111111111111}`), Stats{}); string(out) != `{"n":4111111111111111}` {
+		t.Errorf("top-level number changed: %s", out)
+	}
+}
