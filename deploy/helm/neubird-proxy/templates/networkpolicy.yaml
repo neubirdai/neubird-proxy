@@ -1,6 +1,9 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $np := .Values.networkPolicy }}
-{{- if not $np.relayCIDRs }}{{ fail "networkPolicy.relayCIDRs is required when networkPolicy.enabled: NeuBird's relay addresses" }}{{ end }}
+{{- $inbound := include "neubird-proxy.inbound" . }}
+{{- if $inbound }}
+{{- if not $np.inboundFrom }}{{ fail "networkPolicy.inboundFrom is required with mode inbound when networkPolicy.enabled: who may reach the proxy (your gateway)" }}{{ end }}
+{{- else if not $np.relayCIDRs }}{{ fail "networkPolicy.relayCIDRs is required when networkPolicy.enabled: NeuBird's relay addresses" }}{{ end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -10,23 +13,30 @@ spec:
   podSelector:
     matchLabels: {{- include "neubird-proxy.selectorLabels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
-  # The proxy only dials out; nothing connects to it except metrics scrapers.
+  # In mode tunnel the proxy only dials out, and nothing connects to it
+  # except metrics scrapers; in mode inbound, inboundFrom reaches 8443.
   ingress:
+    {{- if $inbound }}
+    - from: {{- toYaml $np.inboundFrom | nindent 8 }}
+      ports: [{port: 8443, protocol: TCP}]
+    {{- end }}
     {{- if $np.metricsFrom }}
     - from: {{- toYaml $np.metricsFrom | nindent 8 }}
       ports: [{port: 9090, protocol: TCP}]
-    {{- else }} []
+    {{- else if not $inbound }} []
     {{- end }}
   egress:
     - to: {{- toYaml $np.dnsPeers | nindent 8 }}
       ports:
         - {port: 53, protocol: UDP}
         - {port: 53, protocol: TCP}
+    {{- if not $inbound }}
     - to:
         {{- range $np.relayCIDRs }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports: [{port: 443, protocol: TCP}]
+    {{- end }}
     {{- range $np.upstreams }}
     - to: [{ipBlock: {cidr: {{ .cidr }}}}]
       ports:

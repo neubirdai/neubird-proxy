@@ -57,6 +57,50 @@ for set in config.upstream_ca_file=/x image.repository= env.existingSecret= tunn
 done
 echo "ok    missing or invalid required values are refused"
 
+# Mode inbound: a listener with TLS and client certificates, no tunnel.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+  -subj "/CN=neubird-proxy" -keyout "$W/tls.key" -out "$W/tls.crt" 2>/dev/null
+iargs=(-f /chart/ci/inbound-values.yaml --set-file inbound.clientCA.cert=/w/ca.crt)
+helm lint /chart "${iargs[@]}" >/dev/null || fail "helm lint (inbound)"
+helm template p /chart "${iargs[@]}" > "$W/in.yaml" || fail "helm template (inbound)"
+python3 - "$W" <<'PY2'
+import sys
+w = sys.argv[1]
+config, inblock = [], False
+for line in open(w + "/in.yaml").read().splitlines():
+    if inblock:
+        if line.startswith("    ") or not line.strip():
+            config.append(line[4:])
+            continue
+        inblock = False
+    if line == "  config.yaml: |":
+        inblock = True
+if not config:
+    sys.exit("config.yaml not found in the rendered inbound chart")
+open(w + "/in-config.yaml", "w").write("\n".join(config).strip() + "\n")
+PY2
+sed -e "s|/etc/neubird-proxy/tls/|$W/|" -e "s|/etc/neubird-proxy/client-ca/ca.crt|$W/ca.crt|" \
+  "$W/in-config.yaml" > "$W/in-local.yaml"
+NEUBIRD_PROXY_TOKEN=$T REDACTION_HMAC_KEY=$T \
+  "$W/neubird-proxy" validate -config "$W/in-local.yaml" > "$W/in-validate.txt" || { cat "$W/in-validate.txt"; fail "rendered inbound config invalid"; }
+grep -q '^listen: :8443' "$W/in-config.yaml" || fail "inbound listen not set"
+grep -q 'client_ca_file:' "$W/in-config.yaml" || fail "inbound.clientCA did not set tls.client_ca_file"
+if grep -qE '^    tunnel:|tunnel\.key|relay-ca\.crt' "$W/in.yaml"; then fail "mode inbound rendered tunnel parts"; fi
+grep -q '^kind: Service$' "$W/in.yaml" || fail "mode inbound rendered no Service"
+grep -q 'port: 8443' "$W/in.yaml" || fail "NetworkPolicy does not open 8443"
+if grep -q '^kind: Service$' "$W/out.yaml"; then fail "mode tunnel rendered a Service"; fi
+echo "ok    mode inbound renders a config this build accepts, with no tunnel"
+
+for set in mode=bogus inbound.tls.existingSecret= networkPolicy.inboundFrom=null 'tunnel.relays={r.example.com:443}' config.listen=:9443; do
+  if helm template p /chart "${iargs[@]}" --set "$set" >/dev/null 2>&1; then fail "inbound rendered with --set $set"; fi
+done
+helm template p /chart -f /chart/ci/inbound-values.yaml --set inbound.tls.existingSecret= --set inbound.allowPlainHTTP=true >/dev/null \
+  || fail "inbound with allowPlainHTTP did not render"
+if helm template p /chart "${iargs[@]}" --set inbound.tls.existingSecret= --set inbound.allowPlainHTTP=true >/dev/null 2>&1; then
+  fail "inbound rendered a client CA without TLS"
+fi
+echo "ok    mode inbound refuses missing or conflicting values"
+
 # What ships to customers: the packaged chart must not name NeuBird's
 # internal registries, tenants, clusters or repositories.
 helm package /chart -d /w >/dev/null || fail "helm package"

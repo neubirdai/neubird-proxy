@@ -1,3 +1,30 @@
+{{- if include "neubird-proxy.inbound" . -}}
+neubird-proxy {{ .Chart.AppVersion }}: inbound, Service {{ include "neubird-proxy.fullname" . }}:{{ .Values.inbound.service.port }}
+({{ if .Values.inbound.tls.existingSecret }}https{{ if include "neubird-proxy.hasClientCA" . }}, client certificates required{{ end }}{{ else }}plain http: TLS must end in front of the pod{{ end }}).
+
+Point your gateway's backend at
+
+   {{ if .Values.inbound.tls.existingSecret }}https{{ else }}http{{ end }}://{{ include "neubird-proxy.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.inbound.service.port }}
+
+and have it send the proxy token (NEUBIRD_PROXY_TOKEN in Secret {{ .Values.env.existingSecret }})
+the way config.client_auth says. Check each system from inside the pod:
+
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "neubird-proxy.fullname" . }} -- \
+     /neubird-proxy test -config /etc/neubird-proxy/config.yaml <connection | https://host[:port]>
+
+{{- if not .Values.networkPolicy.enabled }}
+
+networkPolicy is off: anything in the cluster can reach port 8443. Turn it on
+with networkPolicy.inboundFrom set to your gateway.
+{{- end }}
+
+The TLS certificate is read at startup: after renewing Secret
+{{ .Values.inbound.tls.existingSecret | default "(none)" }}, run kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "neubird-proxy.fullname" . }}.
+
+Revoke access at any time by scaling this Deployment to 0, or by changing
+NEUBIRD_PROXY_TOKEN and restarting it (kubectl rollout restart): pods read
+the token at startup.
+{{- else -}}
 neubird-proxy {{ .Chart.AppVersion }}: tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, relays {{ join ", " .Values.tunnel.relays }}.
 
 The replicas turn Ready once their tunnels are up (don't use --wait the first
@@ -28,4 +55,5 @@ the token at startup.
 {{- if and .Values.tunnelKey.generate (not .Values.tunnelKey.existingSecret) }}
 
 The tunnel key is in Secret {{ include "neubird-proxy.keySecret" . }} (kept on uninstall).
+{{- end }}
 {{- end }}

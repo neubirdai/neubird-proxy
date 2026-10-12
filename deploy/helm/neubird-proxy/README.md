@@ -13,6 +13,9 @@ You set once which hosts NeuBird may reach (`neubird_destinations`). Systems
 are then added, changed and removed in NeuBird, each as a connection with
 its own URL and credentials, without changing the proxy.
 
+That is the default, `mode: tunnel`. With `mode: inbound` the proxy instead
+listens on a Service behind something you run (see Mode inbound).
+
 ## What you get from NeuBird
 
 | Item | Used as |
@@ -66,19 +69,70 @@ deploy/neubird-proxy -- /neubird-proxy fingerprint
 /etc/neubird-proxy/tunnel/tunnel.key`); the pods turn Ready once NeuBird
 records it.
 
+## Mode inbound
+
+For a proxy that sits behind your own gateway, for example an API gateway
+that NeuBird already calls, with the proxy between it and your systems:
+
+```
+NeuBird ──▶ your API gateway ──▶ neubird-proxy (Service :8443) ──▶ your systems
+```
+
+There's no tunnel, relay CA or tunnel key; `tunnel`, `relayCA` and
+`tunnelKey` are unused, and `tunnel.relays` must stay empty. The chart sets
+`listen: :8443` and `tls`, and adds a Service.
+
+1. Create a `kubernetes.io/tls` Secret for the listener, with a certificate
+   your gateway trusts for the Service's name:
+   ```sh
+   kubectl -n neubird create secret tls neubird-proxy-tls --cert=tls.crt --key=tls.key
+   ```
+   The proxy reads it at startup: after renewing it, run `kubectl rollout restart`.
+2. Install with:
+   ```yaml
+   mode: inbound
+   inbound:
+     tls: {existingSecret: neubird-proxy-tls}
+   networkPolicy:
+     enabled: true
+     inboundFrom: [{ipBlock: {cidr: <your gateway's subnet>}}]
+     upstreams: [...]
+   ```
+   and `--set-file inbound.clientCA.cert=gateway-client-ca.crt` to require
+   your gateway's client certificate (mutual TLS) as well as the token.
+3. Point the gateway's backend at `https://<release>-neubird-proxy.<namespace>.svc:8443`
+   (or the internal load balancer, with `inbound.service.type: LoadBalancer`
+   and your cloud's internal-LB annotation in `inbound.service.annotations`).
+   The gateway sends the proxy token the way `config.client_auth` says, and
+   for `neubird_destinations`, `X-Neubird-Destination` naming the system and
+   its credentials as `X-Neubird-Upstream-<Header>`.
+
+Behind a load balancer, `networkPolicy.inboundFrom` sees the address the
+load balancer forwards from: with the default `externalTrafficPolicy:
+Cluster` that is a node's, so allow the nodes' range too, or use the
+gateway's in-cluster pods or `ipBlock` when it calls the Service directly.
+
+`inbound.allowPlainHTTP: true` turns TLS off on the listener, for when it
+ends in front of the pod (a service-mesh sidecar); the proxy warns at
+startup.
+
 ## Values
 
 | Value | Required | |
 |---|---|---|
 | `image.repository`, `image.digest` (or `image.tag`) | yes | Where you loaded the image |
-| `tunnel.relays`, `tunnel.tenant`, `tunnel.proxy` | yes | From NeuBird; `proxy` is your name for this deployment |
-| `relayCA.cert` or `relayCA.existingConfigMap` | yes | The relay CA NeuBird sent (key `relay-ca.crt`) |
+| `mode` | default `tunnel` | `tunnel`: dial out to NeuBird's relay. `inbound`: listen on a Service behind your gateway |
+| `tunnel.relays`, `tunnel.tenant`, `tunnel.proxy` | mode `tunnel` | From NeuBird; `proxy` is your name for this deployment |
+| `relayCA.cert` or `relayCA.existingConfigMap` | mode `tunnel` | The relay CA NeuBird sent (key `relay-ca.crt`) |
+| `inbound.tls.existingSecret` | mode `inbound` | A `kubernetes.io/tls` Secret for the listener; or `inbound.allowPlainHTTP: true` |
+| `inbound.clientCA.cert` or `inbound.clientCA.existingConfigMap` | | Mode `inbound`: require client certificates this CA signed (key `ca.crt`) |
+| `inbound.service.type`, `.port`, `.annotations`, `.loadBalancerSourceRanges` | default `ClusterIP`, `8443` | Mode `inbound`: the Service in front of the proxy |
 | `env.existingSecret` | yes | Your Secret: `NEUBIRD_PROXY_TOKEN`, `REDACTION_HMAC_KEY`, `NEUBIRD_JOIN_TOKEN` |
 | `config` | yes | `neubird_destinations` (the hosts NeuBird may reach), redaction, limits: see [configuration.md](docs/configuration.md). `${VAR}` comes from `env` |
 | `tunnel.joinTokenEnv` | default `NEUBIRD_JOIN_TOKEN` | Env var with NeuBird's join token; empty or missing means send the fingerprint instead |
 | `tunnelKey.generate` | default `true` | Key generated in a Secret at install, kept on upgrade and uninstall |
 | `tunnelKey.existingSecret` | | Bring your own key (`neubird-proxy keygen`), key `tunnel.key` |
-| `networkPolicy.enabled` | default `false` | No inbound; outbound only DNS, `relayCIDRs`:443, and your systems' ranges (`upstreams`) |
+| `networkPolicy.enabled` | default `false` | Inbound only `metricsFrom` on 9090 (and mode `inbound`: `inboundFrom` on 8443, required); outbound only DNS, `relayCIDRs`:443 (mode `tunnel`), and your systems' ranges (`upstreams`) |
 | `replicaCount` | default `2` | NeuBird monitors `replicaCount × tunnel.connectionsPerRelay` tunnels |
 | `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `imagePullSecrets` | | As usual |
 
@@ -95,8 +149,9 @@ Secrets in the namespace can read it either way.
 - Runs as non-root (65532), read-only root filesystem, no capabilities,
   `RuntimeDefault` seccomp: fits Pod Security `restricted`.
 - No service-account token, no RBAC, no CRDs, no cluster-scoped objects.
-- Only outbound connections. The admin port (9090: health, metrics) has no
-  Service; with `networkPolicy.enabled` only `metricsFrom` reaches it.
+- Only outbound connections in mode `tunnel`; in mode `inbound`, only port
+  8443 is exposed. The admin port (9090: health, metrics) has no Service;
+  with `networkPolicy.enabled` only `metricsFrom` reaches it.
 - Rollouts wait for a tunnel on each new replica, so a bad key or CA stops
   the rollout instead of taking the proxy down.
 

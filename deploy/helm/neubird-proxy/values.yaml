@@ -1,4 +1,5 @@
-# neubird-proxy chart values. Required: image, tunnel, relayCA, env.
+# neubird-proxy chart values. Required: image, env, and for mode tunnel
+# (the default) tunnel and relayCA; for mode inbound, inbound.tls.
 
 # The image is shipped to you separately: load it into your registry and
 # point here, by digest (preferred) or tag.
@@ -11,7 +12,35 @@ imagePullSecrets: []      # [{name: my-registry-creds}]
 
 replicaCount: 2
 
-# Your dedicated relay, from NeuBird.
+# How requests reach the proxy.
+#   tunnel:  the proxy dials out to your NeuBird relay; nothing connects in.
+#   inbound: the proxy listens on a Service (port 8443) behind something you
+#            run, such as an API gateway in front of your systems. No tunnel,
+#            relay CA or tunnel key; tunnel, relayCA and tunnelKey are unused.
+mode: tunnel
+
+# mode: inbound only.
+inbound:
+  # TLS on the listener: a kubernetes.io/tls Secret (tls.crt, tls.key).
+  # Required unless allowPlainHTTP. The proxy reads it at startup, so restart
+  # the pods after renewing it (kubectl rollout restart).
+  tls:
+    existingSecret: ""
+  # Mutual TLS: only clients presenting a certificate this CA signed (your
+  # gateway's client certificate) get through, in addition to the token.
+  clientCA:
+    cert: ""                # PEM bundle, or:
+    existingConfigMap: ""   # a ConfigMap with key ca.crt
+  # Plain HTTP on the listener, only when TLS ends in front of the pod
+  # (a service-mesh sidecar). The proxy logs a warning at startup.
+  allowPlainHTTP: false
+  service:
+    type: ClusterIP         # or LoadBalancer, with an internal-LB annotation
+    port: 8443
+    annotations: {}         # e.g. service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    loadBalancerSourceRanges: []
+
+# mode: tunnel only. Your dedicated relay, from NeuBird.
 tunnel:
   relays: []              # ["<tenant>.tunnel.neubird.ai:443"]
   tenant: ""              # your NeuBird tenant
@@ -53,8 +82,9 @@ env:
 
 # The proxy's configuration (docs/configuration.md): the hosts NeuBird may
 # reach (neubird_destinations), redaction, limits. The chart sets the rest:
-# the tunnel section (from `tunnel` above), listen: off and admin_listen:
-# :9090. ${VAR} placeholders are filled from env.
+# admin_listen: :9090, and either the tunnel section (from `tunnel` above)
+# with listen: off, or (mode inbound) listen: :8443 and tls (from
+# `inbound`). ${VAR} placeholders are filled from env.
 config:
   client_token_env: NEUBIRD_PROXY_TOKEN
   # neubird_destinations:
@@ -71,12 +101,13 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
-# Off by default. When on: no inbound traffic except metricsFrom on 9090;
-# outbound only DNS, the relays (relayCIDRs, port 443) and your systems
-# (upstreams).
+# Off by default. When on: inbound only metricsFrom on 9090, and (mode
+# inbound) inboundFrom on 8443; outbound only DNS, the relays (relayCIDRs,
+# port 443, mode tunnel) and your systems (upstreams).
 networkPolicy:
   enabled: false
-  relayCIDRs: []           # NeuBird's relay addresses, e.g. ["203.0.113.10/32"]
+  relayCIDRs: []           # mode tunnel: NeuBird's relay addresses, e.g. ["203.0.113.10/32"]
+  inboundFrom: []          # mode inbound: NetworkPolicyPeers allowed to reach 8443, e.g. [{ipBlock: {cidr: 10.30.0.0/24}}]
   upstreams: []            # [{cidr: 10.20.0.0/16, ports: [443]}]
   metricsFrom: []          # NetworkPolicyPeers allowed to scrape :9090
   dnsPeers:                # where DNS is answered
