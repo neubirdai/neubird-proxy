@@ -64,7 +64,7 @@ type Budget interface {
 var eventNameRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 
 // sseFactor is how many times its size redacting an event takes.
-const sseFactor = 12
+const sseFactor = 16
 
 // pendingChunk is the granularity of reservations for buffered input.
 const pendingChunk = 1 << 20
@@ -303,6 +303,9 @@ func (r *SSEReader) event(ev []byte) []byte {
 	// data keeps its place.
 	var out, data, after bytes.Buffer
 	sawData := false
+	// Clients use only the last event and id line of an event, so only
+	// those are kept: each line would otherwise grow to a mask.
+	var lastEvent, lastID string
 	emit := func(text string) {
 		w := &out
 		if sawData {
@@ -341,14 +344,10 @@ func (r *SSEReader) event(ev []byte) []byte {
 				break
 			}
 			emit(":" + r.e.String(l[1:], r.st))
-		case r.fields != nil && field == "event" && !eventNameRe.MatchString(value):
-			// Event types are short names (message, ping); anything else is
-			// data the allowlist didn't approve.
-			emit("event: " + r.e.mask("FIELD", value))
-			r.st["field_not_allowed"]++
-		case r.fields != nil && field == "id":
-			// The id is opaque to the agent; only resumption uses it.
-			emit("id: " + r.e.mask("FIELD", value))
+		case field == "event":
+			lastEvent = value
+		case field == "id":
+			lastID = value
 		default:
 			// event, id and unknown fields. A redacted id breaks resumption
 			// via Last-Event-ID for that event, which is the safe failure.
@@ -356,6 +355,31 @@ func (r *SSEReader) event(ev []byte) []byte {
 		}
 	})
 
+	if lastEvent != "" || lastID != "" {
+		var head bytes.Buffer
+		switch {
+		case lastEvent == "":
+		case r.fields != nil && !eventNameRe.MatchString(lastEvent):
+			// Event types are short names (message, ping); anything else is
+			// data the allowlist didn't approve.
+			r.st["field_not_allowed"]++
+			head.WriteString("event: " + r.e.mask("FIELD", lastEvent) + "\n")
+		default:
+			head.WriteString("event: " + r.e.String(lastEvent, r.st) + "\n")
+		}
+		switch {
+		case lastID == "":
+		case r.fields != nil:
+			// The id is opaque to the agent; only resumption uses it.
+			head.WriteString("id: " + r.e.mask("FIELD", lastID) + "\n")
+		default:
+			// A redacted id breaks resumption via Last-Event-ID for that
+			// event, which is the safe failure.
+			head.WriteString("id: " + r.e.String(lastID, r.st) + "\n")
+		}
+		head.Write(out.Bytes())
+		out = head
+	}
 	if sawData {
 		payload := data.Bytes()
 		redacted, err := r.e.JSONFields(payload, r.st, r.fields)

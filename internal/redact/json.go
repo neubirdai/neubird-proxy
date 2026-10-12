@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // JSON masks string values inside one or more concatenated JSON documents
@@ -31,21 +32,24 @@ func (e *Engine) JSON(body []byte, st Stats) ([]byte, error) {
 
 // JSONFields is JSON with a field allowlist; nil means no allowlist.
 func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, error) {
-	return e.jsonFields(body, st, fields, false)
+	return e.jsonFields(bytes.NewReader(body), len(body), st, fields, false)
 }
 
 // innerJSON redacts JSON held in a string value (MCP tool text, Splunk
 // _raw). Its numbers get the value rules too: the outer value stays a
 // string whatever they become, so there's no type to keep.
-func (e *Engine) innerJSON(body []byte, st Stats) ([]byte, error) {
-	return e.jsonFields(body, st, nil, true)
+//
+// It reads the string in place: a copy would add its size again for every
+// such string while the outer document is still held.
+func (e *Engine) innerJSON(s string, st Stats) ([]byte, error) {
+	return e.jsonFields(strings.NewReader(s), len(s), st, nil, true)
 }
 
-func (e *Engine) jsonFields(body []byte, st Stats, fields *Fields, numbersAsText bool) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
+func (e *Engine) jsonFields(body io.Reader, size int, st Stats, fields *Fields, numbersAsText bool) ([]byte, error) {
+	dec := json.NewDecoder(body)
 	dec.UseNumber()
 	w := &jsonWriter{e: e, st: st, fields: fields, numbersAsText: numbersAsText}
-	w.out.Grow(len(body))
+	w.out.Grow(size)
 	w.enc = json.NewEncoder(&w.scratch)
 	w.enc.SetEscapeHTML(false)
 
@@ -193,7 +197,7 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 		case looksLikeJSON(t) && !w.numbersAsText:
 			// One level only (Splunk _raw, MCP tool text): each level holds
 			// its own copies, so deeper nesting is redacted as text.
-			if inner, err := w.e.innerJSON([]byte(t), w.st); err == nil {
+			if inner, err := w.e.innerJSON(t, w.st); err == nil {
 				w.str(string(inner))
 				break
 			}

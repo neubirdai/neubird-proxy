@@ -590,19 +590,20 @@ Ranges run from operational logs with no PII to PII in every event.
   about 10–15% more total time than buffering did, in exchange for an
   immediate first byte.
 
-Redacting a buffered body takes 6–11× its size in memory (measured; one
-long JSON string is the worst case). So memory is budgeted, not just
+Redacting a buffered body takes 5–11× its size in memory, and up to about
+14× for adversarial bodies (measured; JSON held in strings and
+entity-heavy text are the worst cases). So memory is budgeted, not just
 counted:
 - At startup the proxy reads its container's memory limit, sets the Go
   runtime's to 90% of it (unless `GOMEMLIMIT` is set), and lets buffered
   bodies take three quarters of it together.
-- Each buffered body reserves 12× its size (its `Content-Length`, or
+- Each buffered body reserves 16× its size (its `Content-Length`, or
   `max_body_bytes` if it has none) and waits if there isn't room. Small API
   and MCP responses run side by side; large ones take turns.
 - If one body of `max_body_bytes` couldn't fit even alone, bodies are capped
   lower to fit, and larger ones fail closed with `body_too_large`. The
-  startup log says so. With the 512 MiB limit the cap is 32 MiB, above the
-  20 MiB default; at 256 MiB it would be 16 MiB.
+  startup log says so. With the 512 MiB limit the cap is 24 MiB, above the
+  20 MiB default; at 256 MiB it would be 12 MiB.
 - A body over the cap is refused as soon as the proxy has read past the
   cap, not after decoding it.
 - `max_concurrent_buffered` (default 4) still limits how many are buffered at

@@ -42,9 +42,9 @@ func TestMemoryLimitCapsBufferedBodies(t *testing.T) {
 		}
 		jsonHandler(body(n))(w, r)
 	})
-	// Three quarters of 32 KiB, divided by bufferFactor: 2 KiB per body.
-	if got := f.srv.SetMemoryLimit(32 << 10); got != 2<<10 {
-		t.Fatalf("max buffered body %d, want 2048", got)
+	// Three quarters of 40 KiB, divided by bufferFactor: 1920 bytes per body.
+	if got := f.srv.SetMemoryLimit(40 << 10); got != 1920 {
+		t.Fatalf("max buffered body %d, want 1920", got)
 	}
 	if resp, b := f.do(t, "GET", "/splunk/small", bearer); resp.StatusCode != 200 {
 		t.Fatalf("small body: %d %s", resp.StatusCode, b)

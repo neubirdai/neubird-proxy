@@ -231,3 +231,15 @@ func (o oneByte) Read(p []byte) (int, error) {
 	}
 	return o.r.Read(p[:1])
 }
+
+// Only the last event and id lines of an event are kept: clients use no
+// others, and a flood of them would grow into masks.
+func TestSSEKeepsLastEventAndID(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	f, _ := NewFields([]string{"jsonrpc"})
+	in := strings.Repeat("id\nevent: Jane Smith\n", 1000) + "id: 9\nevent: message\ndata: {}\n\n"
+	out, _ := io.ReadAll(NewSSEReader(io.NopCloser(strings.NewReader(in)), e, Stats{}, 1<<20).WithFields(f))
+	if len(out) > 200 || strings.Count(string(out), "id:") != 1 || !strings.Contains(string(out), "event: message") {
+		t.Fatalf("%d bytes: %.300q", len(out), out)
+	}
+}

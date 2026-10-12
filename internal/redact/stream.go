@@ -47,7 +47,7 @@ func (s *JSONStream) WithActivity(f func(busy bool)) *JSONStream {
 
 // jsonFactor is how many times its size decoding and redacting a document
 // may take.
-const jsonFactor = 12
+const jsonFactor = 16
 
 // WithBudget accounts for each later document while it's decoded: the
 // stream waits for a document's first byte outside the budget, then

@@ -841,99 +841,129 @@ func checkMCPTools(body []byte, tools map[string]bool) string {
 	if len(trimmed) == 0 {
 		return ""
 	}
-	var raws []json.RawMessage
+	// Walked one message at a time, keeping only the keys read: a batch
+	// of many tiny elements must not cost tens of times its size.
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	if trimmed[0] == '[' {
-		if err := json.Unmarshal(trimmed, &raws); err != nil {
+		if _, err := dec.Token(); err != nil {
 			return "body is not JSON-RPC"
 		}
-	} else {
-		raws = []json.RawMessage{trimmed}
+		for dec.More() {
+			if reason := checkMCPMessage(dec, tools); reason != "" {
+				return reason
+			}
+		}
+		if tok, err := dec.Token(); err != nil || tok != json.Delim(']') {
+			return "body is not JSON-RPC"
+		}
+	} else if reason := checkMCPMessage(dec, tools); reason != "" {
+		return reason
 	}
-	for _, raw := range raws {
-		m, err := strictObject(raw)
-		if err != nil {
-			return "body is not JSON-RPC: " + err.Error()
-		}
-		var method string
-		if v, ok := m["method"]; ok && json.Unmarshal(v, &method) != nil {
-			return "body is not JSON-RPC"
-		}
-		if method != "tools/call" {
-			continue
-		}
-		params, err := strictObject(m["params"])
-		if err != nil {
-			return "tools/call params: " + err.Error()
-		}
-		var name string
-		if err := json.Unmarshal(params["name"], &name); err != nil {
-			return "tools/call without a tool name"
-		}
-		if !tools[name] {
-			return fmt.Sprintf("MCP tool %q is not in mcp_tools", name)
-		}
+	if _, err := dec.Token(); err != io.EOF {
+		return "body is not JSON-RPC: data after the message"
 	}
 	return ""
 }
 
-// foldKey maps every rune to the smallest in its Unicode simple-fold
-// orbit, so two keys fold equal exactly when strings.EqualFold says so.
-func foldKey(s string) string {
-	return strings.Map(func(r rune) rune {
-		min := r
-		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-			if f < min {
-				min = f
-			}
-		}
-		return min
-	}, s)
+// checkMCPMessage reads one JSON-RPC message from dec and refuses a
+// tools/call naming a tool not in tools.
+func checkMCPMessage(dec *json.Decoder, tools map[string]bool) string {
+	m, err := readObject(dec, "method", "params")
+	if err != nil {
+		return "body is not JSON-RPC: " + err.Error()
+	}
+	var method string
+	if v, ok := m["method"]; ok && json.Unmarshal(v, &method) != nil {
+		return "body is not JSON-RPC"
+	}
+	if method != "tools/call" {
+		return ""
+	}
+	pd := json.NewDecoder(bytes.NewReader(m["params"]))
+	params, err := readObject(pd, "name")
+	if err != nil {
+		return "tools/call params: " + err.Error()
+	}
+	if _, err := pd.Token(); err != io.EOF {
+		return "tools/call params: data after the object"
+	}
+	var name string
+	if err := json.Unmarshal(params["name"], &name); err != nil {
+		return "tools/call without a tool name"
+	}
+	if !tools[name] {
+		return fmt.Sprintf("MCP tool %q is not in mcp_tools", name)
+	}
+	return ""
 }
 
-// strictObject decodes a JSON object whose keys are unambiguous: a key
-// that repeats, or differs from another only in case, is refused, since
-// parsers disagree on which one wins (Go's encoding/json matches field
-// names case-insensitively and keeps the last).
-func strictObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
+// readObject reads a JSON object from dec, keeping the values of the
+// wanted keys and skipping the rest. A wanted key that repeats, or appears
+// in another spelling that folds to it, is refused: parsers disagree on
+// which one wins (encoding/json matches field names with Unicode case
+// folding, so "Method" or "paramſ" would be read as the real key).
+func readObject(dec *json.Decoder, want ...string) (map[string]json.RawMessage, error) {
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return nil, errors.New("not an object")
 	}
 	out := map[string]json.RawMessage{}
-	seen := map[string]bool{}
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
 			return nil, err
 		}
 		key, _ := tok.(string)
-		// Folded as encoding/json compares (Unicode simple folding, so
-		// "ſ" matches "s" and the Kelvin sign "k").
-		f := foldKey(key)
-		if seen[f] {
-			return nil, fmt.Errorf("ambiguous key %q", key)
-		}
-		seen[f] = true
-		// A key that folds to one this check reads, in another spelling,
-		// would be read by a case-insensitive server instead.
-		for _, k := range []string{"method", "params", "name"} {
-			if key != k && strings.EqualFold(key, k) {
-				return nil, fmt.Errorf("key %q is a variant of %q", key, k)
+		wanted := ""
+		for _, w := range want {
+			if strings.EqualFold(key, w) {
+				wanted = w
 			}
+		}
+		switch {
+		case wanted == "":
+			if err := skipValue(dec); err != nil {
+				return nil, err
+			}
+			continue
+		case key != wanted:
+			return nil, fmt.Errorf("key %q is a variant of %q", key, wanted)
+		case out[wanted] != nil:
+			return nil, fmt.Errorf("ambiguous key %q", key)
 		}
 		var v json.RawMessage
 		if err := dec.Decode(&v); err != nil {
 			return nil, err
 		}
-		out[key] = v
+		out[wanted] = v
 	}
 	if _, err := dec.Token(); err != nil { // '}'
 		return nil, err
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, errors.New("data after the object")
-	}
 	return out, nil
+}
+
+// skipValue reads past one JSON value without keeping it.
+func skipValue(dec *json.Decoder) error {
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok {
+		case json.Delim('{'), json.Delim('['):
+			// The decoder's state grows with nesting; no real message
+			// nests this deep.
+			if depth++; depth > redact.MaxJSONDepth {
+				return errTooDeep
+			}
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+		if depth == 0 {
+			return nil
+		}
+	}
 }
 
 // anyTokenValid reports whether r carries a token that opens some

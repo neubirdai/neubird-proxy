@@ -24,8 +24,9 @@ func TestMCPToolCheckRefusesAmbiguousKeys(t *testing.T) {
 		`{"method":"tools/call","params":"x"}`,
 		`[{"method":"tools/list"},{"method":"tools/call","params":{"name":"get_job_status","Name":"x"}}]`,
 		"{\"method\":\"tools/call\",\"params\":{\"name\":\"get_job_status\"},\"param\u017f\":{\"name\":\"delete_job\"}}",
-		"{\"method\":\"tools/call\",\"params\":{\"name\":\"get_job_status\",\"\u212aey\":1,\"key\":2}}",
 		`{"method":"tools/call","params":{"name":"get_job_status"}}{"method":"tools/call","params":{"name":"delete_job"}}`,
+		"{\"method\":\"tools/call\",\"params\":{\"\u212aame\":1}}",
+		`{"method":"tools/call","params":{"name":"get_job_status","arguments":` + strings.Repeat("[", 2000) + `]}}`,
 	} {
 		if checkMCPTools([]byte(body), tools) == "" {
 			t.Errorf("allowed: %s", body)
