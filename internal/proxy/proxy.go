@@ -9,6 +9,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -289,7 +290,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := &recorder{ResponseWriter: w}
 	// Runs last: what's still buffered is written under the deadline here,
 	// not by the server after the handler returns, where nothing bounds it.
-	defer func() { _ = rec.FlushError() }()
+	defer func() {
+		if !rec.hijacked {
+			_ = rec.FlushError()
+		}
+	}()
 
 	select {
 	case s.inflight <- struct{}{}:
@@ -1371,8 +1376,19 @@ func writeError(w http.ResponseWriter, code int, kind, reason string) {
 // http.ResponseController, which ReverseProxy uses to stream SSE.
 type recorder struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status   int
+	bytes    int
+	hijacked bool // a passthrough upgrade took the connection over
+}
+
+// Hijack hands the connection to ReverseProxy for an upgrade, and notes it:
+// nothing may be written or flushed through the writer afterwards.
+func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, rw, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err == nil {
+		r.hijacked = true
+	}
+	return c, rw, err
 }
 
 func (r *recorder) WriteHeader(code int) {

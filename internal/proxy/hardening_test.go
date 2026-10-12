@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -330,5 +331,42 @@ func TestIdleSSEOverHTTP2(t *testing.T) {
 	b, err := io.ReadAll(resp.Body)
 	if err != nil || !strings.Contains(string(b), "data: two") {
 		t.Fatalf("stream cut: %v %q", err, b)
+	}
+}
+
+// A passthrough upgrade hijacks the connection; the deferred flush must not
+// touch the writer afterwards (it would panic in net/http).
+func TestUpgradeThenNoFlush(t *testing.T) {
+	cfg := strings.Replace(baseConfig, "    passthrough: true", "    passthrough: true\n    request_headers: [Upgrade, Connection]", 1)
+	f := newFixture(t, cfg, func(w http.ResponseWriter, r *http.Request) {
+		c, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nhello")
+		rw.Flush()
+	})
+	errLog := &syncBuffer{}
+	srv := httptest.NewUnstartedServer(f.srv)
+	srv.Config.ErrorLog = log.New(errLog, "", 0)
+	srv.Start()
+	defer srv.Close()
+	conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(conn, "GET /elastic/ws HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "+token+"\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	b, _ := io.ReadAll(conn)
+	conn.Close()
+	if !strings.Contains(string(b), "101") || !strings.Contains(string(b), "hello") {
+		t.Fatalf("upgrade: %q", b)
+	}
+	// The handler returns once the upgraded connection ends.
+	f.waitForAudit(t)
+	time.Sleep(100 * time.Millisecond)
+	if strings.Contains(errLog.String(), "panic") {
+		t.Fatalf("panic: %s", errLog.String())
 	}
 }
