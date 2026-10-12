@@ -610,7 +610,8 @@ counted:
   decoded; later documents and SSE events (and the input buffered while
   one arrives) reserve memory from the same budget while they're
   processed. Request bodies that are checked have their own budget, an
-  eighth of the memory limit, held until the response is done. Redaction is single-threaded per response; see the plan
+  eighth of the memory limit, held until the response is done; request
+  bodies are capped to fit it (a fifth of that budget, 12.8 MiB at 512 MiB). Redaction is single-threaded per response; see the plan
 for the throughput work.
 
 ## Kubernetes hardening

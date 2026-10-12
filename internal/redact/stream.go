@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"unicode/utf8"
 )
 
 // ErrDocTooLarge ends a JSON stream whose single document exceeds the cap.
@@ -66,7 +67,9 @@ type countingReader struct {
 	n        int64
 	docStart int64
 	max      int64
-	hit      bool // a Read was refused at the limit
+	hit      bool   // a Read was refused at the limit
+	carry    []byte // the start of a UTF-8 sequence split across reads
+	bad      bool   // invalid UTF-8 was seen; every Read fails from then on
 }
 
 // readSlack is how far past a document's limit the decoder may read ahead
@@ -78,6 +81,9 @@ const readSlack = 64 << 10
 // being read, decoded and redacted in full first. Redacting a buffered
 // document takes several times its size in memory.
 func (c *countingReader) Read(p []byte) (int, error) {
+	if c.bad {
+		return 0, ErrNotText
+	}
 	left := c.docStart + c.max + readSlack - c.n
 	if left <= 0 {
 		c.hit = true
@@ -88,7 +94,50 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	}
 	n, err := c.r.Read(p)
 	c.n += int64(n)
+	// JSON must be UTF-8, as text and SSE bodies must: the decoder would
+	// turn each invalid byte into U+FFFD, three bytes, and normalize then
+	// costs several times that.
+	// The decoder keeps bytes that come with an error and may never read
+	// again, so invalid input is withheld, not just reported.
+	if verr := c.validate(p[:n], err == io.EOF); verr != nil {
+		c.bad = true
+		return 0, verr
+	}
 	return n, err
+}
+
+// validate checks that b continues valid UTF-8, keeping an incomplete
+// sequence at its end for the next call; at EOF none may be left.
+func (c *countingReader) validate(b []byte, eof bool) error {
+	i := 0
+	for len(c.carry) > 0 && i < len(b) {
+		c.carry = append(c.carry, b[i])
+		i++
+		if utf8.FullRune(c.carry) {
+			if r, size := utf8.DecodeRune(c.carry); r == utf8.RuneError && size <= 1 {
+				return ErrNotText
+			}
+			c.carry = c.carry[:0]
+		}
+	}
+	rest := b[i:]
+	cut := len(rest)
+	for k := 1; k <= utf8.UTFMax-1 && k <= len(rest); k++ {
+		if s := rest[len(rest)-k]; utf8.RuneStart(s) {
+			if !utf8.FullRune(rest[len(rest)-k:]) {
+				cut = len(rest) - k
+			}
+			break
+		}
+	}
+	if !utf8.Valid(rest[:cut]) {
+		return ErrNotText
+	}
+	c.carry = append(c.carry, rest[cut:]...)
+	if eof && len(c.carry) > 0 {
+		return ErrNotText
+	}
+	return nil
 }
 
 // NewJSONStream decodes and redacts the first document before returning,

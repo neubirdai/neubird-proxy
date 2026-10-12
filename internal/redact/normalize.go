@@ -19,15 +19,18 @@ import (
 // produced it, with off[len(result)] == len(s), so a match in the result
 // can be masked in s. When s needs no normalization, it is returned as is
 // with a nil off.
-func normalize(s string) (string, []int) {
+//
+// Offsets are int32 (4 bytes per byte of text, not 8): bodies are capped
+// far below 2 GiB.
+func normalize(s string) (string, []int32) {
 	if !needsNormalize(s) {
 		return s, nil
 	}
 	b := make([]byte, 0, len(s))
-	off := make([]int, 0, len(s)+1)
+	off := make([]int32, 0, len(s)+1)
 	emit := func(from int, p ...byte) {
 		for range p {
-			off = append(off, from)
+			off = append(off, int32(from))
 		}
 		b = append(b, p...)
 	}
@@ -62,14 +65,28 @@ func normalize(s string) (string, []int) {
 			i++
 		}
 	}
-	off = append(off, len(s))
+	off = append(off, int32(len(s)))
 	return string(b), off
 }
 
+// needsNormalize reports whether normalize would change s: a percent
+// escape or entity candidate, or a rune it rewrites or removes. Other
+// non-ASCII text (accented names, CJK) passes as is, without the offset
+// table.
 func needsNormalize(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; c == '%' || c == '&' || c >= utf8.RuneSelf {
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '%' || c == '&':
 			return true
+		case c >= utf8.RuneSelf:
+			r, n := utf8.DecodeRuneInString(s[i:])
+			if (r >= 0xFF01 && r <= 0xFF5E) || invisible(r) {
+				return true
+			}
+			i += n
+		default:
+			i++
 		}
 	}
 	return false

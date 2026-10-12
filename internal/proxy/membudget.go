@@ -86,6 +86,10 @@ func (s *Server) SetMemoryLimit(limit int64) int64 {
 	// budget of their own: holding one while waiting for a response
 	// reservation can then never starve the other.
 	s.reqMem = newMemBudget(limit / 8)
+	// A checked request body must fit its budget, decoded copies included.
+	if fit := s.reqMem.total / requestBufferFactor; fit < s.maxRequest {
+		s.maxRequest = fit
+	}
 	if fit := total / bufferFactor; fit < s.maxBuffered {
 		s.maxBuffered = fit
 	}

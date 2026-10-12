@@ -46,11 +46,11 @@ func FuzzNormalize(f *testing.F) {
 			}
 			return
 		}
-		if len(off) != len(n)+1 || off[len(n)] != len(s) {
+		if len(off) != len(n)+1 || int(off[len(n)]) != len(s) {
 			t.Fatalf("offsets %v for %q -> %q", off, s, n)
 		}
 		for i := 1; i < len(off); i++ {
-			if off[i] < off[i-1] || off[i] > len(s) {
+			if off[i] < off[i-1] || int(off[i]) > len(s) {
 				t.Fatalf("offsets not monotonic: %v", off)
 			}
 		}

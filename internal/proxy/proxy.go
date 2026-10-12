@@ -38,6 +38,7 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/metrics"
@@ -66,6 +67,7 @@ type Server struct {
 	// mem bounds buffered bodies' memory when the memory limit is known
 	// (SetMemoryLimit); maxBuffered is the largest body that may be
 	// buffered: max_body_bytes, or less if that couldn't fit.
+	maxRequest  int64 // largest request body: max_body_bytes, or less to fit reqMem
 	mem         *memBudget
 	reqMem      *memBudget // request bodies, see SetMemoryLimit
 	maxBuffered int64
@@ -106,18 +108,19 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		destTransport = dt
 	}
 	s := &Server{
-		cfg:      cfg,
-		engine:   engine,
-		log:      log,
-		byName:   map[string]*config.Connection{},
-		byHost:   map[string]*config.Connection{},
-		tokens:   map[string][][32]byte{},
-		limiters: map[string]*bucket{},
-		fields:   map[string]*redact.Fields{},
-		tools:    map[string]map[string]bool{},
-		inflight: make(chan struct{}, cfg.MaxConcurrentRequests),
-		buffered: make(chan struct{}, cfg.MaxConcurrentBuffered),
-		Metrics:  newMetrics(),
+		maxRequest: cfg.MaxBodyBytes,
+		cfg:        cfg,
+		engine:     engine,
+		log:        log,
+		byName:     map[string]*config.Connection{},
+		byHost:     map[string]*config.Connection{},
+		tokens:     map[string][][32]byte{},
+		limiters:   map[string]*bucket{},
+		fields:     map[string]*redact.Fields{},
+		tools:      map[string]map[string]bool{},
+		inflight:   make(chan struct{}, cfg.MaxConcurrentRequests),
+		buffered:   make(chan struct{}, cfg.MaxConcurrentBuffered),
+		Metrics:    newMetrics(),
 	}
 	s.maxBuffered = cfg.MaxBodyBytes
 	conns := make([]*config.Connection, 0, len(cfg.Connections)+1)
@@ -416,7 +419,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Body != nil {
-		r.Body = http.MaxBytesReader(rec, r.Body, s.cfg.MaxBodyBytes)
+		r.Body = http.MaxBytesReader(rec, r.Body, s.maxRequest)
 	}
 	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil {
 		reason, release, err := s.checkRequest(rec, st.conn, r)
@@ -667,7 +670,13 @@ func (s *Server) checkRequest(w http.ResponseWriter, c *config.Connection, r *ht
 		}
 	}
 	// JSON string escapes (\u007c for |) are decoded by the upstream too.
-	reason, err := jsonStrings(body, match)
+	// Only for UTF-8 bodies: decoding would triple invalid bytes, and the
+	// lexical pass below still sees every escape.
+	var reason string
+	var err error
+	if utf8.Valid(body) {
+		reason, err = jsonStrings(body, match)
+	}
 	if err != nil {
 		return "request body: " + err.Error(), release, nil
 	}

@@ -264,7 +264,7 @@ func (e *Engine) String(orig string, st Stats) string {
 		}
 		oa, oz := first.start, end
 		if off != nil {
-			oa, oz = off[first.start], off[end]
+			oa, oz = int(off[first.start]), int(off[end])
 		}
 		b.WriteString(orig[pos:oa])
 		// HMAC over the normalized value, so encoded and plain forms of the

@@ -203,3 +203,31 @@ func TestInnerJSONOneLevel(t *testing.T) {
 		t.Fatalf("%s %v", out, err)
 	}
 }
+
+// JSON bodies must be UTF-8, checked across read boundaries.
+func TestJSONStreamRefusesInvalidUTF8(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	if _, _, _, err := NewJSONStream(io.NopCloser(strings.NewReader("{\"s\":\"\xff\xff\"}")), e, Stats{}, 1<<20, nil, -1); err == nil {
+		t.Fatal("invalid UTF-8 accepted")
+	}
+	// Valid multi-byte text split one byte per read.
+	in := `{"s":"é😀日本"}`
+	s, _, _, err := NewJSONStream(io.NopCloser(iotestOneByte(strings.NewReader(in))), e, Stats{}, 1<<20, nil, int64(len(in)))
+	if err != nil {
+		t.Fatalf("valid UTF-8 refused: %v", err)
+	}
+	if out, _ := io.ReadAll(s); string(out) != in {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func iotestOneByte(r io.Reader) io.Reader { return oneByte{r} }
+
+type oneByte struct{ r io.Reader }
+
+func (o oneByte) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return o.r.Read(p[:1])
+}
