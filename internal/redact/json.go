@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -32,7 +33,13 @@ func (e *Engine) JSON(body []byte, st Stats) ([]byte, error) {
 }
 
 // JSONFields is JSON with a field allowlist; nil means no allowlist.
+//
+// JSON must be UTF-8: a body that isn't is refused, as the stream refuses it
+// (the decoder would turn each invalid byte into three).
 func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, error) {
+	if !utf8.Valid(body) {
+		return nil, ErrNotText
+	}
 	return e.jsonFields(bytes.NewReader(body), len(body), st, fields, false)
 }
 

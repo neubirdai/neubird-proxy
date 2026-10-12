@@ -145,6 +145,7 @@ func FuzzJSONStream(f *testing.F) {
 	e := fuzzEngine(f)
 	f.Add(`{"a":"jane@example.com"}` + "\n" + `[1,{"secret":"x"}]`)
 	f.Add(`"just a string" 12 null`)
+	f.Add("{\"a\":\"\xff\"}")
 	f.Fuzz(func(t *testing.T, in string) {
 		buffered, err := e.JSON([]byte(in), Stats{})
 		if err != nil || !json.Valid([]byte(strings.SplitN(in, "\n", 2)[0])) {
