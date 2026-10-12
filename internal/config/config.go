@@ -586,8 +586,16 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 				fail("%s: client_auth_header only applies to client_auth: header", where)
 			}
 		case AuthHeader:
-			if conn.ClientAuthHeader == "" {
+			ch := http.CanonicalHeaderKey(conn.ClientAuthHeader)
+			switch {
+			case conn.ClientAuthHeader == "":
 				fail("%s: client_auth: header needs client_auth_header", where)
+			case strings.HasPrefix(ch, UpstreamCredentialPrefix), strings.HasPrefix(ch, "X-Forwarded-"),
+				credentialHeaderDenied[ch], ch == "Authorization", ch == "Proxy-Authorization":
+				// The proxy token must arrive in a header of its own: one
+				// that is forwarded (or turned into a credential) would carry
+				// it upstream.
+				fail("%s: client_auth_header %s can't carry the proxy token", where, ch)
 			}
 		default:
 			fail("%s: client_auth must be bearer, basic or header", where)

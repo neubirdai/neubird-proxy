@@ -506,7 +506,8 @@ done | neubird-proxy metrics -
 
 Connectors see these in addition to upstream responses. Upstream error
 responses such as 4xx and 5xx pass through, and their bodies are redacted
-too. Every response carries `X-Request-Id`: the caller's own if it sent a
+too. Every response past the token check carries `X-Request-Id` (a 401
+has none, so it can't tell names apart): the caller's own if it sent a
 short plain one (the relay always does, so one ID follows a request through
 the relay's log, the audit line and the system), otherwise a new one.
 

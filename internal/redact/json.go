@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -53,7 +54,7 @@ func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, erro
 		if docs > 0 {
 			w.out.WriteByte('\n')
 		}
-		if err := w.value(dec, tok, nil); err != nil {
+		if err := w.document(dec, tok); err != nil {
 			return nil, err
 		}
 		docs++
@@ -84,6 +85,20 @@ const MaxJSONDepth = 1000
 
 // ErrTooDeep is JSON nested deeper than MaxJSONDepth.
 var ErrTooDeep = fmt.Errorf("redact: JSON nested deeper than %d", MaxJSONDepth)
+
+// ErrScalarDocument is a document that is a bare string, number or
+// literal. Redacted as JSON, numbers would pass unmasked: "4111 1111 1111
+// 1111" parses as four of them. Callers redact such input as text.
+var ErrScalarDocument = errors.New("redact: top-level JSON value is not an object or array")
+
+// document redacts one top-level document, which must be an object or an
+// array.
+func (w *jsonWriter) document(dec *json.Decoder, tok json.Token) error {
+	if d, ok := tok.(json.Delim); !ok || (d != '{' && d != '[') {
+		return ErrScalarDocument
+	}
+	return w.value(dec, tok, nil)
+}
 
 func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) error {
 	switch t := tok.(type) {

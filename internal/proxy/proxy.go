@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf16"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/metrics"
@@ -336,8 +337,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := st.conn.Name
+	// The response's X-Request-Id is set once the token checks out: without
+	// one, every refusal looks the same, whether or not the name exists.
 	st.id = requestID(r.Header.Get("X-Request-Id"))
-	rec.Header().Set("X-Request-Id", st.id)
 
 	defer func() {
 		p := recover()
@@ -372,12 +374,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if !s.authenticate(st.conn, r) {
-		if st.conn.ClientAuth == config.AuthBasic {
-			rec.Header().Set("WWW-Authenticate", `Basic realm="neubird-proxy"`)
-		}
+		// No WWW-Authenticate challenge: it would tell which names use
+		// Basic auth. Connectors send credentials up front.
 		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
 		return
 	}
+	rec.Header().Set("X-Request-Id", st.id)
 	if st.destErr != "" {
 		// Checked after the token, so a caller without one learns nothing
 		// about which hosts are allowed.
@@ -653,6 +655,11 @@ func (s *Server) checkRequest(w http.ResponseWriter, c *config.Connection, r *ht
 		if ok {
 			candidates = append(candidates, dec)
 		}
+		// Lexically too, so a token a lenient upstream parser accepts and
+		// encoding/json doesn't (NaN, comments) can't stop the decoding.
+		if bytes.Contains(body, []byte(`\`)) {
+			candidates = append(candidates, jsonUnescapeLexical(body))
+		}
 	}
 	for i, re := range c.RequestDenyRes {
 		for _, cand := range candidates {
@@ -742,6 +749,62 @@ func jsonStrings(body []byte) (string, bool, error) {
 		}
 	}
 	return b.String(), true, nil
+}
+
+// jsonUnescapeLexical decodes JSON string escapes (\uXXXX, including
+// surrogate pairs, and \n, \", \\, \/ and the rest) wherever they appear
+// in b, without parsing it. Malformed escapes are left as they are.
+func jsonUnescapeLexical(b []byte) string {
+	var out strings.Builder
+	out.Grow(len(b))
+	for i := 0; i < len(b); i++ {
+		if b[i] != '\\' || i+1 >= len(b) {
+			out.WriteByte(b[i])
+			continue
+		}
+		switch c := b[i+1]; c {
+		case '"', '\\', '/':
+			out.WriteByte(c)
+			i++
+		case 'b', 'f', 'n', 'r', 't':
+			out.WriteByte(map[byte]byte{'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t'}[c])
+			i++
+		case 'u':
+			r, n := hex4(b[i+2:])
+			if n == 0 {
+				out.WriteByte(b[i])
+				continue
+			}
+			i += 1 + n
+			if utf16.IsSurrogate(r) && i+6 < len(b) && b[i+1] == '\\' && b[i+2] == 'u' {
+				if r2, n2 := hex4(b[i+3:]); n2 > 0 {
+					if d := utf16.DecodeRune(r, r2); d != unicode.ReplacementChar {
+						r = d
+						i += 2 + n2
+					}
+				}
+			}
+			out.WriteRune(r)
+		default:
+			out.WriteByte(b[i])
+		}
+	}
+	return out.String()
+}
+
+// hex4 reads four hex digits; n is 4, or 0 if they aren't there.
+func hex4(b []byte) (rune, int) {
+	if len(b) < 4 {
+		return 0, 0
+	}
+	var r rune
+	for _, c := range b[:4] {
+		if !isHex(c) {
+			return 0, 0
+		}
+		r = r<<4 | rune(unhex(c))
+	}
+	return r, 4
 }
 
 var errTooDeep = fmt.Errorf("JSON nested deeper than %d", redact.MaxJSONDepth)

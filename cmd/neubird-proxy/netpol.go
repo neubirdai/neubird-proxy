@@ -188,7 +188,11 @@ spec:
 	for _, d := range dests {
 		fmt.Fprintf(&b, "    # %s\n", strings.Join(d.conns, ", "))
 		if d.ip {
-			fmt.Fprintf(&b, "    - toCIDR: [%q]\n", d.host+"/32")
+			bits := "/32"
+			if strings.Contains(d.host, ":") {
+				bits = "/128"
+			}
+			fmt.Fprintf(&b, "    - toCIDR: [%q]\n", d.host+bits)
 		} else {
 			fmt.Fprintf(&b, "    - toFQDNs:\n        - %s: %q\n", fqdnSelector(d), d.host)
 		}

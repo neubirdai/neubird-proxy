@@ -142,3 +142,37 @@ func TestSSEDeadlineOffAfterCompleteEvent(t *testing.T) {
 		t.Fatal("deadline still armed after a complete event")
 	}
 }
+
+// Whitespace between stream documents is capped: it would otherwise be
+// buffered, unbudgeted, while the stream waits for the next document.
+func TestJSONStreamWhitespaceGapCapped(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	in := `{"a":1}` + "\n" + `{"b":2}` + "\n" + strings.Repeat(" ", 1<<20) + `{"c":3}`
+	s, _, _, err := NewJSONStream(io.NopCloser(strings.NewReader(in)), e, Stats{}, 8<<20, nil, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(s)
+	if s.Err() == nil || strings.Contains(string(out), `"c"`) {
+		t.Fatalf("gap not refused: err %v, out %q", s.Err(), out)
+	}
+	if !strings.Contains(string(out), `{"b":2}`) {
+		t.Fatalf("documents before the gap lost: %q", out)
+	}
+}
+
+// Numbers alone don't make a JSON document: as text they get every rule.
+func TestScalarDocumentsRedactedAsText(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	out, _ := io.ReadAll(NewSSEReader(io.NopCloser(strings.NewReader("data: 4111 1111 1111 1111\n\n")), e, Stats{}, 1<<20))
+	if strings.Contains(string(out), "4111") {
+		t.Fatalf("SSE: %q", out)
+	}
+	got, err := e.JSON([]byte(`{"s":"[1] 4111 1111 1111 1111","t":"{} 4111111111111111"}`), Stats{})
+	if err != nil || strings.Contains(string(got), "4111") {
+		t.Fatalf("JSON in strings: %s %v", got, err)
+	}
+	if _, err := e.JSON([]byte(`4111111111111111`), Stats{}); err == nil {
+		t.Fatal("bare number accepted as a JSON document")
+	}
+}

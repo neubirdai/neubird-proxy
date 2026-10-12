@@ -370,3 +370,41 @@ func TestUpgradeThenNoFlush(t *testing.T) {
 		t.Fatalf("panic: %s", errLog.String())
 	}
 }
+
+func TestJSONUnescapeLexical(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"n":NaN,"s":"x | delete"}`: `{"n":NaN,"s":"x | delete"}`,
+		`😀 \"q\" \\ \/ \n`:           "\U0001F600 \"q\" \\ / \n",
+		`\u12 \x \`:                  `\u12 \x \`,
+	} {
+		if got := jsonUnescapeLexical([]byte(in)); got != want {
+			t.Errorf("%s: got %q want %q", in, got, want)
+		}
+	}
+}
+
+// Without a token, a 401 says nothing about whether the name exists.
+func TestUnauthorizedLooksTheSame(t *testing.T) {
+	f := newFixture(t, baseConfig, jsonHandler(`{}`))
+	for _, p := range []string{"/splunk/x", "/servicenow/x", "/nosuch/x"} {
+		resp, body := f.do(t, "GET", p, nil)
+		if resp.StatusCode != 401 || resp.Header.Get("X-Request-Id") != "" || resp.Header.Get("WWW-Authenticate") != "" {
+			t.Errorf("%s: %d %v %s", p, resp.StatusCode, resp.Header, body)
+		}
+	}
+}
+
+func TestDenyPatternsSurviveNonStandardJSON(t *testing.T) {
+	f := newFixture(t, lockedConfig, jsonHandler(`{}`))
+	req, _ := http.NewRequest("POST", f.proxy.URL+"/splunk/services/search/jobs", strings.NewReader(`{"n":NaN,"search":"x \u007c delete"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := f.proxy.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("%d, want 403", resp.StatusCode)
+	}
+}

@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CHART=deploy/helm/neubird-proxy
-HELM_IMAGE=${HELM_IMAGE:-alpine/helm:3.16.4}
+HELM_IMAGE=${HELM_IMAGE:-alpine/helm:3.16.4@sha256:9b25e60ae264940b276e32866d37e3088e70c4e2d1784b964dc3f90346281a74}
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 helm() { docker run --rm -v "$PWD/$CHART:/chart:ro" -v "$W:/w" "$HELM_IMAGE" "$@"; }
 fail() { echo "FAIL: $*"; exit 1; }
