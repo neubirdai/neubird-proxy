@@ -34,7 +34,8 @@ type SSEReader struct {
 	reserved int64       // budget held for in's capacity
 	pending  atomic.Bool // part of an event is buffered; read from other goroutines
 	activity func(busy bool)
-	scan     int // where eventEnd resumes in in: the start of a line
+	progress bool // an event completed since the activity was last reported
+	scan     int  // where eventEnd resumes in in: the start of a line
 
 	in    []byte
 	out   []byte
@@ -80,13 +81,20 @@ func (r *SSEReader) reserveIn() error {
 	if r.budget == nil {
 		return nil
 	}
-	if need := int64(cap(r.in)) - r.reserved; need > 0 {
-		need = (need + pendingChunk - 1) / pendingChunk * pendingChunk
-		if err := r.budget.Acquire(need); err != nil {
-			return err
-		}
-		r.reserved += need
+	want := (int64(cap(r.in)) + pendingChunk - 1) / pendingChunk * pendingChunk
+	if want <= r.reserved {
+		return nil
 	}
+	// Give back what's held before waiting for the larger amount, so the
+	// stream never holds memory while it waits.
+	if r.reserved > 0 {
+		r.budget.Release(r.reserved)
+		r.reserved = 0
+	}
+	if err := r.budget.Acquire(want); err != nil {
+		return err
+	}
+	r.reserved = want
 	return nil
 }
 
@@ -132,6 +140,12 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 		}
 		r.pending.Store(len(r.in) > 0)
 		if r.activity != nil {
+			// The deadline covers one event: it starts over whenever an
+			// event completes.
+			if r.progress {
+				r.activity(false)
+				r.progress = false
+			}
 			r.activity(len(r.in) > 0)
 		}
 		n, err := r.src.Read(r.chunk)
@@ -232,6 +246,7 @@ func (r *SSEReader) drain() error {
 		r.out = append(r.out, out...)
 		r.out = append(r.out, '\n')
 		r.compactIn(next)
+		r.progress = true
 	}
 }
 

@@ -190,10 +190,6 @@ func (s *JSONStream) next() {
 	start := s.dec.InputOffset()
 	s.cr.docStart = start
 	if (s.budget != nil || s.activity != nil) && s.dec.More() {
-		if s.activity != nil {
-			s.activity(true)
-			defer s.activity(false)
-		}
 		if s.budget != nil {
 			n := s.max * jsonFactor
 			if err := s.budget.Acquire(n); err != nil {
@@ -201,6 +197,12 @@ func (s *JSONStream) next() {
 				return
 			}
 			defer s.budget.Release(n)
+		}
+		// The deadline starts once the memory is held: waiting for it
+		// isn't the upstream's time.
+		if s.activity != nil {
+			s.activity(true)
+			defer s.activity(false)
 		}
 	}
 	tok, err := s.dec.Token()

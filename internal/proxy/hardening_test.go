@@ -179,9 +179,12 @@ func TestStreamedJSONDoesNotHoldSlot(t *testing.T) {
 }
 
 func TestJSONStringsMultiDocument(t *testing.T) {
-	got, ok := jsonStrings([]byte("{\"index\":\"a\"}\n{\"q\":\"\\u0064elete\"}\n"))
-	if !ok || !strings.Contains(got, "delete") {
-		t.Fatalf("got %q %v", got, ok)
+	got, ok, err := jsonStrings([]byte("{\"index\":\"a\"}\n{\"q\":\"\\u0064elete\"}\n"))
+	if err != nil || !ok || !strings.Contains(got, "delete") {
+		t.Fatalf("got %q %v %v", got, ok, err)
+	}
+	if _, _, err := jsonStrings([]byte(strings.Repeat("[", 5000) + `"\u0041"`)); err != errTooDeep {
+		t.Fatalf("deep body: %v", err)
 	}
 }
 
@@ -233,4 +236,37 @@ func (b *memBudget) inUse() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.total - b.free
+}
+
+// Deeply nested JSON is not recursed into: the proxy keeps running and the
+// response is handled as text (or refused under a field allowlist).
+func TestDeepJSONResponse(t *testing.T) {
+	deep := strings.Repeat("[", 200000) + `"jane@example.com"`
+	f := newFixture(t, strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 1048576", 1), jsonHandler(deep))
+	resp, body := f.do(t, "GET", "/splunk/x", bearer)
+	if resp.StatusCode == 200 && strings.Contains(body, "jane@") {
+		t.Fatalf("unredacted: %d", resp.StatusCode)
+	}
+}
+
+// A busy event stream whose reads never end on an event boundary isn't
+// cut: the deadline covers one event at a time.
+func TestBusySSEStreamNotCut(t *testing.T) {
+	old := bodyWorkTimeout
+	bodyWorkTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyWorkTimeout = old })
+	f := newFixture(t, baseConfig, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: x")
+		for i := 0; i < 60; i++ {
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
+			io.WriteString(w, "\n\ndata: x")
+		}
+		io.WriteString(w, "\n\n")
+	})
+	_, body := f.do(t, "GET", "/splunk/stream", bearer)
+	if n := strings.Count(body, "data: x"); n != 61 {
+		t.Fatalf("%d events, want 61 (stream cut?)", n)
+	}
 }

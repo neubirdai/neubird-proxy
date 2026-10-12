@@ -409,7 +409,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(rec, r.Body, s.cfg.MaxBodyBytes)
 	}
 	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil {
-		reason, release, err := s.checkRequest(st.conn, r)
+		reason, release, err := s.checkRequest(rec, st.conn, r)
 		defer release()
 		var mbe *http.MaxBytesError
 		switch {
@@ -581,7 +581,7 @@ func pathAllowed(c *config.Connection, rest string) bool {
 // The returned release frees the body's memory reservation; the caller
 // runs it when the request is done, since the body is kept for the
 // upstream.
-func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, func(), error) {
+func (s *Server) checkRequest(w http.ResponseWriter, c *config.Connection, r *http.Request) (string, func(), error) {
 	release := func() {}
 	var body []byte
 	if r.Body != nil && r.Body != http.NoBody {
@@ -598,8 +598,14 @@ func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, fu
 			}
 			release = func() { s.reqMem.release(held) }
 		}
+		// The body holds its reservation while it arrives, so it gets the
+		// same time as a response body. (Not every transport supports
+		// read deadlines; the tunnel's HTTP/2 server does.)
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(bodyWorkTimeout))
 		var err error
 		body, err = io.ReadAll(r.Body)
+		_ = rc.SetReadDeadline(time.Time{})
 		r.Body.Close()
 		if err != nil {
 			return "", release, err
@@ -631,8 +637,14 @@ func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, fu
 		}
 	}
 	// JSON string escapes (\u007c for |) are decoded by the upstream too.
-	if dec, ok := jsonStrings(body); ok {
-		candidates = append(candidates, dec)
+	if len(c.RequestDenyRes) > 0 {
+		dec, ok, err := jsonStrings(body)
+		if err != nil {
+			return "request body: " + err.Error(), release, nil
+		}
+		if ok {
+			candidates = append(candidates, dec)
+		}
 	}
 	for i, re := range c.RequestDenyRes {
 		for _, cand := range candidates {
@@ -692,24 +704,39 @@ func unhex(c byte) byte {
 // decoded, one per line: of every document of a multi-document body
 // (NDJSON, Elasticsearch _bulk), up to the first that doesn't parse. False
 // if the body has no escapes worth decoding.
-func jsonStrings(body []byte) (string, bool) {
+//
+// errTooDeep means the body nests deeper than redact.MaxJSONDepth, which
+// no real request does; the decoder's state would grow with it.
+func jsonStrings(body []byte) (string, bool, error) {
 	if !bytes.Contains(body, []byte(`\`)) {
-		return "", false
+		return "", false, nil
 	}
 	var b strings.Builder
 	dec := json.NewDecoder(bytes.NewReader(body))
+	depth := 0
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			break
 		}
-		if s, ok := tok.(string); ok {
-			b.WriteString(s)
+		switch t := tok.(type) {
+		case json.Delim:
+			if t == '{' || t == '[' {
+				if depth++; depth > redact.MaxJSONDepth {
+					return "", false, errTooDeep
+				}
+			} else {
+				depth--
+			}
+		case string:
+			b.WriteString(t)
 			b.WriteByte('\n')
 		}
 	}
-	return b.String(), true
+	return b.String(), true, nil
 }
+
+var errTooDeep = fmt.Errorf("JSON nested deeper than %d", redact.MaxJSONDepth)
 
 // checkMCPTools refuses a JSON-RPC message or batch that calls a tool not
 // in the allowlist. A body that is not JSON-RPC is refused too: on an MCP
@@ -971,7 +998,6 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// An upstream may not take long over a body: while it's partly
 	// received, it holds buffers, budget and a slot.
 	work := newDeadlineBody(resp.Body, bodyWorkTimeout)
-	work.Busy(true)
 	defer work.Busy(false) // streams take over below
 	resp.Body = work
 
@@ -1021,6 +1047,8 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		}
 		defer s.mem.release(reserve)
 	}
+	// The upstream's time starts once the slot and memory are held.
+	work.Busy(true)
 
 	if kind == kindJSON {
 		// The first document is redacted here, before any header is sent,
