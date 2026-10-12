@@ -466,6 +466,20 @@ func TestNormalizeOffsets(t *testing.T) {
 	}
 }
 
+// Under an allowlist, a key that isn't shaped like a field name is data
+// (Splunk "chart ... by name" puts values in keys) and is masked.
+func TestFieldAllowlistMasksDataKeys(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	f, _ := NewFields([]string{"result.number"})
+	out, err := e.JSONFields([]byte(`{"result":{"number":"1","John Smith, diabetic":{"count":3},"description":"x"}}`), Stats{}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "John") || !strings.Contains(string(out), `"description":"[REDACTED:FIELD]"`) {
+		t.Fatalf("got %s", out)
+	}
+}
+
 func TestFieldAllowlist(t *testing.T) {
 	e := engine(t, config.Redaction{})
 	f, err := NewFields([]string{"result.number", "result.*.display_value", "result.priority", "meta"})

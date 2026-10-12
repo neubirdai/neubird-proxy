@@ -658,6 +658,10 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			if strings.HasPrefix(ch, UpstreamCredentialPrefix) {
 				fail("%s: request_headers: %s is a credential header", where, ch)
 			}
+			if conn.ClientAuth == AuthHeader && strings.EqualFold(ch, conn.ClientAuthHeader) {
+				// It carries the proxy token, which must never go upstream.
+				fail("%s: request_headers: %s carries the proxy token (client_auth_header)", where, ch)
+			}
 			conn.HeaderSet[ch] = true
 		}
 

@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -174,6 +175,10 @@ var destDialControl = refuseInternalAddresses
 // or unspecified addresses, whatever the destination host resolved to. It
 // sees the address actually dialed, so a name that resolves there is caught
 // too. (Behind HTTPS_PROXY, that is the outbound proxy's address.)
+//
+// Also refused: cloud metadata and host-agent addresses outside link-local
+// (Azure WireServer, Alibaba Cloud, AWS IMDS over IPv6), and the pod's own
+// addresses, so a destination can't reach the proxy's admin port.
 func refuseInternalAddresses(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -181,10 +186,52 @@ func refuseInternalAddresses(_, address string, _ syscall.RawConn) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() || isMetadataOrSelf(ip) {
 		return fmt.Errorf("destination address %s is not allowed", host)
 	}
 	return nil
+}
+
+var metadataNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{
+		"168.63.129.16/32",   // Azure WireServer
+		"100.100.100.200/32", // Alibaba Cloud metadata
+		"fd00:ec2::254/128",  // AWS IMDS over IPv6
+	} {
+		_, n, _ := net.ParseCIDR(c)
+		out = append(out, n)
+	}
+	return out
+}()
+
+// ownAddrs are the pod's interface addresses, read once.
+var ownAddrs = sync.OnceValue(func() []net.IP {
+	var out []net.IP
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			out = append(out, n.IP)
+		}
+	}
+	return out
+})
+
+func isMetadataOrSelf(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	for _, n := range metadataNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	for _, own := range ownAddrs() {
+		if own.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func newTransport(cfg *config.Config) (*http.Transport, error) {
@@ -265,6 +312,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	st, ok := s.routeDest(r)
 	if !ok {
 		st, ok = s.route(r)
+	}
+	if !ok && !s.anyTokenValid(r) {
+		// Without a token, an unknown name looks like any other refusal,
+		// so names can't be probed.
+		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
+		s.Metrics.Requests.Inc("_unknown", "401")
+		return
 	}
 	if !ok {
 		writeError(rec, http.StatusNotFound, "unknown_connection", "no connection matches this host or path")
@@ -383,6 +437,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func hasDotSegment(p string) bool {
 	check := func(p string) bool {
 		for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+			// Servlet containers (Tomcat, Jetty, Spring) drop ;params from
+			// a segment before resolving it, so "..;x" is ".." to them.
+			seg, _, _ = strings.Cut(seg, ";")
 			if seg == "." || seg == ".." {
 				return true
 			}
@@ -519,6 +576,18 @@ func pathAllowed(c *config.Connection, rest string) bool {
 func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, error) {
 	var body []byte
 	if r.Body != nil && r.Body != http.NoBody {
+		if s.mem != nil {
+			// The body, and the decoded copies matched below.
+			size := s.cfg.MaxBodyBytes
+			if r.ContentLength >= 0 && r.ContentLength < size {
+				size = r.ContentLength
+			}
+			reserve := size * requestBufferFactor
+			if err := s.mem.acquire(r.Context(), reserve); err != nil {
+				return "", err
+			}
+			defer s.mem.release(reserve)
+		}
 		var err error
 		body, err = io.ReadAll(r.Body)
 		r.Body.Close()
@@ -535,9 +604,15 @@ func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, er
 	}
 	candidates := []string{r.URL.RawQuery, string(body)}
 	for _, raw := range []string{r.URL.RawQuery, string(body)} {
-		if dec, err := url.QueryUnescape(raw); err == nil && dec != raw {
+		// Decoded leniently: one bad escape must not hide the rest from
+		// the patterns, since upstream decoders are lenient too.
+		if dec := lenientUnescape(raw); dec != raw {
 			candidates = append(candidates, dec)
 		}
+	}
+	// JSON string escapes (\u007c for |) are decoded by the upstream too.
+	if dec, ok := jsonStrings(body); ok {
+		candidates = append(candidates, dec)
 	}
 	for i, re := range c.RequestDenyRes {
 		for _, cand := range candidates {
@@ -549,38 +624,163 @@ func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, er
 	return "", nil
 }
 
+// requestBufferFactor is how many times its size a request body may take
+// while checked: the body and its decoded copies.
+const requestBufferFactor = 4
+
+// lenientUnescape decodes %XX escapes and + as a space, leaving any
+// malformed escape as it is, as most form decoders do.
+func lenientUnescape(s string) string {
+	if !strings.ContainsAny(s, "%+") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '+':
+			b.WriteByte(' ')
+		case c == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]):
+			b.WriteByte(unhex(s[i+1])<<4 | unhex(s[i+2]))
+			i += 2
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case c <= '9':
+		return c - '0'
+	case c >= 'a':
+		return c - 'a' + 10
+	default:
+		return c - 'A' + 10
+	}
+}
+
+// jsonStrings returns every string (keys included) in a JSON body,
+// decoded, one per line, or false if the body isn't JSON or has no
+// escapes worth decoding.
+func jsonStrings(body []byte) (string, bool) {
+	if !bytes.Contains(body, []byte(`\`)) || !json.Valid(body) {
+		return "", false
+	}
+	var b strings.Builder
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		if s, ok := tok.(string); ok {
+			b.WriteString(s)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), true
+}
+
 // checkMCPTools refuses a JSON-RPC message or batch that calls a tool not
 // in the allowlist. A body that is not JSON-RPC is refused too: on an MCP
 // connection it cannot be checked.
 func checkMCPTools(body []byte, tools map[string]bool) string {
-	type msg struct {
-		Method string `json:"method"`
-		Params struct {
-			Name string `json:"name"`
-		} `json:"params"`
-	}
-	var msgs []msg
 	trimmed := bytes.TrimSpace(body)
-	switch {
-	case len(trimmed) == 0:
+	if len(trimmed) == 0 {
 		return ""
-	case trimmed[0] == '[':
-		if err := json.Unmarshal(trimmed, &msgs); err != nil {
-			return "body is not JSON-RPC"
-		}
-	default:
-		var m msg
-		if err := json.Unmarshal(trimmed, &m); err != nil {
-			return "body is not JSON-RPC"
-		}
-		msgs = []msg{m}
 	}
-	for _, m := range msgs {
-		if m.Method == "tools/call" && !tools[m.Params.Name] {
-			return fmt.Sprintf("MCP tool %q is not in mcp_tools", m.Params.Name)
+	var raws []json.RawMessage
+	if trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &raws); err != nil {
+			return "body is not JSON-RPC"
+		}
+	} else {
+		raws = []json.RawMessage{trimmed}
+	}
+	for _, raw := range raws {
+		m, err := strictObject(raw)
+		if err != nil {
+			return "body is not JSON-RPC: " + err.Error()
+		}
+		var method string
+		if v, ok := m["method"]; ok && json.Unmarshal(v, &method) != nil {
+			return "body is not JSON-RPC"
+		}
+		if method != "tools/call" {
+			continue
+		}
+		params, err := strictObject(m["params"])
+		if err != nil {
+			return "tools/call params: " + err.Error()
+		}
+		var name string
+		if err := json.Unmarshal(params["name"], &name); err != nil {
+			return "tools/call without a tool name"
+		}
+		if !tools[name] {
+			return fmt.Sprintf("MCP tool %q is not in mcp_tools", name)
 		}
 	}
 	return ""
+}
+
+// strictObject decodes a JSON object whose keys are unambiguous: a key
+// that repeats, or differs from another only in case, is refused, since
+// parsers disagree on which one wins (Go's encoding/json matches field
+// names case-insensitively and keeps the last).
+func strictObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, errors.New("not an object")
+	}
+	out := map[string]json.RawMessage{}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key := tok.(string)
+		if seen[strings.ToLower(key)] {
+			return nil, fmt.Errorf("ambiguous key %q", key)
+		}
+		seen[strings.ToLower(key)] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, err
+		}
+		out[key] = v
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	// A key that only differs in case from one this check reads would be
+	// read by a case-insensitive server instead.
+	for _, k := range []string{"method", "params", "name"} {
+		if seen[k] {
+			if _, exact := out[k]; !exact {
+				return nil, fmt.Errorf("key %q in the wrong case", k)
+			}
+		}
+	}
+	return out, nil
+}
+
+// anyTokenValid reports whether r carries a token that opens some
+// connection, or neubird_destinations.
+func (s *Server) anyTokenValid(r *http.Request) bool {
+	for _, c := range s.byName {
+		if s.authenticate(c, r) {
+			return true
+		}
+	}
+	return s.dest != nil && s.authenticate(s.dest.Conn, r)
 }
 
 func (s *Server) authenticate(c *config.Connection, r *http.Request) bool {
@@ -730,6 +930,18 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
 		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.maxBuffered).WithFields(fields)
+		if s.mem != nil {
+			// An event stream can stay open for long, so it holds memory
+			// only while it redacts an event, not for its whole life.
+			ctx := resp.Request.Context()
+			sse.WithBudget(func(n int64) (func(), error) {
+				reserve := n * bufferFactor
+				if err := s.mem.acquire(ctx, reserve); err != nil {
+					return nil, err
+				}
+				return func() { s.mem.release(reserve) }, nil
+			})
+		}
 		st.stream = sse
 		resp.Body = &dropTrailers{ReadCloser: sse, resp: resp}
 		resp.ContentLength = -1
@@ -748,13 +960,27 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// limit is known, how much memory they may take together: each
 	// reserves bufferFactor times its size (its declared length, or the
 	// cap when it has none).
+	// A streamed JSON body keeps both until it ends (keep is set), since
+	// its later documents are decoded after modifyResponse returns.
+	keep := false
+	var reserved int64
 	select {
 	case s.buffered <- struct{}{}:
-		defer func() { <-s.buffered }()
 	case <-resp.Request.Context().Done():
 		resp.Body.Close()
 		return resp.Request.Context().Err()
 	}
+	release := func() {
+		if reserved > 0 {
+			s.mem.release(reserved)
+		}
+		<-s.buffered
+	}
+	defer func() {
+		if !keep {
+			release()
+		}
+	}()
 	if s.mem != nil {
 		size := s.maxBuffered
 		if n := resp.ContentLength; n >= 0 && n < size && !gzipped {
@@ -765,7 +991,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			resp.Body.Close()
 			return err
 		}
-		defer s.mem.release(reserve)
+		reserved = reserve
 	}
 
 	if kind == kindJSON {
@@ -801,7 +1027,8 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			return setBody(resp, js.Bytes())
 		default:
 			st.stream = js
-			resp.Body = &dropTrailers{ReadCloser: js, resp: resp}
+			keep = true
+			resp.Body = &dropTrailers{ReadCloser: &releaseOnClose{ReadCloser: js, release: release}, resp: resp}
 			resp.ContentLength = -1
 			h.Del("Content-Length")
 			h.Del("Content-MD5")
@@ -847,7 +1074,24 @@ func (d *dropTrailers) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// releaseOnClose runs release once, when the body is closed.
+type releaseOnClose struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (r *releaseOnClose) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(r.release)
+	return err
+}
+
 func setBody(resp *http.Response, body []byte) error {
+	// The upstream body has been read to its end, so the transport may
+	// have filled in trailers: drop them, they'd skip header redaction.
+	resp.Trailer = nil
+	resp.Header.Del("Trailer")
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
@@ -974,6 +1218,17 @@ func (s *Server) audit(r *http.Request, st *reqState, status, nbytes int, d time
 		attrs = append(attrs, "via", via)
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Client-controlled: bounded, and only address-like characters.
+		if len(xff) > 256 {
+			xff = xff[:256]
+		}
+		xff = strings.Map(func(c rune) rune {
+			if c == ',' || c == ' ' || c == '.' || c == ':' || c == '[' || c == ']' ||
+				'0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
+				return c
+			}
+			return '?'
+		}, xff)
 		attrs = append(attrs, "forwarded_for", xff)
 	}
 	// Parameter names, not values: enough to see what was asked for

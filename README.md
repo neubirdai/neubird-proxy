@@ -30,8 +30,8 @@ connection). In order; the first check that fails ends the request.
 
 1. **Capacity.** Beyond `max_concurrent_requests` in flight, the proxy returns 503.
 2. **Path hygiene.** Paths with `.` or `..` segments (including
-   percent-encoded, double-encoded and backslash forms) get a 400, so a
-   path can't be normalized upstream into a different API.
+   percent-encoded, double-encoded, backslash and `..;` forms) get a 400,
+   so a path can't be normalized upstream into a different API.
 3. **Token.** The proxy token, in the form `client_auth` sets (a Bearer
    token, a Basic password, or a named header). Tokens shorter than 32
    characters are refused at startup.
@@ -42,9 +42,12 @@ connection). In order; the first check that fails ends the request.
    Anything else gets a 405.
 6. **Rate limit.** Per pod, shared by every host, when `rate_limit` is set;
    over the limit gets a 429.
-7. **Request checks.** The query string and body are checked raw and
-   URL-decoded against `request_deny_patterns`, for example Splunk commands
-   that write or send data. A match gets a 403.
+7. **Request checks.** The query string and body are checked raw,
+   URL-decoded (leniently, so one malformed escape doesn't hide the rest),
+   and with JSON string escapes decoded, against `request_deny_patterns`,
+   for example Splunk commands that write or send data. A match gets a 403.
+   The patterns are a blocklist: they catch what they name, in the
+   encodings above.
 8. **Headers.** Only allowlisted client headers go upstream. This drops the
    proxy token, cookies, `Ocp-Apim-Trace`, and `Accept-Encoding`/`Range`
    (bodies must arrive whole and uncompressed). The system's credentials
@@ -52,7 +55,9 @@ connection). In order; the first check that fails ends the request.
    only for the headers in `credential_headers`. The proxy adds an
    `X-Request-Id`.
 9. **Connect.** Connections to loopback, link-local (including
-   `169.254.169.254`) and unspecified addresses are refused, whatever the
+   `169.254.169.254`), unspecified and multicast addresses, other cloud
+   metadata addresses (`168.63.129.16`, `100.100.100.200`,
+   `fd00:ec2::254`) and the pod's own addresses are refused, whatever the
    name resolved to.
 10. **Response.**
     - Stripped: `Set-Cookie`, all `Ocp-Apim-*` headers, and trailers.
@@ -174,9 +179,18 @@ neubird_destinations:
 - **`hosts` is optional.** Without it, NeuBird may reach any host name the
   pod can, and the other guard rails still apply. Every pod start warns
   about the hosts NeuBird may reach, and loudly when `*` is listed.
-- **Never internal addresses.** Connections to loopback, link-local
-  (including the cloud metadata address `169.254.169.254`) and unspecified
-  addresses are refused, whatever the name resolved to.
+- **Never the pod or the cloud's metadata.** Connections to loopback,
+  link-local (including `169.254.169.254`), unspecified and multicast
+  addresses, `168.63.129.16`, `100.100.100.200`, `fd00:ec2::254` and the
+  pod's own addresses are refused, whatever the name resolved to. Other
+  private addresses are allowed: the systems usually live there, so with
+  `*` (or no `hosts`) NeuBird can reach any internal system the pod can,
+  including through a DNS name it controls. Keep `hosts` to your domains,
+  and restrict egress at the network.
+- **Behind an outbound proxy** (`HTTPS_PROXY`), the outbound proxy
+  resolves and dials the hosts, so the address check above only sees the
+  outbound proxy; the proxy warns at startup. Put the systems in
+  `NO_PROXY`, or rely on `hosts` and the network.
 - **The destination is `scheme://host[:port]` only**, with no user info,
   path or query; `https` unless `allow_http_upstreams` is set.
 - **A request stays on its host.** `.` and `..` segments are refused, and
@@ -253,7 +267,11 @@ secrets. Any other token gets a 401.
   checked. For SSE, a data payload that isn't JSON is masked whole. Patterns
   are dot paths of keys, where `*` matches any one key. Array elements add
   no segment, so `result.number` covers every element of a `result` array.
-  A pattern allows everything beneath it.
+  A pattern allows everything beneath it. Object keys outside the
+  allowlist are kept when they look like field names (letters, digits,
+  `_`, `-`, `.`, up to 64 characters) and masked otherwise, since a query
+  can turn values into keys (`chart … by name`). Under an allowlist, SSE
+  comment and unknown lines are dropped and `id:` values masked.
 - **Before matching**, text is normalized: percent-escapes (`%40`), HTML
   entities (`&#64;`, `&commat;`), full-width characters (`２１９`), and
   invisible characters (zero-width space, soft hyphen) are decoded or
@@ -498,7 +516,7 @@ the relay's log, the audit line and the system), otherwise a new one.
 | 401 | `unauthorized` | Missing or wrong proxy token, or the token sent in the wrong form |
 | 403 | `destination_not_allowed` | `X-Neubird-Destination` missing, not `scheme://host[:port]`, plain `http` without `allow_http_upstreams`, or a host not in `hosts` (checked after the token) |
 | 403 | `request_denied` | Query or body matched `request_deny_patterns[i]` (the index is in `reason`) |
-| 404 | `unknown_connection` | The path isn't under `/_neubird/dest` |
+| 404 | `unknown_connection` | The path isn't under `/_neubird/dest`, with a valid token (without one, 401) |
 | 405 | `method_not_allowed` | Method not in `methods`; `Allow` lists the ones that are |
 | 413 | `request_too_large` | Request body over `max_body_bytes` |
 | 429 | `rate_limited` | Rate limit exceeded; `Retry-After: 1` |

@@ -95,7 +95,13 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 				if i > 0 {
 					w.out.WriteByte(',')
 				}
-				w.str(w.e.String(key, w.st))
+				w.path = append(w.path, key)
+				if w.fields != nil && !w.fields.allowsKey(w.path) {
+					w.fieldMask(key)
+				} else {
+					w.str(w.e.String(key, w.st))
+				}
+				w.path = w.path[:len(w.path)-1]
 				w.out.WriteByte(':')
 				child := blocked
 				if child == nil {

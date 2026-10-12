@@ -262,6 +262,12 @@ func warnings(cfg *config.Config) []string {
 	}
 	if d := cfg.NeubirdDestinations; d != nil {
 		out = append(out, fmt.Sprintf("neubird_destinations: NeuBird chooses the destination host within %s and supplies the credentials", strings.Join(d.Hosts, ", ")))
+		for _, v := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+			if os.Getenv(v) != "" {
+				out = append(out, "neubird_destinations: "+v+" is set, so destination hosts are resolved and dialed by the outbound proxy: the proxy's own check for internal addresses sees only the outbound proxy's address (list destination hosts in NO_PROXY, or rely on hosts and the network)")
+				break
+			}
+		}
 		if d.AnyHost() {
 			out = append(out, "neubird_destinations: hosts includes \"*\": any host name the pod can reach (only loopback, link-local and unspecified addresses are refused); restrict egress at the network")
 		}

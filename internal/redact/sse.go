@@ -27,6 +27,7 @@ type SSEReader struct {
 	st     Stats
 	max    int
 	fields *Fields
+	budget func(n int64) (release func(), err error)
 
 	in    []byte
 	out   []byte
@@ -43,6 +44,26 @@ func NewSSEReader(src io.ReadCloser, e *Engine, st Stats, maxEvent int64) *SSERe
 func (r *SSEReader) WithFields(f *Fields) *SSEReader {
 	r.fields = f
 	return r
+}
+
+// WithBudget reserves memory for each event before redacting it: budget is
+// called with the event's size and returns a release func, or an error that
+// ends the stream.
+func (r *SSEReader) WithBudget(budget func(n int64) (func(), error)) *SSEReader {
+	r.budget = budget
+	return r
+}
+
+// redactEvent is event, within the memory budget when one is set.
+func (r *SSEReader) redactEvent(ev []byte) ([]byte, error) {
+	if r.budget != nil {
+		release, err := r.budget(int64(len(ev)))
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+	return r.event(ev), nil
 }
 
 func (r *SSEReader) Read(p []byte) (int, error) {
@@ -69,8 +90,13 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 					r.err = ErrNotText
 					break
 				}
-				r.out = append(r.out, r.event(r.in)...)
+				out, err := r.redactEvent(r.in)
 				r.in = nil
+				if err != nil {
+					r.err = err
+					break
+				}
+				r.out = append(r.out, out...)
 			}
 			r.err = io.EOF
 		case err != nil:
@@ -107,7 +133,11 @@ func (r *SSEReader) drain() error {
 		if !IsText(r.in[:end]) {
 			return ErrNotText
 		}
-		r.out = append(r.out, r.event(r.in[:end])...)
+		out, err := r.redactEvent(r.in[:end])
+		if err != nil {
+			return err
+		}
+		r.out = append(r.out, out...)
 		r.out = append(r.out, '\n')
 		r.in = r.in[next:]
 	}
@@ -169,9 +199,21 @@ func (r *SSEReader) event(ev []byte) []byte {
 			data = append(data, value)
 		case field == "retry":
 			kept = append(kept, line{text: l})
+		case r.fields != nil && field != "" && field != "event" && field != "id":
+			// Unknown fields carry data the allowlist can't check; clients
+			// ignore them anyway.
+			r.st["field_not_allowed"]++
 		case field == "" && hasColon:
 			// Comment line; clients ignore it, but it still leaves MetLife.
+			if r.fields != nil {
+				r.st["field_not_allowed"]++
+				kept = append(kept, line{text: ":"})
+				break
+			}
 			kept = append(kept, line{text: ":" + r.e.String(l[1:], r.st)})
+		case r.fields != nil && field == "id":
+			// The id is opaque to the agent; only resumption uses it.
+			kept = append(kept, line{text: "id: " + r.e.mask("FIELD", value)})
 		default:
 			// event, id and unknown fields. A redacted id breaks resumption
 			// via Last-Event-ID for that event, which is the safe failure.
