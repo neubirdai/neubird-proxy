@@ -1,4 +1,5 @@
 {{- if not .Values.env.existingSecret }}{{ fail "env.existingSecret is required: a Secret with NEUBIRD_PROXY_TOKEN and your connections' credentials" }}{{ end }}
+{{- $inbound := include "neubird-proxy.inbound" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,7 +10,8 @@ spec:
   selector:
     matchLabels: {{- include "neubird-proxy.selectorLabels" . | nindent 6 }}
   strategy:
-    # A new replica must have a tunnel up (readiness) before an old one goes.
+    # A new replica must be ready (with a tunnel up, in mode tunnel) before
+    # an old one goes.
     rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
   template:
     metadata:
@@ -21,6 +23,9 @@ spec:
       annotations:
         checksum/config: {{ include "neubird-proxy.config" . | sha256sum }}
         checksum/relay-ca: {{ .Values.relayCA.cert | sha256sum }}
+        {{- if $inbound }}
+        checksum/client-ca: {{ .Values.inbound.clientCA.cert | sha256sum }}
+        {{- end }}
         checksum/upstream-ca: {{ .Values.upstreamCA.cert | sha256sum }}
         {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{ end }}
     spec:
@@ -52,9 +57,13 @@ spec:
           envFrom:
             - secretRef: {name: {{ .Values.env.existingSecret }}}
           ports:
+            {{- if $inbound }}
+            - {name: proxy, containerPort: 8443}
+            {{- end }}
             - {name: admin, containerPort: 9090}
-          # Ready only with a tunnel up, so a rollout with a bad key or CA
-          # stops before it replaces working replicas.
+          # Ready only once serving (in mode tunnel, with a tunnel up), so a
+          # rollout with a bad key, CA or certificate stops before it
+          # replaces working replicas.
           readinessProbe:
             httpGet: {path: /readyz, port: admin}
             periodSeconds: 5
@@ -68,14 +77,38 @@ spec:
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: config, mountPath: /etc/neubird-proxy/config.yaml, subPath: config.yaml, readOnly: true}
+            {{- if $inbound }}
+            {{- if .Values.inbound.tls.existingSecret }}
+            - {name: tls, mountPath: /etc/neubird-proxy/tls, readOnly: true}
+            {{- end }}
+            {{- if include "neubird-proxy.hasClientCA" . }}
+            - {name: client-ca, mountPath: /etc/neubird-proxy/client-ca, readOnly: true}
+            {{- end }}
+            {{- else }}
             - {name: tunnel, mountPath: /etc/neubird-proxy/tunnel, readOnly: true}
             - {name: ca, mountPath: /etc/neubird-proxy/ca, readOnly: true}
+            {{- end }}
             {{- if or .Values.upstreamCA.cert .Values.upstreamCA.existingConfigMap }}
             - {name: upstream-ca, mountPath: /etc/neubird-proxy/upstream-ca, readOnly: true}
             {{- end }}
       volumes:
         - name: config
           configMap: {name: {{ include "neubird-proxy.fullname" . }}}
+        {{- if $inbound }}
+        {{- with .Values.inbound.tls.existingSecret }}
+        - name: tls
+          secret:
+            secretName: {{ . }}
+            items: [{key: tls.crt, path: tls.crt}, {key: tls.key, path: tls.key}]
+            defaultMode: 0440   # group-readable through fsGroup
+        {{- end }}
+        {{- if include "neubird-proxy.hasClientCA" . }}
+        - name: client-ca
+          configMap:
+            name: {{ include "neubird-proxy.clientCAConfigMap" . }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+        {{- else }}
         - name: tunnel
           secret:
             secretName: {{ include "neubird-proxy.keySecret" . }}
@@ -85,6 +118,7 @@ spec:
           configMap:
             name: {{ include "neubird-proxy.caConfigMap" . }}
             items: [{key: relay-ca.crt, path: relay-ca.crt}]
+        {{- end }}
         {{- if or .Values.upstreamCA.cert .Values.upstreamCA.existingConfigMap }}
         - name: upstream-ca
           configMap:

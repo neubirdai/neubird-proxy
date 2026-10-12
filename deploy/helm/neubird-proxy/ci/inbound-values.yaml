@@ -1,0 +1,29 @@
+# Used by CI (make chart-check): a complete inbound install behind a
+# gateway, with mutual TLS. The client CA is passed with --set-file
+# inbound.clientCA.cert=<a test CA>.
+image:
+  repository: registry.example.com/neubird/neubird-proxy
+  digest: sha256:ad40087a2605f1a181352782a112399e3f1b81fb26c6933684205bc6853eb46d
+mode: inbound
+inbound:
+  tls:
+    existingSecret: neubird-proxy-tls
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    loadBalancerSourceRanges: ["10.30.0.0/24"]
+env:
+  existingSecret: neubird-proxy-env
+config:
+  client_token_env: NEUBIRD_PROXY_TOKEN
+  neubird_destinations:
+    hosts: ["*.example.com", "splunk.example.com:8089"]
+    methods: [GET, POST]
+  redaction:
+    mask: hmac
+    hmac_key_env: REDACTION_HMAC_KEY
+networkPolicy:
+  enabled: true
+  inboundFrom: [{ipBlock: {cidr: 10.30.0.0/24}}]
+  upstreams: [{cidr: 10.20.0.0/16, ports: [8089]}]
