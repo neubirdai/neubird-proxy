@@ -258,7 +258,8 @@ secrets. Any other token gets a 401.
     not change type.
 - **Text, XML and CSV** get whole-body rules.
 - **`text/event-stream`** (MCP) is redacted one event at a time, including
-  `event:` and `id:` lines, and each event is flushed immediately.
+  `event:` and `id:` lines, and each event is flushed immediately. A
+  `retry:` line passes only as a number.
 - **Gzip** is decoded.
 - **Field allowlist.** With `response_fields`, only the listed JSON fields
   leave unmasked, in every host's responses. Every other string or number becomes `[REDACTED:FIELD]`,
@@ -267,11 +268,11 @@ secrets. Any other token gets a 401.
   checked. For SSE, a data payload that isn't JSON is masked whole. Patterns
   are dot paths of keys, where `*` matches any one key. Array elements add
   no segment, so `result.number` covers every element of a `result` array.
-  A pattern allows everything beneath it. Object keys outside the
-  allowlist are kept when they look like field names (letters, digits,
-  `_`, `-`, `.`, up to 64 characters) and masked otherwise, since a query
-  can turn values into keys (`chart … by name`). Under an allowlist, SSE
-  comment and unknown lines are dropped and `id:` values masked.
+  A pattern allows everything beneath it. Object keys that aren't on a
+  pattern's path are masked too, since a query can turn values into keys
+  (`chart … by name`); keys at a `*` position pass as they are. Under an
+  allowlist, SSE comment and unknown lines are dropped, `id:` values and
+  event names that aren't short names are masked.
 - **Before matching**, text is normalized: percent-escapes (`%40`), HTML
   entities (`&#64;`, `&commat;`), full-width characters (`２１９`), and
   invisible characters (zero-width space, soft hyphen) are decoded or
@@ -565,6 +566,8 @@ a clean 502.
 - If a later document is over the cap or isn't valid JSON, the stream is
   cut, because a 502 can no longer be sent. The audit line records
   `json_doc_too_large` or `json_stream_invalid`.
+- A response body that stalls for 2 minutes is cut (for an event stream,
+  only partway through an event; it may idle between events).
 
 Measured end to end through the proxy on one core (Apple M4 Max), for a
 Splunk export of 50,000 results (about 18 MB). Medians of 3–7 runs:
@@ -601,8 +604,10 @@ counted:
 - A body over the cap is refused as soon as the proxy has read past the
   cap, not after decoding it.
 - `max_concurrent_buffered` (default 4) still limits how many are buffered at
-  once. Streamed responses hold one document at a time and count against
-  both only while their first document is decoded. Redaction is single-threaded per response; see the plan
+  once. A streamed response holds a slot only while its first document is
+  decoded; later documents, SSE events (and the input buffered while one
+  arrives) and request bodies each reserve memory from the same budget
+  while they're processed. Redaction is single-threaded per response; see the plan
 for the throughput work.
 
 ## Kubernetes hardening

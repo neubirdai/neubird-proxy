@@ -33,8 +33,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/metrics"
@@ -582,7 +584,7 @@ func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, er
 			if r.ContentLength >= 0 && r.ContentLength < size {
 				size = r.ContentLength
 			}
-			reserve := size * requestBufferFactor
+			reserve := s.mem.clamp(size * requestBufferFactor)
 			if err := s.mem.acquire(r.Context(), reserve); err != nil {
 				return "", err
 			}
@@ -730,6 +732,20 @@ func checkMCPTools(body []byte, tools map[string]bool) string {
 	return ""
 }
 
+// foldKey maps every rune to the smallest in its Unicode simple-fold
+// orbit, so two keys fold equal exactly when strings.EqualFold says so.
+func foldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		min := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < min {
+				min = f
+			}
+		}
+		return min
+	}, s)
+}
+
 // strictObject decodes a JSON object whose keys are unambiguous: a key
 // that repeats, or differs from another only in case, is refused, since
 // parsers disagree on which one wins (Go's encoding/json matches field
@@ -746,28 +762,32 @@ func strictObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		key := tok.(string)
-		if seen[strings.ToLower(key)] {
+		key, _ := tok.(string)
+		// Folded as encoding/json compares (Unicode simple folding, so
+		// "ſ" matches "s" and the Kelvin sign "k").
+		f := foldKey(key)
+		if seen[f] {
 			return nil, fmt.Errorf("ambiguous key %q", key)
 		}
-		seen[strings.ToLower(key)] = true
+		seen[f] = true
+		// A key that folds to one this check reads, in another spelling,
+		// would be read by a case-insensitive server instead.
+		for _, k := range []string{"method", "params", "name"} {
+			if key != k && strings.EqualFold(key, k) {
+				return nil, fmt.Errorf("key %q is a variant of %q", key, k)
+			}
+		}
 		var v json.RawMessage
 		if err := dec.Decode(&v); err != nil {
 			return nil, err
 		}
 		out[key] = v
 	}
-	if _, err := dec.Token(); err != nil {
+	if _, err := dec.Token(); err != nil { // '}'
 		return nil, err
 	}
-	// A key that only differs in case from one this check reads would be
-	// read by a case-insensitive server instead.
-	for _, k := range []string{"method", "params", "name"} {
-		if seen[k] {
-			if _, exact := out[k]; !exact {
-				return nil, fmt.Errorf("key %q in the wrong case", k)
-			}
-		}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("data after the object")
 	}
 	return out, nil
 }
@@ -926,22 +946,20 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return &blockError{"unsupported_content_encoding"}
 	}
 
+	// An upstream may not stall partway through a body for long: that
+	// would hold buffers, budget and a request slot.
+	idle := newIdleBody(resp.Body, streamIdleTimeout)
+	resp.Body = idle
+
 	kind := classify(h.Get("Content-Type"))
 	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
 		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.maxBuffered).WithFields(fields)
 		if s.mem != nil {
-			// An event stream can stay open for long, so it holds memory
-			// only while it redacts an event, not for its whole life.
-			ctx := resp.Request.Context()
-			sse.WithBudget(func(n int64) (func(), error) {
-				reserve := n * bufferFactor
-				if err := s.mem.acquire(ctx, reserve); err != nil {
-					return nil, err
-				}
-				return func() { s.mem.release(reserve) }, nil
-			})
+			sse.WithBudget(ctxBudget{s.mem, resp.Request.Context()})
 		}
+		// A stream may idle between events, but not halfway through one.
+		idle.whilePending(sse.Pending)
 		st.stream = sse
 		resp.Body = &dropTrailers{ReadCloser: sse, resp: resp}
 		resp.ContentLength = -1
@@ -960,38 +978,24 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// limit is known, how much memory they may take together: each
 	// reserves bufferFactor times its size (its declared length, or the
 	// cap when it has none).
-	// A streamed JSON body keeps both until it ends (keep is set), since
-	// its later documents are decoded after modifyResponse returns.
-	keep := false
-	var reserved int64
 	select {
 	case s.buffered <- struct{}{}:
+		defer func() { <-s.buffered }()
 	case <-resp.Request.Context().Done():
 		resp.Body.Close()
 		return resp.Request.Context().Err()
 	}
-	release := func() {
-		if reserved > 0 {
-			s.mem.release(reserved)
-		}
-		<-s.buffered
-	}
-	defer func() {
-		if !keep {
-			release()
-		}
-	}()
 	if s.mem != nil {
 		size := s.maxBuffered
 		if n := resp.ContentLength; n >= 0 && n < size && !gzipped {
 			size = n
 		}
-		reserve := size * bufferFactor
+		reserve := s.mem.clamp(size * bufferFactor)
 		if err := s.mem.acquire(resp.Request.Context(), reserve); err != nil {
 			resp.Body.Close()
 			return err
 		}
-		reserved = reserve
+		defer s.mem.release(reserve)
 	}
 
 	if kind == kindJSON {
@@ -1026,9 +1030,13 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			resp.Body.Close()
 			return setBody(resp, js.Bytes())
 		default:
+			// Later documents are decoded after this returns: each within
+			// the budget, and the upstream may not stall halfway through.
+			if s.mem != nil {
+				js.WithBudget(ctxBudget{s.mem, resp.Request.Context()})
+			}
 			st.stream = js
-			keep = true
-			resp.Body = &dropTrailers{ReadCloser: &releaseOnClose{ReadCloser: js, release: release}, resp: resp}
+			resp.Body = &dropTrailers{ReadCloser: js, resp: resp}
 			resp.ContentLength = -1
 			h.Del("Content-Length")
 			h.Del("Content-MD5")
@@ -1074,17 +1082,44 @@ func (d *dropTrailers) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// releaseOnClose runs release once, when the body is closed.
-type releaseOnClose struct {
+// streamIdleTimeout is how long a response body may go without a byte
+// (for event streams, only while an event is partly received).
+var streamIdleTimeout = 2 * time.Minute
+
+// idleBody closes its body when a Read waits longer than the timeout,
+// which ends the Read with an error.
+type idleBody struct {
 	io.ReadCloser
-	release func()
-	once    sync.Once
+	timeout time.Duration
+	timer   *time.Timer
+	pending atomic.Pointer[func() bool]
 }
 
-func (r *releaseOnClose) Close() error {
-	err := r.ReadCloser.Close()
-	r.once.Do(r.release)
-	return err
+func newIdleBody(rc io.ReadCloser, timeout time.Duration) *idleBody {
+	b := &idleBody{ReadCloser: rc, timeout: timeout}
+	b.timer = time.AfterFunc(time.Hour, func() {
+		if p := b.pending.Load(); p != nil && !(*p)() {
+			return // idle between events
+		}
+		b.ReadCloser.Close()
+	})
+	b.timer.Stop()
+	return b
+}
+
+// whilePending limits the timeout to when pending reports true.
+func (b *idleBody) whilePending(pending func() bool) { b.pending.Store(&pending) }
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	b.timer.Reset(b.timeout)
+	n, err := b.ReadCloser.Read(p)
+	b.timer.Stop()
+	return n, err
+}
+
+func (b *idleBody) Close() error {
+	b.timer.Stop()
+	return b.ReadCloser.Close()
 }
 
 func setBody(resp *http.Response, body []byte) error {

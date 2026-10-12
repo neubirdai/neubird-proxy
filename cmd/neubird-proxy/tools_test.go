@@ -241,7 +241,7 @@ neubird_destinations:
 		t.Fatalf("code %d:\n%s", code, out)
 	}
 	for _, pat := range []string{
-		`neubird_destinations,`, `\+\s+"id": "\[REDACTED:EMAIL\]"`, `\+\s+"note": "\[REDACTED:FIELD\]"`,
+		`neubird_destinations,`, `\+\s+"id": "\[REDACTED:EMAIL\]"`, `\+\s+"\[REDACTED:FIELD\]": "\[REDACTED:FIELD\]"`,
 	} {
 		matches(t, out, pat)
 	}

@@ -475,7 +475,7 @@ func TestFieldAllowlistMasksDataKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "John") || !strings.Contains(string(out), `"description":"[REDACTED:FIELD]"`) {
+	if strings.Contains(string(out), "John") || strings.Contains(string(out), "description") || !strings.Contains(string(out), `"number":"1"`) {
 		t.Fatalf("got %s", out)
 	}
 }
@@ -495,12 +495,12 @@ func TestFieldAllowlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"result":[{"number":"INC0010042","priority":2,"description":"[REDACTED:FIELD]",` +
-		`"assignment_group":{"display_value":"Digital Identity L2","value":"[REDACTED:FIELD]"},"active":true,"note":"",` +
+		`"assignment_group":{"display_value":"Digital Identity L2","[REDACTED:FIELD]":"[REDACTED:FIELD]"},"active":true,"note":"",` +
 		`"caller":{"display_value":"[REDACTED:EMAIL]"}}],"meta":{"count":1}}`
 	if string(out) != want {
 		t.Fatalf("got  %s\nwant %s", out, want)
 	}
-	if st["field_not_allowed"] != 2 || st["email"] != 1 {
+	if st["field_not_allowed"] != 3 || st["email"] != 1 { // two values and one key
 		t.Fatalf("stats %v", st)
 	}
 	if _, err := NewFields([]string{"a..b"}); err == nil {
@@ -521,7 +521,7 @@ func TestSSEFieldAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"[REDACTED:FIELD]\"}],\"isError\":false}}\n\n" +
+	want := "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"[REDACTED:FIELD]\":\"[REDACTED:FIELD]\"}],\"isError\":false}}\n\n" +
 		"data: [REDACTED:FIELD]\n\n"
 	if string(out) != want {
 		t.Fatalf("got  %q\nwant %q", out, want)

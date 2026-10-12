@@ -45,6 +45,24 @@ func (b *memBudget) acquire(ctx context.Context, n int64) error {
 	}
 }
 
+// clamp limits a reservation to the whole budget, which acquire needs to
+// ever succeed.
+func (b *memBudget) clamp(n int64) int64 {
+	if n > b.total {
+		return b.total
+	}
+	return n
+}
+
+// ctxBudget is the budget for one request: waits end with its context.
+type ctxBudget struct {
+	mem *memBudget
+	ctx context.Context
+}
+
+func (c ctxBudget) Acquire(n int64) error { return c.mem.acquire(c.ctx, c.mem.clamp(n)) }
+func (c ctxBudget) Release(n int64)       { c.mem.release(c.mem.clamp(n)) }
+
 func (b *memBudget) release(n int64) {
 	b.mu.Lock()
 	b.free += n

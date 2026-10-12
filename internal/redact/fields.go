@@ -2,7 +2,6 @@ package redact
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -37,16 +36,12 @@ func NewFields(patterns []string) (*Fields, error) {
 	return f, nil
 }
 
-// fieldNameRe is a key that reads as a field name rather than data.
-var fieldNameRe = regexp.MustCompile(`^[A-Za-z_@$][A-Za-z0-9_.$@-]{0,63}$`)
-
 // allowsKey reports whether the last key of path may leave as it is: it's
-// inside an allowed field, on the way to one (a literal segment of a
-// pattern, or a * position), or shaped like a field name. Any other key is
-// data the allowlist didn't approve: a query can put free text in keys
-// (Splunk chart ... by name), and its value is masked anyway.
+// inside an allowed field, or on the way to one (a literal segment of a
+// pattern, or a * position). Any other key is masked like a value: a query
+// can put data in keys (Splunk chart ... by name).
 func (f *Fields) allowsKey(path []string) bool {
-	if f.allows(path) || fieldNameRe.MatchString(path[len(path)-1]) {
+	if f.allows(path) {
 		return true
 	}
 	for _, p := range f.pats {

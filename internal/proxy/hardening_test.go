@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Keys that differ only in case, or repeat, are read differently by
@@ -19,6 +20,9 @@ func TestMCPToolCheckRefusesAmbiguousKeys(t *testing.T) {
 		`{"method":"tools/call","params":{"NAME":"delete_job"}}`,
 		`{"method":"tools/call","params":"x"}`,
 		`[{"method":"tools/list"},{"method":"tools/call","params":{"name":"get_job_status","Name":"x"}}]`,
+		"{\"method\":\"tools/call\",\"params\":{\"name\":\"get_job_status\"},\"param\u017f\":{\"name\":\"delete_job\"}}",
+		"{\"method\":\"tools/call\",\"params\":{\"name\":\"get_job_status\",\"\u212aey\":1,\"key\":2}}",
+		`{"method":"tools/call","params":{"name":"get_job_status"}}{"method":"tools/call","params":{"name":"delete_job"}}`,
 	} {
 		if checkMCPTools([]byte(body), tools) == "" {
 			t.Errorf("allowed: %s", body)
@@ -111,5 +115,53 @@ func TestDialGuardRefusesMetadataAndSelf(t *testing.T) {
 	}
 	if err := refuseInternalAddresses("tcp", "10.20.30.40:443", nil); err != nil {
 		t.Errorf("private address refused: %v", err)
+	}
+}
+
+// A stalled streamed JSON body neither holds a buffer slot nor waits
+// forever.
+func TestStreamedJSONDoesNotHoldSlot(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 2 * time.Second
+	t.Cleanup(func() { streamIdleTimeout = old })
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	cfg := strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 4096\nmax_concurrent_buffered: 1", 1)
+	f := newFixture(t, cfg, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/stall") {
+			io.WriteString(w, "{\"a\":1}\n")
+			w.(http.Flusher).Flush()
+			select {
+			case <-hang:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		io.WriteString(w, `{"ok":true}`)
+	})
+	done := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequest("GET", f.proxy.URL+"/splunk/stall", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := f.proxy.Client().Do(req)
+		if err == nil {
+			_, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	if resp, body := f.do(t, "GET", "/splunk/other", bearer); resp.StatusCode != 200 || body != `{"ok":true}` {
+		t.Fatalf("second request: %d %s", resp.StatusCode, body)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("second request waited %v for the stalled stream's slot", d)
+	}
+	select {
+	case <-done: // cut by the idle timeout
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled stream was not cut")
 	}
 }

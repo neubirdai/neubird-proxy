@@ -31,6 +31,19 @@ type JSONStream struct {
 	out     []byte
 	err     error
 	lastDoc int64 // input size of the last document, for batching
+	budget  Budget
+}
+
+// jsonFactor is how many times its size decoding and redacting a document
+// may take.
+const jsonFactor = 12
+
+// WithBudget accounts for each later document while it's decoded: the
+// stream waits for a document's first byte outside the budget, then
+// reserves for the largest document it may be.
+func (s *JSONStream) WithBudget(b Budget) *JSONStream {
+	s.budget = b
+	return s
 }
 
 // countingReader fails once the decoder has read far past the start of the
@@ -168,6 +181,14 @@ func (s *JSONStream) probablyBuffered() bool {
 func (s *JSONStream) next() {
 	start := s.dec.InputOffset()
 	s.cr.docStart = start
+	if s.budget != nil && s.dec.More() {
+		n := s.max * jsonFactor
+		if err := s.budget.Acquire(n); err != nil {
+			s.err = err
+			return
+		}
+		defer s.budget.Release(n)
+	}
 	tok, err := s.dec.Token()
 	switch {
 	case err == io.EOF:
