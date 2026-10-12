@@ -190,6 +190,12 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 			r.err = err
 		}
 	}
+	if r.activity != nil && len(r.in) == 0 {
+		// Nothing partly received: the deadline isn't the upstream's while
+		// the output is written downstream.
+		r.activity(false)
+		r.progress = false
+	}
 	n := copy(p, r.out)
 	r.out = r.out[n:]
 	if len(r.out) == 0 {

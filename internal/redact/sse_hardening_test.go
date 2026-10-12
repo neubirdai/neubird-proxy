@@ -114,3 +114,31 @@ func TestJSONStreamShrinksAfterLargeDocument(t *testing.T) {
 	}
 	pw.Close()
 }
+
+func TestJSONStreamShrinksAfterLargeFirstDocument(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	pr, pw := io.Pipe()
+	go func() { io.WriteString(pw, `{"a":"`+strings.Repeat("x", 3<<20)+`"}`+"\n") }() // then idles
+	s, single, _, err := NewJSONStream(pr, e, Stats{}, 8<<20, nil, -1)
+	if err != nil || single {
+		t.Fatal(err, single)
+	}
+	if s.w.scratch.Cap() > largeBuffer || s.base == 0 {
+		t.Fatalf("kept: scratch %d, decoder replaced %v", s.w.scratch.Cap(), s.base != 0)
+	}
+	pw.Close()
+}
+
+// Once an event is complete and nothing is partly received, the deadline
+// is off while the output is written.
+func TestSSEDeadlineOffAfterCompleteEvent(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	var busy bool
+	r := NewSSEReader(io.NopCloser(strings.NewReader("data: x\n\n")), e, Stats{}, 1<<20).WithActivity(func(b bool) { busy = b })
+	if _, err := r.Read(make([]byte, 100)); err != nil {
+		t.Fatal(err)
+	}
+	if busy {
+		t.Fatal("deadline still armed after a complete event")
+	}
+}

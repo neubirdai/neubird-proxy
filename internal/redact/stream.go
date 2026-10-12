@@ -155,6 +155,7 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 	}
 	// Newline-delimited from here on: every document ends with \n.
 	s.out = append(s.out, '\n')
+	s.shrink() // s.lastDoc is the first document's size
 	return s, false, nil, nil
 }
 
