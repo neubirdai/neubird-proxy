@@ -284,7 +284,7 @@ func TestStalledReaderIsCut(t *testing.T) {
 	t.Cleanup(func() { bodyWorkTimeout = old })
 	f := newFixture(t, strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 33554432", 1), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		io.WriteString(w, strings.Repeat("a", 16<<20))
+		io.WriteString(w, strings.Repeat("a", 8<<20)) // well past socket buffers
 	})
 	conn, err := net.Dial("tcp", strings.TrimPrefix(f.proxy.URL, "http://"))
 	if err != nil {
@@ -294,7 +294,7 @@ func TestStalledReaderIsCut(t *testing.T) {
 	io.WriteString(conn, "GET /splunk/big HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "+token+"\r\n\r\n")
 	// Never read. The handler must finish (its audit line is written) soon
 	// after the deadline, not wait for the reader.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second) // redacting under -race is slow
 	for !strings.Contains(f.logs.String(), `"path":"/big"`) {
 		if time.Now().After(deadline) {
 			t.Fatalf("handler still blocked on a reader that stopped; logs: %.600s", f.logs.String())

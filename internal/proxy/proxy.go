@@ -866,29 +866,40 @@ func checkMCPTools(body []byte, tools map[string]bool) string {
 }
 
 // checkMCPMessage reads one JSON-RPC message from dec and refuses a
-// tools/call naming a tool not in tools.
+// tools/call naming a tool not in tools. It reads in a single pass, keeping
+// only the method and tool name as strings: nothing (params in particular)
+// is copied, so a large argument costs no more than the body.
 func checkMCPMessage(dec *json.Decoder, tools map[string]bool) string {
-	m, err := readObject(dec, "method", "params")
+	var method, name string
+	var haveParams, haveName bool
+	err := readObject(dec, map[string]func() error{
+		"method": func() error { return dec.Decode(&method) },
+		"params": func() error {
+			tok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if tok != json.Delim('{') {
+				// Positional or null params: no tool name to check. Only
+				// a tools/call needs one, which is refused below.
+				return skipRest(dec, tok)
+			}
+			haveParams = true
+			return readFields(dec, map[string]func() error{
+				"name": func() error {
+					haveName = true
+					return dec.Decode(&name)
+				},
+			})
+		},
+	})
 	if err != nil {
 		return "body is not JSON-RPC: " + err.Error()
-	}
-	var method string
-	if v, ok := m["method"]; ok && json.Unmarshal(v, &method) != nil {
-		return "body is not JSON-RPC"
 	}
 	if method != "tools/call" {
 		return ""
 	}
-	pd := json.NewDecoder(bytes.NewReader(m["params"]))
-	params, err := readObject(pd, "name")
-	if err != nil {
-		return "tools/call params: " + err.Error()
-	}
-	if _, err := pd.Token(); err != io.EOF {
-		return "tools/call params: data after the object"
-	}
-	var name string
-	if err := json.Unmarshal(params["name"], &name); err != nil {
+	if !haveParams || !haveName {
 		return "tools/call without a tool name"
 	}
 	if !tools[name] {
@@ -897,24 +908,30 @@ func checkMCPMessage(dec *json.Decoder, tools map[string]bool) string {
 	return ""
 }
 
-// readObject reads a JSON object from dec, keeping the values of the
-// wanted keys and skipping the rest. A wanted key that repeats, or appears
-// in another spelling that folds to it, is refused: parsers disagree on
-// which one wins (encoding/json matches field names with Unicode case
-// folding, so "Method" or "paramſ" would be read as the real key).
-func readObject(dec *json.Decoder, want ...string) (map[string]json.RawMessage, error) {
+// readObject reads a JSON object from dec, calling the handler for each
+// wanted key to consume its value and skipping the rest.
+func readObject(dec *json.Decoder, want map[string]func() error) error {
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil, errors.New("not an object")
+		return errors.New("not an object")
 	}
-	out := map[string]json.RawMessage{}
+	return readFields(dec, want)
+}
+
+// readFields reads the rest of an object whose '{' has been read. A wanted
+// key that repeats, or appears in another spelling that folds to it, is
+// refused: parsers disagree on which one wins (encoding/json matches field
+// names with Unicode case folding, so "Method" or "paramſ" would be read
+// as the real key).
+func readFields(dec *json.Decoder, want map[string]func() error) error {
+	seen := map[string]bool{}
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		key, _ := tok.(string)
 		wanted := ""
-		for _, w := range want {
+		for w := range want {
 			if strings.EqualFold(key, w) {
 				wanted = w
 			}
@@ -922,24 +939,44 @@ func readObject(dec *json.Decoder, want ...string) (map[string]json.RawMessage, 
 		switch {
 		case wanted == "":
 			if err := skipValue(dec); err != nil {
-				return nil, err
+				return err
 			}
 			continue
 		case key != wanted:
-			return nil, fmt.Errorf("key %q is a variant of %q", key, wanted)
-		case out[wanted] != nil:
-			return nil, fmt.Errorf("ambiguous key %q", key)
+			return fmt.Errorf("key %q is a variant of %q", key, wanted)
+		case seen[wanted]:
+			return fmt.Errorf("ambiguous key %q", key)
 		}
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return nil, err
+		seen[wanted] = true
+		if err := want[wanted](); err != nil {
+			return err
 		}
-		out[wanted] = v
 	}
-	if _, err := dec.Token(); err != nil { // '}'
-		return nil, err
+	_, err := dec.Token() // '}'
+	return err
+}
+
+// skipRest reads past a value whose first token has been read.
+func skipRest(dec *json.Decoder, first json.Token) error {
+	if first != json.Delim('{') && first != json.Delim('[') {
+		return nil
 	}
-	return out, nil
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok {
+		case json.Delim('{'), json.Delim('['):
+			if depth++; depth > redact.MaxJSONDepth {
+				return errTooDeep
+			}
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+	}
+	return nil
 }
 
 // skipValue reads past one JSON value without keeping it.

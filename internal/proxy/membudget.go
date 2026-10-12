@@ -7,9 +7,9 @@ import (
 
 // bufferFactor is the peak heap per byte of a body while it is buffered,
 // decoded and redacted: measured at 5-11x for ordinary bodies and up to
-// about 14x for adversarial ones (JSON held in strings, entity-heavy
-// text), so 16 leaves a margin.
-const bufferFactor = 16
+// about 16x for adversarial ones (JSON held in strings, entity-heavy
+// text), so 18 leaves a margin.
+const bufferFactor = 18
 
 // memBudget bounds the memory that buffered bodies may take at once. Each
 // buffered body reserves bufferFactor times its size before it is read and

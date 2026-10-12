@@ -427,11 +427,20 @@ func digitClusters(s string) [][2]int {
 		}
 		if d >= 4 {
 			out = append(out, [2]int{i, j})
+			if len(out) > maxWindows(s) {
+				return [][2]int{{0, len(s)}}
+			}
 		}
 		i = j
 	}
 	return out
 }
+
+// maxWindows is how many windows a string may be split into before the
+// rules just run over all of it: the list costs 16 bytes a window, and
+// text dense with candidates ("@ @ @ ...") would make it many times the
+// text's size.
+func maxWindows(s string) int { return len(s)/64 + 16 }
 
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
@@ -457,6 +466,9 @@ func needleWindows(s, lower string, needles []string, before, after int) [][2]in
 				z++
 			}
 			ws = append(ws, [2]int{a, z})
+			if len(ws) > maxWindows(s) {
+				return [][2]int{{0, len(s)}}
+			}
 			from = max(p+len(n), z-len(n)) // skip occurrences already inside this window
 		}
 	}

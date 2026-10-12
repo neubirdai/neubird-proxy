@@ -243,3 +243,16 @@ func TestSSEKeepsLastEventAndID(t *testing.T) {
 		t.Fatalf("%d bytes: %.300q", len(out), out)
 	}
 }
+
+// Text dense with rule candidates doesn't build a window list many times
+// its size: past a point the rules run over the whole string.
+func TestCandidateWindowsCapped(t *testing.T) {
+	s := strings.Repeat("@ ", 100000)
+	if w := needleWindows(s, s, []string{"@"}, 64, 64); len(w) > maxWindows(s) {
+		t.Fatalf("%d windows", len(w))
+	}
+	d := strings.Repeat("1234 x ", 100000)
+	if w := digitClusters(d); len(w) > maxWindows(d) {
+		t.Fatalf("%d clusters", len(w))
+	}
+}
