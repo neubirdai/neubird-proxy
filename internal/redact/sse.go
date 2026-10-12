@@ -64,7 +64,7 @@ type Budget interface {
 var eventNameRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 
 // sseFactor is how many times its size redacting an event takes.
-const sseFactor = 18
+const sseFactor = 20
 
 // pendingChunk is the granularity of reservations for buffered input.
 const pendingChunk = 1 << 20

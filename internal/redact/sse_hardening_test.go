@@ -278,3 +278,36 @@ func TestDenseMatchesAllMasked(t *testing.T) {
 		t.Fatalf("unmasked: %.200s", out)
 	}
 }
+
+// More than a chunk of matches in a row: none is lost at the boundary,
+// even when a match can start on the previous one's last byte.
+func TestChunkBoundaryKeepsEveryMatch(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for _, in := range []string{
+		strings.Repeat("212-555-0141 ", matchChunk+100),
+		strings.Repeat("(212) 555-0141 ", matchChunk+1),
+		strings.Repeat("1.2.3.4.", matchChunk+1),
+	} {
+		out := e.String(in, Stats{})
+		if strings.Contains(out, "555-0141") || strings.Contains(out, "1.2.3.4") {
+			t.Fatalf("unmasked after the chunk boundary: %.120q", out[len(out)-120:])
+		}
+	}
+}
+
+// Whitespace between a keyword and its value doesn't count against the
+// window, as in column-aligned config dumps.
+func TestAlignedKeywordValues(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for _, in := range []string{
+		"password" + strings.Repeat(" ", 30) + "= hunter2xyz",
+		"password" + strings.Repeat("\t", 31) + "=x1y2z3abc",
+		"Bearer" + strings.Repeat(" ", 36) + "abcdef123456789xyz",
+		"token\n" + strings.Repeat(" ", 40) + "abcdef123456789xyz",
+	} {
+		out := e.String(in, Stats{})
+		if strings.Contains(out, "hunter2") || strings.Contains(out, "x1y2z3") || strings.Contains(out, "abcdef123") {
+			t.Errorf("unmasked: %q", out)
+		}
+	}
+}

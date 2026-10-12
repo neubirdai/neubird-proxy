@@ -391,33 +391,61 @@ const matchChunk = 1024
 // forEachMatch calls f with every match of r within the regions of s, a
 // chunk at a time. Each search starts one byte before where it may match,
 // so \b sees the byte before; a match starting on that byte is skipped.
+//
+// A full chunk is cut at its last gap: the matches before the last match
+// that doesn't touch its predecessor are reported, and the next search
+// starts at that match. Nothing can start on the gap byte before it (the
+// search would have found it), so restarting there loses no match; at a
+// match's last byte it could (a phone's optional "1 " prefix starts on the
+// previous number's last digit).
 func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 	for _, reg := range regions {
 		start, z := reg[0], reg[1]
 		cz := min(len(s), z+1)
 		for start <= z {
 			ca := max(0, start-1)
-			locs := r.re.FindAllStringSubmatchIndex(s[ca:cz], matchChunk)
-			next := -1
+			n := matchChunk
+			locs := r.re.FindAllStringSubmatchIndex(s[ca:cz], n)
 			for _, loc := range locs {
 				for k := range loc {
 					if loc[k] >= 0 {
 						loc[k] += ca
 					}
 				}
+			}
+			cut := len(locs)
+			if len(locs) == n {
+				cut = 0
+				for k := len(locs) - 1; k > 0; k-- {
+					if locs[k][0] > locs[k-1][1] {
+						cut = k
+						break
+					}
+				}
+				if cut == 0 {
+					// No gap: every match touches the next. Finish the
+					// region in one search.
+					locs = r.re.FindAllStringSubmatchIndex(s[ca:cz], -1)
+					for _, loc := range locs {
+						for k := range loc {
+							if loc[k] >= 0 {
+								loc[k] += ca
+							}
+						}
+					}
+					cut = len(locs)
+				}
+			}
+			for _, loc := range locs[:cut] {
 				if loc[0] < start || loc[1] > z {
 					continue
 				}
 				f(loc)
-				next = loc[1]
-				if loc[0] == loc[1] {
-					next++ // an empty match: move past it
-				}
 			}
-			if len(locs) < matchChunk || next < 0 {
+			if cut == len(locs) {
 				break
 			}
-			start = next
+			start = locs[cut][0]
 		}
 	}
 }
@@ -475,7 +503,20 @@ func needleWindows(s, lower string, needles []string, before, after int) [][2]in
 				break
 			}
 			p := from + k
-			a, z := max(0, p-before), min(len(s), p+len(n)+after)
+			// before and after count non-space bytes: the patterns allow
+			// any whitespace between a keyword and its value, as in
+			// column-aligned dumps ("password        = x").
+			a, z := p, p+len(n)
+			for c := 0; a > 0 && c < before; a-- {
+				if !isSpace(s[a-1]) {
+					c++
+				}
+			}
+			for c := 0; z < len(s) && c < after; z++ {
+				if !isSpace(s[z]) {
+					c++
+				}
+			}
 			for a > 0 && !isSpace(s[a-1]) {
 				a--
 			}
