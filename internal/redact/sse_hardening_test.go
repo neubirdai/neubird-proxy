@@ -192,3 +192,14 @@ func TestInnerJSONNumbersRedacted(t *testing.T) {
 		t.Errorf("top-level number changed: %s", out)
 	}
 }
+
+// JSON in strings is walked one level deep; deeper nesting is redacted as
+// text (still masked), so nesting can't multiply memory.
+func TestInnerJSONOneLevel(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	in := `{"s":"{\"t\":\"{\\\"cc\\\":\\\"4111111111111111\\\"}\"}"}`
+	out, err := e.JSON([]byte(in), Stats{})
+	if err != nil || strings.Contains(string(out), "4111") {
+		t.Fatalf("%s %v", out, err)
+	}
+}

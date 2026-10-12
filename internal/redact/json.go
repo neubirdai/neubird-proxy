@@ -190,7 +190,9 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 			w.fieldMask(t)
 		case blocked != nil:
 			w.blocked(blocked, t)
-		case looksLikeJSON(t):
+		case looksLikeJSON(t) && !w.numbersAsText:
+			// One level only (Splunk _raw, MCP tool text): each level holds
+			// its own copies, so deeper nesting is redacted as text.
 			if inner, err := w.e.innerJSON([]byte(t), w.st); err == nil {
 				w.str(string(inner))
 				break

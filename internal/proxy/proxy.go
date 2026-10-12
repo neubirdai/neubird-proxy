@@ -667,14 +667,12 @@ func (s *Server) checkRequest(w http.ResponseWriter, c *config.Connection, r *ht
 		}
 	}
 	// JSON string escapes (\u007c for |) are decoded by the upstream too.
-	dec, ok, err := jsonStrings(body)
+	reason, err := jsonStrings(body, match)
 	if err != nil {
 		return "request body: " + err.Error(), release, nil
 	}
-	if ok {
-		if reason := match(dec); reason != "" {
-			return reason, release, nil
-		}
+	if reason != "" {
+		return reason, release, nil
 	}
 	// Lexically too, so a token a lenient upstream parser accepts and
 	// encoding/json doesn't (NaN, comments) can't stop the decoding.
@@ -731,40 +729,41 @@ func unhex(c byte) byte {
 	}
 }
 
-// jsonStrings returns every string (keys included) in a JSON body,
-// decoded, one per line: of every document of a multi-document body
-// (NDJSON, Elasticsearch _bulk), up to the first that doesn't parse. False
-// if the body has no escapes worth decoding.
+// jsonStrings calls match with every string (keys included) in a JSON
+// body, decoded: of every document of a multi-document body (NDJSON,
+// Elasticsearch _bulk), up to the first that doesn't parse. It stops at the
+// first non-empty reason. Strings are matched one at a time, so nothing but
+// the decoder's buffer and the current string is held: decoding can grow
+// text (an invalid UTF-8 byte becomes three).
 //
 // errTooDeep means the body nests deeper than redact.MaxJSONDepth, which
 // no real request does; the decoder's state would grow with it.
-func jsonStrings(body []byte) (string, bool, error) {
+func jsonStrings(body []byte, match func(string) string) (string, error) {
 	if !bytes.Contains(body, []byte(`\`)) {
-		return "", false, nil
+		return "", nil
 	}
-	var b strings.Builder
 	dec := json.NewDecoder(bytes.NewReader(body))
 	depth := 0
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			break
+			return "", nil
 		}
 		switch t := tok.(type) {
 		case json.Delim:
 			if t == '{' || t == '[' {
 				if depth++; depth > redact.MaxJSONDepth {
-					return "", false, errTooDeep
+					return "", errTooDeep
 				}
 			} else {
 				depth--
 			}
 		case string:
-			b.WriteString(t)
-			b.WriteByte('\n')
+			if reason := match(t); reason != "" {
+				return reason, nil
+			}
 		}
 	}
-	return b.String(), true, nil
 }
 
 // jsonUnescapeLexical decodes JSON string escapes (\uXXXX, including

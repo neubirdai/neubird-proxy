@@ -182,11 +182,12 @@ func TestStreamedJSONDoesNotHoldSlot(t *testing.T) {
 }
 
 func TestJSONStringsMultiDocument(t *testing.T) {
-	got, ok, err := jsonStrings([]byte("{\"index\":\"a\"}\n{\"q\":\"\\u0064elete\"}\n"))
-	if err != nil || !ok || !strings.Contains(got, "delete") {
-		t.Fatalf("got %q %v %v", got, ok, err)
+	var seen []string
+	collect := func(v string) string { seen = append(seen, v); return "" }
+	if _, err := jsonStrings([]byte("{\"index\":\"a\"}\n{\"q\":\"\\u0064elete\"}\n"), collect); err != nil || !strings.Contains(strings.Join(seen, "|"), "delete") {
+		t.Fatalf("got %q %v", seen, err)
 	}
-	if _, _, err := jsonStrings([]byte(strings.Repeat("[", 5000) + `"\u0041"`)); err != errTooDeep {
+	if _, err := jsonStrings([]byte(strings.Repeat("[", 5000)+`"\u0041"`), collect); err != errTooDeep {
 		t.Fatalf("deep body: %v", err)
 	}
 }
