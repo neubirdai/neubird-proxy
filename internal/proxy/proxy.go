@@ -287,6 +287,9 @@ func state(ctx context.Context) *reqState { return ctx.Value(stateKey{}).(*reqSt
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &recorder{ResponseWriter: w}
+	// Runs last: what's still buffered is written under the deadline here,
+	// not by the server after the handler returns, where nothing bounds it.
+	defer func() { _ = rec.FlushError() }()
 
 	select {
 	case s.inflight <- struct{}{}:
