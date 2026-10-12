@@ -346,6 +346,31 @@ func matches(t *testing.T, out, pattern string) {
 	}
 }
 
+// neubird_destinations hosts become rules too: exact names, patterns (Cilium
+// only), ports; "*" is a warning.
+func TestNetpolDestinations(t *testing.T) {
+	cfg := writeFile(t, "config.yaml", `
+client_token_env: PROXY_TOKEN
+neubird_destinations:
+  hosts: ["*", "*.corp.example.com", "splunk.example.com:8089", "10.1.2.3"]
+`)
+	code, out, errOut := runCmd(t, cmdNetpol, "-config", cfg, "-format", "list")
+	if code != 0 || out != "*.corp.example.com:443\n10.1.2.3:443\nsplunk.example.com:8089\n" {
+		t.Fatalf("list: code %d %q", code, out)
+	}
+	if !strings.Contains(errOut, `hosts has "*"`) {
+		t.Fatalf("no warning for *: %q", errOut)
+	}
+	_, out, _ = runCmd(t, cmdNetpol, "-config", cfg)
+	for _, pat := range []string{`matchPattern: "\*\.corp\.example\.com"`, `matchName: "splunk\.example\.com"`, `toCIDR: \["10\.1\.2\.3/32"\]`} {
+		matches(t, out, pat)
+	}
+	_, out, errOut = runCmd(t, cmdNetpol, "-config", cfg, "-format", "kubernetes")
+	if strings.Contains(out, "corp.example.com\"") || !strings.Contains(errOut, "a pattern has no addresses") {
+		t.Fatalf("kubernetes: %s\n%s", out, errOut)
+	}
+}
+
 func TestNetpol(t *testing.T) {
 	cfg := writeFile(t, "config.yaml", `
 client_token_env: PROXY_TOKEN
