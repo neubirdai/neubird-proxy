@@ -49,8 +49,8 @@ In order; the first check that fails ends the request.
 9. **Header allowlist.** Only allowlisted client headers go upstream. This
    drops the NeuBird token, cookies, `Ocp-Apim-Trace`, a client-supplied
    subscription key, and `Accept-Encoding`/`Range` (bodies must arrive whole
-   and uncompressed). The proxy adds the APIM subscription key and an
-   `X-Request-Id`.
+   and uncompressed). The proxy adds the configured upstream headers (such
+   as the APIM subscription key) and an `X-Request-Id`.
 10. **Response.**
     - Stripped: `Set-Cookie`, all `Ocp-Apim-*` headers, and trailers.
     - Dropped: 1xx informational responses such as 103 Early Hints, whose
@@ -65,11 +65,12 @@ certificate from that CA before any of this runs (mutual TLS).
 connection MetLife has cleared, such as Elastic. Every pod start logs a
 warning for it.
 
-## Outbound tunnel (optional)
+## Outbound tunnel
 
 With a `tunnel:` section, the proxy connects *out* to NeuBird's relay, and
 NeuBird's requests arrive over that connection. With `listen: "off"`,
-nothing is exposed inbound at all.
+nothing is exposed inbound at all. The Helm chart always deploys it this
+way: it adds the `tunnel` section and `listen: "off"` itself.
 
 What the customer needs on their network:
 - **Outbound HTTPS** to their own relay, `<tenant>.tunnel.neubird.ai:443`,
@@ -95,6 +96,7 @@ tunnel:
   key_file: /etc/neubird-proxy-tunnel/tunnel.key    # made here (keygen), never sent
   ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt   # pins NeuBird's relay CA
   connections_per_relay: 2    # two tunnels per pod, for faster failover
+  join_token_env: NEUBIRD_JOIN_TOKEN   # optional: enroll the key with a join token
 ```
 
 **Identity.** The proxy has its own key and NeuBird records the key's
@@ -105,15 +107,30 @@ standard (CNCF) for naming workloads in certificates, the way a website
 certificate names a domain. The relay accepts the connection only if the
 key is the one recorded for that customer (`acme`) and proxy (`aks-prod`).
 
-**Setting it up.** The key is created here and never leaves:
+**Setting it up.** The key is created here and never leaves. There are two
+ways for NeuBird to learn it.
+
+With a join token (what the Helm chart does by default):
+1. NeuBird sends you your relay's hostname, its relay CA certificate, and
+   a join token for your tenant and proxy name (`nbjt_…`, single use, with
+   an expiry).
+2. Put the token in the environment variable named by
+   `tunnel.join_token_env`. The chart generates the key in a Secret.
+3. On its first connect, the proxy presents the token and the relay records
+   the key (`enrolled with the join token` in the log). Restarts and other
+   replicas with the same key get `key already enrolled`. Once enrolled, the
+   token can be removed.
+
+With the fingerprint:
 1. Run `neubird-proxy keygen -tenant <tenant> -proxy <name>`, with the
    tenant name NeuBird gives you. It writes `tunnel.key`, which stays with
    you, and prints its fingerprint (`sha256:…`).
 2. Send NeuBird the fingerprint; it isn't secret. NeuBird records it and
    returns its relay CA certificate and your relay's hostname.
 3. Put the key and relay CA in a Secret mounted at the paths above.
-4. Generate the proxy token with `neubird-proxy token`, and give it to
-   NeuBird through your usual secure channel.
+
+Either way, generate the proxy token with `neubird-proxy token` and give it
+to NeuBird through your usual secure channel.
 
 Nothing expires: the proxy re-mints its certificate on every connect.
 To rotate the key, run `keygen` again, send NeuBird the new fingerprint,
@@ -124,8 +141,8 @@ the old key, moving the tunnels over without failing any request.
 fingerprint. A proxy set up with a NeuBird-signed certificate can keep it
 (`tunnel.cert_file`): NeuBird records its key's fingerprint the same way.
 
-`validate` checks the files and shows the tunnel identity and certificate
-expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
+`validate` checks the files and shows the tunnel identity, certificate
+expiry, and whether a join token is set. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
 `netpol` includes the relays in the egress rules.
 
 **Behavior:**
@@ -337,6 +354,7 @@ variable, or the proxy refuses to start. Unknown YAML fields are errors.
 | `tunnel.cert_file` | none | A certificate for the key to present instead of minting one |
 | `tunnel.ca_file` | required with `tunnel` | CA that signs the relays' certificates, pinned |
 | `tunnel.connections_per_relay` | 1 | Tunnels each pod keeps to each relay (1 to 8) |
+| `tunnel.join_token_env` | none | Env var with a join token from NeuBird; the proxy enrolls its key with it on first connect. Unlike other `*_env` fields it may be unset or empty |
 | `redaction.builtins` | default set | Built-in rules, in precedence order |
 | `redaction.blocked_key_patterns` | none | RE2 patterns matched against JSON keys; every value under a matching key is masked |
 | `redaction.custom[]` | none | `{name, regex}` value rules, applied after the builtins |
@@ -476,8 +494,10 @@ the relay's log, the audit line and the upstream), otherwise a new one.
 
 ## Operations
 
-- **`:8443`** is the proxy, and the only port behind the load balancer.
-  Optional in-pod TLS via `tls:`.
+- **Tunnel only** (the Helm chart): no proxy port at all; requests arrive
+  over the outbound tunnel.
+- **`:8443`** is the proxy when `listen` is set (outside the chart), and the
+  only port behind the load balancer. Optional in-pod TLS via `tls:`.
 - **`:9090`** serves `/healthz`, `/readyz` and `/metrics`, cluster-internal
   only.
 - **Startup** logs the config's SHA-256, so every ConfigMap change is visible
@@ -551,8 +571,10 @@ counted:
   cap, not after decoding it.
 - `max_concurrent_buffered` (default 4) still limits how many are buffered at
   once. Streamed responses hold one document at a time and count against
-  both only while their first document is decoded. Redaction is single-threaded per response; see the plan
-for the throughput work.
+  both only while their first document is decoded.
+
+Redaction is single-threaded per response; see the plan for the throughput
+work.
 
 ## Kubernetes hardening
 
