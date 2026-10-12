@@ -82,7 +82,7 @@ func (b *strictBudget) Release(n int64) { b.held -= n }
 func TestSSENoHoldAndWait(t *testing.T) {
 	e := engine(t, config.Redaction{})
 	ev := "data: " + strings.Repeat("x", 1<<20) + "\n\n"
-	b := &strictBudget{total: int64(len(ev)) * sseFactor}
+	b := &strictBudget{total: int64(len(ev)) * e.SSEFactor()}
 	out, err := io.ReadAll(NewSSEReader(io.NopCloser(strings.NewReader(ev)), e, Stats{}, 2<<20).WithBudget(b))
 	if err != nil || len(out) == 0 {
 		t.Fatalf("err %v, %d bytes", err, len(out))
@@ -308,6 +308,29 @@ func TestAlignedKeywordValues(t *testing.T) {
 		out := e.String(in, Stats{})
 		if strings.Contains(out, "hunter2") || strings.Contains(out, "x1y2z3") || strings.Contains(out, "abcdef123") {
 			t.Errorf("unmasked: %q", out)
+		}
+	}
+}
+
+// (?i) folds the Kelvin sign and the long s onto ASCII letters; keyword
+// rules still find values written with them.
+func TestUnicodeFoldKeywords(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for _, in := range []string{"api_\u212aey=hunter22", "pa\u017f\u017fword=hunter22", "my_\u017fecret=hunter22"} {
+		if out := e.String(in, Stats{}); strings.Contains(out, "hunter22") {
+			t.Errorf("unmasked: %q", out)
+		}
+	}
+}
+
+// A custom rule whose matches depend on what precedes them (\b, ^) still
+// finds every match after a chunk boundary.
+func TestChunkResumeCustomAnchors(t *testing.T) {
+	for _, re := range []string{`\bab|b`, `^ab|b`} {
+		e := engine(t, config.Redaction{Builtins: &[]string{}, Custom: []config.CustomRule{{Name: "x", Regex: re}}})
+		in := strings.Repeat("b", matchChunk-1) + "ab"
+		if out := e.String(in, Stats{}); strings.HasSuffix(out, "b") {
+			t.Errorf("%s: last match unmasked: ...%q", re, out[len(out)-40:])
 		}
 	}
 }

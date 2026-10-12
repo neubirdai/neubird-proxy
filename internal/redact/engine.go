@@ -199,7 +199,11 @@ func (e *Engine) String(orig string, st Stats) string {
 		if nDigits < r.minDigits {
 			continue
 		}
-		if len(r.needles) > 0 {
+		// (?i) also folds the Kelvin sign to k and the long s to s, which
+		// an ASCII needle search can't see: with either present, keyword
+		// rules run over the whole string.
+		folds := hasFoldRunes(s)
+		if len(r.needles) > 0 && !folds {
 			if lower == "" {
 				lower = asciiLower(s)
 			}
@@ -215,7 +219,11 @@ func (e *Engine) String(orig string, st Stats) string {
 			}
 			regions = clusters
 		case scopeNeedles:
-			regions = needleWindows(s, lower, r.needles, r.before, r.after)
+			if folds {
+				regions = [][2]int{{0, len(s)}}
+			} else {
+				regions = needleWindows(s, lower, r.needles, r.before, r.after)
+			}
 		default:
 			regions = [][2]int{{0, len(s)}}
 		}
@@ -352,6 +360,24 @@ func (e *Engine) isAllowed(m string) bool {
 
 // mask renders [REDACTED:LABEL], or with HMAC masking
 // [REDACTED:LABEL:<16 hex>] so equal values correlate across events.
+// BufferFactor is how many times its size redacting a buffered body or a
+// stream document may take (measured peaks plus a margin), and SSEFactor
+// the same for an SSE event. HMAC masks are longer than labels, so text
+// dense with matches grows more with them.
+func (e *Engine) BufferFactor() int64 {
+	if e.hmacKey != nil {
+		return 24
+	}
+	return 18
+}
+
+func (e *Engine) SSEFactor() int64 {
+	if e.hmacKey != nil {
+		return 27
+	}
+	return 20
+}
+
 func (e *Engine) mask(label, value string) string {
 	if e.hmacKey == nil {
 		return "[REDACTED:" + label + "]"
@@ -402,6 +428,7 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 	for _, reg := range regions {
 		start, z := reg[0], reg[1]
 		cz := min(len(s), z+1)
+		var expect []int // the match a resumed search must find first
 		for start <= z {
 			ca := max(0, start-1)
 			n := matchChunk
@@ -412,6 +439,24 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 						loc[k] += ca
 					}
 				}
+			}
+			if expect != nil && (len(locs) == 0 || locs[0][0] != expect[0] || locs[0][1] != expect[1]) {
+				// Restarting mid-text changed what ^ or \b see (a custom
+				// rule): finish the region from its start in one search,
+				// reporting only what follows the resume point.
+				ra := max(0, reg[0]-1)
+				locs = r.re.FindAllStringSubmatchIndex(s[ra:cz], -1)
+				for _, loc := range locs {
+					for k := range loc {
+						if loc[k] >= 0 {
+							loc[k] += ra
+						}
+					}
+					if loc[0] >= start && loc[0] >= reg[0] && loc[1] <= z {
+						f(loc)
+					}
+				}
+				break
 			}
 			cut := len(locs)
 			if len(locs) == n {
@@ -446,8 +491,15 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 				break
 			}
 			start = locs[cut][0]
+			expect = []int{locs[cut][0], locs[cut][1]}
 		}
 	}
+}
+
+// hasFoldRunes reports whether s holds a rune that (?i) folds onto an ASCII
+// letter: U+212A KELVIN SIGN (k) or U+017F LATIN SMALL LETTER LONG S (s).
+func hasFoldRunes(s string) bool {
+	return strings.Contains(s, "\u212a") || strings.Contains(s, "\u017f")
 }
 
 func isDigitShape(c byte) bool {

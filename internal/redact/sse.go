@@ -63,9 +63,6 @@ type Budget interface {
 
 var eventNameRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 
-// sseFactor is how many times its size redacting an event takes.
-const sseFactor = 20
-
 // pendingChunk is the granularity of reservations for buffered input.
 const pendingChunk = 1 << 20
 
@@ -120,7 +117,7 @@ func (r *SSEReader) redactEvent(ev []byte) ([]byte, error) {
 		// The input's reservation counts toward the event's: only the rest
 		// is asked for, which never exceeds the budget (an event is at most
 		// a twelfth of it).
-		if n := int64(len(ev))*sseFactor - r.reserved; n > 0 {
+		if n := int64(len(ev))*r.e.SSEFactor() - r.reserved; n > 0 {
 			if err := r.budget.Acquire(n); err != nil {
 				return nil, err
 			}

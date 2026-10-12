@@ -5,14 +5,8 @@ import (
 	"sync"
 )
 
-// bufferFactor is the peak heap per byte of a body while it is buffered,
-// decoded and redacted: measured at 5-11x for ordinary bodies and up to
-// about 16x for adversarial ones (JSON held in strings, entity-heavy
-// text), so 18 leaves a margin.
-const bufferFactor = 18
-
 // memBudget bounds the memory that buffered bodies may take at once. Each
-// buffered body reserves bufferFactor times its size before it is read and
+// buffered body reserves the engine's BufferFactor times its size before it is read and
 // releases it when done, so a few large bodies wait for each other while
 // small ones (most API and MCP responses) run side by side. A nil budget
 // means no memory limit is known: only max_concurrent_buffered applies.
@@ -91,7 +85,7 @@ func (s *Server) SetMemoryLimit(limit int64) int64 {
 	if fit := s.reqMem.total / requestBufferFactor; fit < s.maxRequest {
 		s.maxRequest = fit
 	}
-	if fit := total / bufferFactor; fit < s.maxBuffered {
+	if fit := total / s.engine.BufferFactor(); fit < s.maxBuffered {
 		s.maxBuffered = fit
 	}
 	return s.maxBuffered

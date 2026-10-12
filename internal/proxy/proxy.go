@@ -1197,7 +1197,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 	// Bound how many bodies are buffered at once, and, when the memory
 	// limit is known, how much memory they may take together: each
-	// reserves bufferFactor times its size (its declared length, or the
+	// reserves the engine's BufferFactor times its size (its declared length, or the
 	// cap when it has none).
 	select {
 	case s.buffered <- struct{}{}:
@@ -1211,7 +1211,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		if n := resp.ContentLength; n >= 0 && n < size && !gzipped {
 			size = n
 		}
-		reserve := s.mem.clamp(size * bufferFactor)
+		reserve := s.mem.clamp(size * s.engine.BufferFactor())
 		if err := s.mem.acquire(resp.Request.Context(), reserve); err != nil {
 			resp.Body.Close()
 			return err

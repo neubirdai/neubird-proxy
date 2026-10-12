@@ -45,10 +45,6 @@ func (s *JSONStream) WithActivity(f func(busy bool)) *JSONStream {
 	return s
 }
 
-// jsonFactor is how many times its size decoding and redacting a document
-// may take.
-const jsonFactor = 18
-
 // WithBudget accounts for each later document while it's decoded: the
 // stream waits for a document's first byte outside the budget, then
 // reserves for the largest document it may be.
@@ -302,7 +298,7 @@ func (s *JSONStream) next() {
 	}
 	if (s.budget != nil || s.activity != nil) && more {
 		if s.budget != nil {
-			n := s.max * jsonFactor
+			n := s.max * s.w.e.BufferFactor()
 			if err := s.budget.Acquire(n); err != nil {
 				s.err = err
 				return
