@@ -142,8 +142,9 @@ fingerprint. A proxy set up with a NeuBird-signed certificate can keep it
 (`tunnel.cert_file`): NeuBird records its key's fingerprint the same way.
 
 `validate` checks the files and shows the tunnel identity, certificate
-expiry, and whether a join token is set. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
-`netpol` includes the relays in the egress rules.
+expiry, and whether a join token is set. `test` checks DNS, TCP and the
+mutual-TLS handshake to each relay. `netpol` includes the relays in the
+egress rules.
 
 **Behavior:**
 - Each pod keeps `connections_per_relay` tunnels to every relay address.
