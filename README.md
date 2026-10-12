@@ -219,6 +219,25 @@ warns that open mode is on, and loudly when `*` is listed. Restrict egress at
 the network to what the patterns are meant to cover: `netpol` can't turn
 wildcards into hostname rules.
 
+**Credentials and visibility in open mode.** Unlike a named connection,
+where the customer holds the backend credentials and NeuBird never sees
+them:
+- **NeuBird holds the backend credential** (an API token, an OAuth access
+  token) in its connection, as it would without the proxy. It sends it as
+  `X-Neubird-Upstream-<Header>`; the proxy forwards it as `<Header>`, only
+  for the headers in `credential_headers` (default `Authorization`), and
+  drops any other `X-Neubird-Upstream-*` header.
+- **NeuBird knows the destination hostnames**: they're the endpoint URLs
+  in its connections, and every request names one.
+- **The customer's own credentials stay out of it:** `upstream_defaults`
+  headers and every named connection's `headers` and
+  `upstream_basic_auth` are never sent to open-mode hosts.
+- The proxy token, redaction, and logging work as for a named connection;
+  credential header values are never logged.
+
+Use a named connection for any backend whose credentials or hostname
+NeuBird must not know.
+
 ## Status API
 
 `GET /_neubird/status` with `Authorization: Bearer <proxy token>` tells

@@ -30,7 +30,8 @@ You need:
   deployed. Every tool is a subcommand of the same image, so the version you
   check with is the version you deploy.
 - For each system, its URL and a credential for the proxy to use. The proxy
-  holds these; NeuBird never sees them.
+  holds these; NeuBird never sees them. (Not in open mode,
+  `neubird_destinations`, where NeuBird holds the credentials.)
 - Outbound access from the cluster to the relay on port 443.
 
 Set a shortcut for running the tools:

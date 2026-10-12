@@ -24,7 +24,8 @@ NeuBird ── relay ⇄ (tunnel, opened from your side, :443) ⇄ neubird-proxy
 **Nothing**, with a join token: the proxy enrolls its own key on first
 connect. (Without one, only the key's **fingerprint**, after install.) The
 key itself, the proxy token's value, and your API credentials stay with
-you.
+you. (In open mode, `neubird_destinations`, NeuBird holds the credentials
+for those hosts instead; see the proxy README.)
 
 ## Install
 

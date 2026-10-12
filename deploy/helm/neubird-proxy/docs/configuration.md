@@ -60,8 +60,10 @@ a connection has none.
 | `passthrough` | `false` | Skip redaction for this connection. Avoid |
 
 NeuBird's token is checked and removed; your credentials (`headers`,
-`upstream_basic_auth`) are added here and never leave the cluster. Every
-`${VAR}` and `*_env` must be set in your `env.existingSecret`, or the proxy
+`upstream_basic_auth`) are added here and never leave the cluster. Open
+mode is the exception: NeuBird sends its own credentials for those hosts
+and holds them (README: Open mode). Every `${VAR}` and `*_env` must be set
+in your `env.existingSecret`, or the proxy
 refuses to start and names the missing one.
 
 ## Redaction (`redaction`)
