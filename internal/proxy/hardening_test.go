@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -268,5 +270,65 @@ func TestBusySSEStreamNotCut(t *testing.T) {
 	_, body := f.do(t, "GET", "/splunk/stream", bearer)
 	if n := strings.Count(body, "data: x"); n != 61 {
 		t.Fatalf("%d events, want 61 (stream cut?)", n)
+	}
+}
+
+// A caller that stops reading doesn't keep its response in memory for
+// longer than the write deadline.
+func TestStalledReaderIsCut(t *testing.T) {
+	old := bodyWorkTimeout
+	bodyWorkTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyWorkTimeout = old })
+	f := newFixture(t, strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 33554432", 1), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		io.WriteString(w, strings.Repeat("a", 16<<20))
+	})
+	conn, err := net.Dial("tcp", strings.TrimPrefix(f.proxy.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "GET /splunk/big HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "+token+"\r\n\r\n")
+	// Never read. The handler must finish (its audit line is written) soon
+	// after the deadline, not wait for the reader.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(f.logs.String(), `"path":"/big"`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("handler still blocked on a reader that stopped; logs: %.600s", f.logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Over HTTP/2 (as on the tunnel), an event stream idling between events
+// longer than the write deadline isn't reset.
+func TestIdleSSEOverHTTP2(t *testing.T) {
+	old := bodyWorkTimeout
+	bodyWorkTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyWorkTimeout = old })
+	f := newFixture(t, baseConfig, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: one\n\n")
+		w.(http.Flusher).Flush()
+		time.Sleep(time.Second)
+		io.WriteString(w, "data: two\n\n")
+	})
+	h2 := httptest.NewUnstartedServer(f.srv)
+	h2.EnableHTTP2 = true
+	h2.StartTLS()
+	defer h2.Close()
+	req, _ := http.NewRequest("GET", h2.URL+"/splunk/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := h2.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("proto %s", resp.Proto)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil || !strings.Contains(string(b), "data: two") {
+		t.Fatalf("stream cut: %v %q", err, b)
 	}
 }

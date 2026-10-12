@@ -1385,11 +1385,32 @@ func (r *recorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Each write and flush gets bodyWorkTimeout: a caller that stops reading
+// would otherwise keep the response (redacted, so outside any memory
+// reservation) in memory indefinitely. The deadline is cleared as soon as
+// the write returns: an HTTP/2 stream is reset when its deadline passes
+// even with no write pending, which would cut an event stream idling
+// between events.
+func (r *recorder) withWriteDeadline(write func() error) error {
+	rc := http.NewResponseController(r.ResponseWriter)
+	_ = rc.SetWriteDeadline(time.Now().Add(bodyWorkTimeout))
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
+	return write()
+}
+
+func (r *recorder) FlushError() error {
+	return r.withWriteDeadline(http.NewResponseController(r.ResponseWriter).Flush)
+}
+
 func (r *recorder) Write(b []byte) (int, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
-	n, err := r.ResponseWriter.Write(b)
+	var n int
+	err := r.withWriteDeadline(func() (err error) {
+		n, err = r.ResponseWriter.Write(b)
+		return err
+	})
 	r.bytes += n
 	return n, err
 }
