@@ -256,3 +256,25 @@ func TestCandidateWindowsCapped(t *testing.T) {
 		t.Fatalf("%d clusters", len(w))
 	}
 }
+
+// A keyword inside an earlier keyword's window gets a window of its own, so
+// a value running past the first window is still masked.
+func TestKeywordInsideEarlierWindow(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	in := `{"msg":"rotating secret for svc-payments in prod-east; secret: s3cr3tV4lu3XYZ","n":"social security number  social security number 219099999"}`
+	out, err := e.JSON([]byte(in), Stats{})
+	if err != nil || strings.Contains(string(out), "s3cr3t") || strings.Contains(string(out), "219099999") {
+		t.Fatalf("%s %v", out, err)
+	}
+}
+
+// Matches are found a chunk at a time; every one is still masked, across
+// chunk boundaries.
+func TestDenseMatchesAllMasked(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	in := strings.Repeat("a%40b.cc jane@example.com 4111 1111 1111 1111 ", 3*matchChunk)
+	out := e.String(in, Stats{})
+	if strings.Contains(out, "@") || strings.Contains(out, "4111") {
+		t.Fatalf("unmasked: %.200s", out)
+	}
+}

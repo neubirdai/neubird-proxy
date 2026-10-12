@@ -410,3 +410,14 @@ func TestDenyPatternsSurviveNonStandardJSON(t *testing.T) {
 		t.Fatalf("%d, want 403", resp.StatusCode)
 	}
 }
+
+func TestMCPCheckUTF8AndLongNames(t *testing.T) {
+	tools := map[string]bool{"ok": true}
+	if r := checkMCPTools([]byte("{\"method\":\"tools/call\",\"params\":{\"name\":\"\x80\x80\"}}"), tools); !strings.Contains(r, "not UTF-8") {
+		t.Fatalf("invalid UTF-8: %q", r)
+	}
+	r := checkMCPTools([]byte(`{"method":"tools/call","params":{"name":"`+strings.Repeat("x", 10000)+`"}}`), tools)
+	if len(r) > 200 {
+		t.Fatalf("reason %d bytes", len(r))
+	}
+}

@@ -841,6 +841,10 @@ func checkMCPTools(body []byte, tools map[string]bool) string {
 	if len(trimmed) == 0 {
 		return ""
 	}
+	// JSON must be UTF-8; decoding would also triple each invalid byte.
+	if !utf8.Valid(trimmed) {
+		return "body is not JSON-RPC: not UTF-8"
+	}
 	// Walked one message at a time, keeping only the keys read: a batch
 	// of many tiny elements must not cost tens of times its size.
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
@@ -903,6 +907,11 @@ func checkMCPMessage(dec *json.Decoder, tools map[string]bool) string {
 		return "tools/call without a tool name"
 	}
 	if !tools[name] {
+		// The name is quoted in the response and the audit line: a short
+		// prefix is enough to say which.
+		if len(name) > 64 {
+			name = strings.ToValidUTF8(name[:64], "") + "…"
+		}
 		return fmt.Sprintf("MCP tool %q is not in mcp_tools", name)
 	}
 	return ""

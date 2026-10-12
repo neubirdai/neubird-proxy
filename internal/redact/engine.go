@@ -171,8 +171,10 @@ func (e *Engine) RuleNames() []string {
 	return out
 }
 
+// span is one match. int32 fields: a body is far below 2 GiB, and text
+// dense with matches holds one span per few bytes.
 type span struct {
-	start, end, rule int
+	start, end, rule int32
 }
 
 // String masks every rule match in s.
@@ -217,10 +219,10 @@ func (e *Engine) String(orig string, st Stats) string {
 		default:
 			regions = [][2]int{{0, len(s)}}
 		}
-		for _, loc := range findIn(r, s, regions) {
+		forEachMatch(r, s, regions, func(loc []int) {
 			a, z := loc[2*r.group], loc[2*r.group+1]
 			if a < 0 || a == z {
-				continue
+				return
 			}
 			m := s[a:z]
 			if r.validate != nil && !r.validate(m) {
@@ -230,13 +232,13 @@ func (e *Engine) String(orig string, st Stats) string {
 					// candidates.
 					spans = e.subMatches(s, a, z, i, spans)
 				}
-				continue
+				return
 			}
 			if e.isAllowed(m) {
-				continue
+				return
 			}
-			spans = append(spans, span{a, z, i})
-		}
+			spans = append(spans, span{int32(a), int32(z), int32(i)})
+		})
 	}
 	if len(spans) == 0 {
 		return orig
@@ -262,7 +264,7 @@ func (e *Engine) String(orig string, st Stats) string {
 				st[e.rules[spans[j].rule].name]++
 			}
 		}
-		oa, oz := first.start, end
+		oa, oz := int(first.start), int(end)
 		if off != nil {
 			oa, oz = int(off[first.start]), int(off[end])
 		}
@@ -304,7 +306,7 @@ func (e *Engine) subMatches(s string, start, end, rule int, spans []span) []span
 			a, z := groups[g][0], groups[h][1]
 			m := s[a:z]
 			if r.anchored.MatchString(m) && r.validate(m) && !e.isAllowed(m) {
-				spans = append(spans, span{a, z, rule})
+				spans = append(spans, span{int32(a), int32(z), int32(rule)})
 				g = h
 				break
 			}
@@ -382,27 +384,42 @@ func containsAny(s string, needles []string) bool {
 // coordinates. Each region carries one byte of context on each side (when
 // there is one), so \b and similar assertions at its edges see the real
 // neighbors; matches are kept only if they start inside the region proper.
-func findIn(r valueRule, s string, regions [][2]int) [][]int {
-	if len(regions) == 1 && regions[0] == [2]int{0, len(s)} {
-		return r.re.FindAllStringSubmatchIndex(s, -1)
-	}
-	var out [][]int
+// matchChunk is how many matches are found per regexp call: all of them
+// at once, for text dense with matches, would cost several times its size.
+const matchChunk = 1024
+
+// forEachMatch calls f with every match of r within the regions of s, a
+// chunk at a time. Each search starts one byte before where it may match,
+// so \b sees the byte before; a match starting on that byte is skipped.
+func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 	for _, reg := range regions {
-		a, z := reg[0], reg[1]
-		ca, cz := max(0, a-1), min(len(s), z+1)
-		for _, loc := range r.re.FindAllStringSubmatchIndex(s[ca:cz], -1) {
-			if loc[0]+ca < a || loc[1]+ca > z {
-				continue
-			}
-			for k := range loc {
-				if loc[k] >= 0 {
-					loc[k] += ca
+		start, z := reg[0], reg[1]
+		cz := min(len(s), z+1)
+		for start <= z {
+			ca := max(0, start-1)
+			locs := r.re.FindAllStringSubmatchIndex(s[ca:cz], matchChunk)
+			next := -1
+			for _, loc := range locs {
+				for k := range loc {
+					if loc[k] >= 0 {
+						loc[k] += ca
+					}
+				}
+				if loc[0] < start || loc[1] > z {
+					continue
+				}
+				f(loc)
+				next = loc[1]
+				if loc[0] == loc[1] {
+					next++ // an empty match: move past it
 				}
 			}
-			out = append(out, loc)
+			if len(locs) < matchChunk || next < 0 {
+				break
+			}
+			start = next
 		}
 	}
-	return out
 }
 
 func isDigitShape(c byte) bool {
@@ -469,7 +486,10 @@ func needleWindows(s, lower string, needles []string, before, after int) [][2]in
 			if len(ws) > maxWindows(s) {
 				return [][2]int{{0, len(s)}}
 			}
-			from = max(p+len(n), z-len(n)) // skip occurrences already inside this window
+			// The next occurrence may sit inside this window, but its value
+			// can run past the window's end: it gets a window of its own
+			// (the cap above bounds how many).
+			from = p + len(n)
 		}
 	}
 	if len(ws) <= 1 {
