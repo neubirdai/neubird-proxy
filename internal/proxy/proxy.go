@@ -33,7 +33,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -66,6 +65,7 @@ type Server struct {
 	// (SetMemoryLimit); maxBuffered is the largest body that may be
 	// buffered: max_body_bytes, or less if that couldn't fit.
 	mem         *memBudget
+	reqMem      *memBudget // request bodies, see SetMemoryLimit
 	maxBuffered int64
 	Metrics     *Metrics
 }
@@ -409,7 +409,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(rec, r.Body, s.cfg.MaxBodyBytes)
 	}
 	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil {
-		reason, err := s.checkRequest(st.conn, r)
+		reason, release, err := s.checkRequest(st.conn, r)
+		defer release()
 		var mbe *http.MaxBytesError
 		switch {
 		case errors.As(err, &mbe):
@@ -451,7 +452,9 @@ func hasDotSegment(p string) bool {
 	if check(p) {
 		return true
 	}
-	if twice, err := url.PathUnescape(p); err == nil && twice != p {
+	// Leniently, as an upstream that decodes twice would: one bad escape
+	// mustn't hide a "%2e%2e" elsewhere.
+	if twice := unescape(p, false); twice != p {
 		return check(twice)
 	}
 	return false
@@ -575,33 +578,48 @@ func pathAllowed(c *config.Connection, rest string) bool {
 // and body, raw and URL-decoded, since Splunk takes its search as a form
 // field. The body is buffered (it is already capped at max_body_bytes) and
 // restored for the upstream.
-func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, error) {
+// The returned release frees the body's memory reservation; the caller
+// runs it when the request is done, since the body is kept for the
+// upstream.
+func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, func(), error) {
+	release := func() {}
 	var body []byte
 	if r.Body != nil && r.Body != http.NoBody {
-		if s.mem != nil {
+		var held int64
+		if s.reqMem != nil {
 			// The body, and the decoded copies matched below.
 			size := s.cfg.MaxBodyBytes
 			if r.ContentLength >= 0 && r.ContentLength < size {
 				size = r.ContentLength
 			}
-			reserve := s.mem.clamp(size * requestBufferFactor)
-			if err := s.mem.acquire(r.Context(), reserve); err != nil {
-				return "", err
+			held = s.reqMem.clamp(size * requestBufferFactor)
+			if err := s.reqMem.acquire(r.Context(), held); err != nil {
+				return "", release, err
 			}
-			defer s.mem.release(reserve)
+			release = func() { s.reqMem.release(held) }
 		}
 		var err error
 		body, err = io.ReadAll(r.Body)
 		r.Body.Close()
 		if err != nil {
-			return "", err
+			return "", release, err
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
+		if s.reqMem != nil {
+			// After the check only the body itself is kept.
+			defer func() {
+				keep := s.reqMem.clamp(int64(len(body)))
+				if keep < held {
+					s.reqMem.release(held - keep)
+					held = keep
+				}
+			}()
+		}
 	}
 	if tools := s.tools[c.Name]; tools != nil && r.Method == http.MethodPost {
 		if reason := checkMCPTools(body, tools); reason != "" {
-			return reason, nil
+			return reason, release, nil
 		}
 	}
 	candidates := []string{r.URL.RawQuery, string(body)}
@@ -619,11 +637,11 @@ func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, er
 	for i, re := range c.RequestDenyRes {
 		for _, cand := range candidates {
 			if re.MatchString(cand) {
-				return fmt.Sprintf("request matches request_deny_patterns[%d]", i), nil
+				return fmt.Sprintf("request matches request_deny_patterns[%d]", i), release, nil
 			}
 		}
 	}
-	return "", nil
+	return "", release, nil
 }
 
 // requestBufferFactor is how many times its size a request body may take
@@ -632,15 +650,18 @@ const requestBufferFactor = 4
 
 // lenientUnescape decodes %XX escapes and + as a space, leaving any
 // malformed escape as it is, as most form decoders do.
-func lenientUnescape(s string) string {
-	if !strings.ContainsAny(s, "%+") {
+func lenientUnescape(s string) string { return unescape(s, true) }
+
+// unescape decodes valid %XX escapes, and + as a space if plus is set.
+func unescape(s string, plus bool) string {
+	if !strings.Contains(s, "%") && !(plus && strings.Contains(s, "+")) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
-		case c == '+':
+		case c == '+' && plus:
 			b.WriteByte(' ')
 		case c == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]):
 			b.WriteByte(unhex(s[i+1])<<4 | unhex(s[i+2]))
@@ -668,10 +689,11 @@ func unhex(c byte) byte {
 }
 
 // jsonStrings returns every string (keys included) in a JSON body,
-// decoded, one per line, or false if the body isn't JSON or has no
-// escapes worth decoding.
+// decoded, one per line: of every document of a multi-document body
+// (NDJSON, Elasticsearch _bulk), up to the first that doesn't parse. False
+// if the body has no escapes worth decoding.
 func jsonStrings(body []byte) (string, bool) {
-	if !bytes.Contains(body, []byte(`\`)) || !json.Valid(body) {
+	if !bytes.Contains(body, []byte(`\`)) {
 		return "", false
 	}
 	var b strings.Builder
@@ -946,10 +968,12 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return &blockError{"unsupported_content_encoding"}
 	}
 
-	// An upstream may not stall partway through a body for long: that
-	// would hold buffers, budget and a request slot.
-	idle := newIdleBody(resp.Body, streamIdleTimeout)
-	resp.Body = idle
+	// An upstream may not take long over a body: while it's partly
+	// received, it holds buffers, budget and a slot.
+	work := newDeadlineBody(resp.Body, bodyWorkTimeout)
+	work.Busy(true)
+	defer work.Busy(false) // streams take over below
+	resp.Body = work
 
 	kind := classify(h.Get("Content-Type"))
 	fields := s.fields[st.conn.Name]
@@ -959,7 +983,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			sse.WithBudget(ctxBudget{s.mem, resp.Request.Context()})
 		}
 		// A stream may idle between events, but not halfway through one.
-		idle.whilePending(sse.Pending)
+		sse.WithActivity(work.Busy)
 		st.stream = sse
 		resp.Body = &dropTrailers{ReadCloser: sse, resp: resp}
 		resp.ContentLength = -1
@@ -1035,6 +1059,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			if s.mem != nil {
 				js.WithBudget(ctxBudget{s.mem, resp.Request.Context()})
 			}
+			js.WithActivity(work.Busy)
 			st.stream = js
 			resp.Body = &dropTrailers{ReadCloser: js, resp: resp}
 			resp.ContentLength = -1
@@ -1082,43 +1107,46 @@ func (d *dropTrailers) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// streamIdleTimeout is how long a response body may go without a byte
-// (for event streams, only while an event is partly received).
-var streamIdleTimeout = 2 * time.Minute
+// bodyWorkTimeout is how long the upstream gets to send a buffered body,
+// or one document or event of a stream, once it has started: while it's
+// partly received, it holds a buffer slot or memory. Between documents
+// and events a stream may idle as long as it likes.
+var bodyWorkTimeout = time.Minute
 
-// idleBody closes its body when a Read waits longer than the timeout,
-// which ends the Read with an error.
-type idleBody struct {
+// deadlineBody closes its body when a unit of work (Busy(true) to
+// Busy(false)) takes longer than the timeout, which ends the pending Read
+// with an error.
+type deadlineBody struct {
 	io.ReadCloser
 	timeout time.Duration
 	timer   *time.Timer
-	pending atomic.Pointer[func() bool]
+	mu      sync.Mutex
+	armed   bool
 }
 
-func newIdleBody(rc io.ReadCloser, timeout time.Duration) *idleBody {
-	b := &idleBody{ReadCloser: rc, timeout: timeout}
-	b.timer = time.AfterFunc(time.Hour, func() {
-		if p := b.pending.Load(); p != nil && !(*p)() {
-			return // idle between events
-		}
-		b.ReadCloser.Close()
-	})
+func newDeadlineBody(rc io.ReadCloser, timeout time.Duration) *deadlineBody {
+	b := &deadlineBody{ReadCloser: rc, timeout: timeout}
+	b.timer = time.AfterFunc(time.Hour, func() { b.ReadCloser.Close() })
 	b.timer.Stop()
 	return b
 }
 
-// whilePending limits the timeout to when pending reports true.
-func (b *idleBody) whilePending(pending func() bool) { b.pending.Store(&pending) }
-
-func (b *idleBody) Read(p []byte) (int, error) {
-	b.timer.Reset(b.timeout)
-	n, err := b.ReadCloser.Read(p)
-	b.timer.Stop()
-	return n, err
+// Busy starts the deadline (if it isn't running) or stops it.
+func (b *deadlineBody) Busy(busy bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch {
+	case busy && !b.armed:
+		b.timer.Reset(b.timeout)
+		b.armed = true
+	case !busy && b.armed:
+		b.timer.Stop()
+		b.armed = false
+	}
 }
 
-func (b *idleBody) Close() error {
-	b.timer.Stop()
+func (b *deadlineBody) Close() error {
+	b.Busy(false)
 	return b.ReadCloser.Close()
 }
 

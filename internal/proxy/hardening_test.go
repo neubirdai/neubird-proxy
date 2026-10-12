@@ -121,17 +121,29 @@ func TestDialGuardRefusesMetadataAndSelf(t *testing.T) {
 // A stalled streamed JSON body neither holds a buffer slot nor waits
 // forever.
 func TestStreamedJSONDoesNotHoldSlot(t *testing.T) {
-	old := streamIdleTimeout
-	streamIdleTimeout = 2 * time.Second
-	t.Cleanup(func() { streamIdleTimeout = old })
+	old := bodyWorkTimeout
+	bodyWorkTimeout = 2 * time.Second
+	t.Cleanup(func() { bodyWorkTimeout = old })
 	hang := make(chan struct{})
 	t.Cleanup(func() { close(hang) })
 	cfg := strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 4096\nmax_concurrent_buffered: 1", 1)
 	f := newFixture(t, cfg, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/stall") {
-			io.WriteString(w, "{\"a\":1}\n")
+			// The first document, then a second one trickled slowly.
+			io.WriteString(w, "{\"a\":1}\n{\"b\":\"")
 			w.(http.Flusher).Flush()
+			for i := 0; i < 50; i++ {
+				select {
+				case <-hang:
+					return
+				case <-r.Context().Done():
+					return
+				case <-time.After(200 * time.Millisecond):
+				}
+				io.WriteString(w, "x")
+				w.(http.Flusher).Flush()
+			}
 			select {
 			case <-hang:
 			case <-r.Context().Done():
@@ -160,8 +172,65 @@ func TestStreamedJSONDoesNotHoldSlot(t *testing.T) {
 		t.Fatalf("second request waited %v for the stalled stream's slot", d)
 	}
 	select {
-	case <-done: // cut by the idle timeout
+	case <-done: // cut by the work deadline
 	case <-time.After(5 * time.Second):
 		t.Fatal("stalled stream was not cut")
 	}
+}
+
+func TestJSONStringsMultiDocument(t *testing.T) {
+	got, ok := jsonStrings([]byte("{\"index\":\"a\"}\n{\"q\":\"\\u0064elete\"}\n"))
+	if !ok || !strings.Contains(got, "delete") {
+		t.Fatalf("got %q %v", got, ok)
+	}
+}
+
+func TestDotSegmentSecondPassLenient(t *testing.T) {
+	for _, p := range []string{"/splunk/%2e%2e/%zz", "/x/%2e%2e/y%"} {
+		if !hasDotSegment(p) {
+			t.Errorf("%s: not caught", p)
+		}
+	}
+	if hasDotSegment("/a+b/%zz/c") {
+		t.Error("false positive")
+	}
+}
+
+// A checked request body stays reserved until the response is done, and
+// is released then.
+func TestRequestBodyReservedUntilDone(t *testing.T) {
+	inUpstream := make(chan struct{})
+	finish := make(chan struct{})
+	f := newFixture(t, lockedConfig, func(w http.ResponseWriter, r *http.Request) {
+		close(inUpstream)
+		<-finish
+		jsonHandler(`{}`)(w, r)
+	})
+	f.srv.SetMemoryLimit(64 << 20)
+	body := strings.Repeat("a", 1000)
+	go func() {
+		req, _ := http.NewRequest("POST", f.proxy.URL+"/splunk/services/search/jobs", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		if resp, err := f.proxy.Client().Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-inUpstream
+	if held := f.srv.reqMem.inUse(); held != int64(len(body)) {
+		t.Errorf("held %d while the request is upstream, want %d", held, len(body))
+	}
+	close(finish)
+	deadline := time.Now().Add(3 * time.Second)
+	for f.srv.reqMem.inUse() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := f.srv.reqMem.inUse(); n != 0 {
+		t.Errorf("not released: %d still held", n)
+	}
+}
+
+func (b *memBudget) inUse() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.total - b.free
 }

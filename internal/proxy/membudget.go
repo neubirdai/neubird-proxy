@@ -82,6 +82,10 @@ func (s *Server) SetMemoryLimit(limit int64) int64 {
 	}
 	total := limit / 4 * 3
 	s.mem = newMemBudget(total)
+	// Request bodies are held until the response is done, so they get a
+	// budget of their own: holding one while waiting for a response
+	// reservation can then never starve the other.
+	s.reqMem = newMemBudget(limit / 8)
 	if fit := total / bufferFactor; fit < s.maxBuffered {
 		s.maxBuffered = fit
 	}

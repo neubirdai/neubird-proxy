@@ -33,7 +33,8 @@ type SSEReader struct {
 
 	reserved int64       // budget held for in's capacity
 	pending  atomic.Bool // part of an event is buffered; read from other goroutines
-	scan     int         // where eventEnd resumes in in: the start of a line
+	activity func(busy bool)
+	scan     int // where eventEnd resumes in in: the start of a line
 
 	in    []byte
 	out   []byte
@@ -99,18 +100,22 @@ func (r *SSEReader) compactIn(consumed int) {
 	} else {
 		r.in = append([]byte(nil), r.in...)
 	}
-	if r.budget != nil && r.reserved > 0 {
-		keep := (int64(cap(r.in)) + pendingChunk - 1) / pendingChunk * pendingChunk
-		if keep < r.reserved {
-			r.budget.Release(r.reserved - keep)
-			r.reserved = keep
-		}
+	if r.budget != nil && r.reserved > 0 && len(r.in) == 0 {
+		r.budget.Release(r.reserved)
+		r.reserved = 0
 	}
 }
 
 // redactEvent is event, within the memory budget when one is set.
 func (r *SSEReader) redactEvent(ev []byte) ([]byte, error) {
 	if r.budget != nil {
+		// The input's reservation goes first, so the stream never holds
+		// memory while it waits for more (the event's reservation covers
+		// the input too). reserveIn takes it again on the next read.
+		if r.reserved > 0 {
+			r.budget.Release(r.reserved)
+			r.reserved = 0
+		}
 		n := int64(len(ev)) * sseFactor
 		if err := r.budget.Acquire(n); err != nil {
 			return nil, err
@@ -126,11 +131,19 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 			return 0, r.err
 		}
 		r.pending.Store(len(r.in) > 0)
+		if r.activity != nil {
+			r.activity(len(r.in) > 0)
+		}
 		n, err := r.src.Read(r.chunk)
 		r.in = append(r.in, r.chunk[:n]...)
 		derr := r.reserveIn()
 		if derr == nil {
 			derr = r.drain()
+		}
+		if derr == nil {
+			// What's left of a partial event stays reserved while the
+			// next read waits.
+			derr = r.reserveIn()
 		}
 		switch {
 		case derr != nil:
@@ -174,6 +187,13 @@ func (r *SSEReader) Close() error {
 		r.reserved = 0
 	}
 	return err
+}
+
+// WithActivity reports when part of an event is buffered (busy) and when
+// none is, so the caller can bound how long an event may take to arrive.
+func (r *SSEReader) WithActivity(f func(busy bool)) *SSEReader {
+	r.activity = f
+	return r
 }
 
 // Pending reports whether part of an event is buffered, waiting for the

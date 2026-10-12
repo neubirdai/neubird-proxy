@@ -64,3 +64,27 @@ func TestSSERetryAndEventLines(t *testing.T) {
 		t.Fatalf("allowlist: %q", out)
 	}
 }
+
+type strictBudget struct{ held, total int64 }
+
+func (b *strictBudget) Acquire(n int64) error {
+	if b.held+n > b.total {
+		return io.ErrShortBuffer // would wait forever: nobody else releases
+	}
+	b.held += n
+	return nil
+}
+func (b *strictBudget) Release(n int64) { b.held -= n }
+
+// The stream never holds its input's reservation while it asks for the
+// event's, so an event as large as the budget allows still goes through
+// with no other traffic.
+func TestSSENoHoldAndWait(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	ev := "data: " + strings.Repeat("x", 1<<20) + "\n\n"
+	b := &strictBudget{total: int64(len(ev)) * sseFactor}
+	out, err := io.ReadAll(NewSSEReader(io.NopCloser(strings.NewReader(ev)), e, Stats{}, 2<<20).WithBudget(b))
+	if err != nil || len(out) == 0 {
+		t.Fatalf("err %v, %d bytes", err, len(out))
+	}
+}

@@ -566,8 +566,9 @@ a clean 502.
 - If a later document is over the cap or isn't valid JSON, the stream is
   cut, because a 502 can no longer be sent. The audit line records
   `json_doc_too_large` or `json_stream_invalid`.
-- A response body that stalls for 2 minutes is cut (for an event stream,
-  only partway through an event; it may idle between events).
+- The upstream gets a minute to send a buffered body, or each document or
+  event of a stream once it has started; otherwise the response is cut. A
+  stream may idle as long as it likes between documents and events.
 
 Measured end to end through the proxy on one core (Apple M4 Max), for a
 Splunk export of 50,000 results (about 18 MB). Medians of 3–7 runs:
@@ -605,9 +606,10 @@ counted:
   cap, not after decoding it.
 - `max_concurrent_buffered` (default 4) still limits how many are buffered at
   once. A streamed response holds a slot only while its first document is
-  decoded; later documents, SSE events (and the input buffered while one
-  arrives) and request bodies each reserve memory from the same budget
-  while they're processed. Redaction is single-threaded per response; see the plan
+  decoded; later documents and SSE events (and the input buffered while
+  one arrives) reserve memory from the same budget while they're
+  processed. Request bodies that are checked have their own budget, an
+  eighth of the memory limit, held until the response is done. Redaction is single-threaded per response; see the plan
 for the throughput work.
 
 ## Kubernetes hardening

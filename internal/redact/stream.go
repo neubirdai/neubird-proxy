@@ -28,10 +28,18 @@ type JSONStream struct {
 	max    int64
 	fields *Fields
 
-	out     []byte
-	err     error
-	lastDoc int64 // input size of the last document, for batching
-	budget  Budget
+	out      []byte
+	err      error
+	lastDoc  int64 // input size of the last document, for batching
+	budget   Budget
+	activity func(busy bool)
+}
+
+// WithActivity reports when a later document starts arriving (busy) and
+// when it's done, so the caller can bound how long one may take.
+func (s *JSONStream) WithActivity(f func(busy bool)) *JSONStream {
+	s.activity = f
+	return s
 }
 
 // jsonFactor is how many times its size decoding and redacting a document
@@ -181,13 +189,19 @@ func (s *JSONStream) probablyBuffered() bool {
 func (s *JSONStream) next() {
 	start := s.dec.InputOffset()
 	s.cr.docStart = start
-	if s.budget != nil && s.dec.More() {
-		n := s.max * jsonFactor
-		if err := s.budget.Acquire(n); err != nil {
-			s.err = err
-			return
+	if (s.budget != nil || s.activity != nil) && s.dec.More() {
+		if s.activity != nil {
+			s.activity(true)
+			defer s.activity(false)
 		}
-		defer s.budget.Release(n)
+		if s.budget != nil {
+			n := s.max * jsonFactor
+			if err := s.budget.Acquire(n); err != nil {
+				s.err = err
+				return
+			}
+			defer s.budget.Release(n)
+		}
 	}
 	tok, err := s.dec.Token()
 	switch {
