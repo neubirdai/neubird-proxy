@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unsafe"
 )
 
 // JSON masks string values inside one or more concatenated JSON documents
@@ -50,7 +51,7 @@ func (e *Engine) jsonFields(body io.Reader, size int, st Stats, fields *Fields, 
 	dec.UseNumber()
 	w := &jsonWriter{e: e, st: st, fields: fields, numbersAsText: numbersAsText}
 	w.out.Grow(size)
-	w.enc = json.NewEncoder(&w.scratch)
+	w.enc = json.NewEncoder(&w.out)
 	w.enc.SetEscapeHTML(false)
 
 	// Local counts are committed only on success, so a fallback to Text
@@ -198,7 +199,9 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 			// One level only (Splunk _raw, MCP tool text): each level holds
 			// its own copies, so deeper nesting is redacted as text.
 			if inner, err := w.e.innerJSON(t, w.st); err == nil {
-				w.str(string(inner))
+				// No string copy of the redacted inner JSON: it isn't
+				// changed or kept after this.
+				w.str(unsafe.String(unsafe.SliceData(inner), len(inner)))
 				break
 			}
 			w.str(w.e.String(t, w.st))
@@ -247,11 +250,11 @@ func (w *jsonWriter) fieldMask(v string) {
 	w.str(w.e.mask("FIELD", v))
 }
 
+// str writes s as a JSON string. The encoder writes into out directly (no
+// scratch copy); its trailing newline is cut off.
 func (w *jsonWriter) str(s string) {
-	w.scratch.Reset()
 	_ = w.enc.Encode(s) // cannot fail for a string
-	b := w.scratch.Bytes()
-	w.out.Write(b[:len(b)-1]) // drop Encode's trailing newline
+	w.out.Truncate(w.out.Len() - 1)
 }
 
 func looksLikeJSON(s string) bool {

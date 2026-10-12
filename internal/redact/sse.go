@@ -115,8 +115,8 @@ func (r *SSEReader) compactIn(consumed int) {
 func (r *SSEReader) redactEvent(ev []byte) ([]byte, error) {
 	if r.budget != nil {
 		// The input's reservation counts toward the event's: only the rest
-		// is asked for, which never exceeds the budget (an event is at most
-		// a twelfth of it).
+		// is asked for, which fits the budget: the caller caps events at the
+		// budget divided by SSEFactor.
 		if n := int64(len(ev))*r.e.SSEFactor() - r.reserved; n > 0 {
 			if err := r.budget.Acquire(n); err != nil {
 				return nil, err

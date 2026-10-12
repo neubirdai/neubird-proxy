@@ -1175,7 +1175,14 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	kind := classify(h.Get("Content-Type"))
 	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
-		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.maxBuffered).WithFields(fields)
+		// An event must fit the budget at the SSE factor, which is larger
+		// than the buffered one: an event it couldn't reserve for would
+		// wait for its deadline and fail.
+		maxEvent := s.maxBuffered
+		if s.mem != nil {
+			maxEvent = min(maxEvent, s.mem.total/s.engine.SSEFactor())
+		}
+		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, maxEvent).WithFields(fields)
 		if s.mem != nil {
 			sse.WithBudget(ctxBudget{s.mem, work.ctx})
 		}

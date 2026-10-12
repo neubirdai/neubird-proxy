@@ -421,3 +421,29 @@ func TestMCPCheckUTF8AndLongNames(t *testing.T) {
 		t.Fatalf("reason %d bytes", len(r))
 	}
 }
+
+// An SSE event near the size cap is delivered: the cap leaves room for the
+// event's reservation at the SSE factor.
+func TestLargeSSEEventFitsBudget(t *testing.T) {
+	old := bodyWorkTimeout
+	bodyWorkTimeout = 3 * time.Second
+	t.Cleanup(func() { bodyWorkTimeout = old })
+	ev := "data: " + strings.Repeat("a", 3<<20) + "\n\n"
+	f := newFixture(t, strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 8388608", 1), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, ev)
+	})
+	// A budget whose buffered cap (total/BufferFactor) would admit the
+	// event, but whose SSE reservation (len x SSEFactor) wouldn't fit.
+	limit := int64(len(ev)) * (f.srv.engine.BufferFactor() + f.srv.engine.SSEFactor()) / 2 * 4 / 3
+	f.srv.SetMemoryLimit(limit)
+	start := time.Now()
+	resp, body := f.do(t, "GET", "/splunk/stream", bearer)
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("event waited %v for memory it can't get", time.Since(start))
+	}
+	// Delivered, or refused at once as too large: never stuck.
+	if resp.StatusCode == 200 && !strings.Contains(body, "data: aaa") && len(body) > 0 {
+		t.Fatalf("%d: %.100q", resp.StatusCode, body)
+	}
+}

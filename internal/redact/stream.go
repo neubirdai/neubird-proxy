@@ -161,7 +161,7 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 	dec := json.NewDecoder(cr)
 	dec.UseNumber()
 	w := &jsonWriter{e: e, fields: fields}
-	w.enc = json.NewEncoder(&w.scratch)
+	w.enc = json.NewEncoder(&w.out)
 	w.enc.SetEscapeHTML(false)
 	s = &JSONStream{src: src, cr: cr, dec: dec, w: w, st: st, max: maxDoc, fields: fields}
 
