@@ -37,6 +37,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/metrics"
@@ -65,6 +67,7 @@ type Server struct {
 	// mem bounds buffered bodies' memory when the memory limit is known
 	// (SetMemoryLimit); maxBuffered is the largest body that may be
 	// buffered: max_body_bytes, or less if that couldn't fit.
+	maxRequest  int64 // largest request body: max_body_bytes, or less to fit reqMem
 	mem         *memBudget
 	reqMem      *memBudget // request bodies, see SetMemoryLimit
 	maxBuffered int64
@@ -105,18 +108,19 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		destTransport = dt
 	}
 	s := &Server{
-		cfg:      cfg,
-		engine:   engine,
-		log:      log,
-		byName:   map[string]*config.Connection{},
-		byHost:   map[string]*config.Connection{},
-		tokens:   map[string][][32]byte{},
-		limiters: map[string]*bucket{},
-		fields:   map[string]*redact.Fields{},
-		tools:    map[string]map[string]bool{},
-		inflight: make(chan struct{}, cfg.MaxConcurrentRequests),
-		buffered: make(chan struct{}, cfg.MaxConcurrentBuffered),
-		Metrics:  newMetrics(),
+		maxRequest: cfg.MaxBodyBytes,
+		cfg:        cfg,
+		engine:     engine,
+		log:        log,
+		byName:     map[string]*config.Connection{},
+		byHost:     map[string]*config.Connection{},
+		tokens:     map[string][][32]byte{},
+		limiters:   map[string]*bucket{},
+		fields:     map[string]*redact.Fields{},
+		tools:      map[string]map[string]bool{},
+		inflight:   make(chan struct{}, cfg.MaxConcurrentRequests),
+		buffered:   make(chan struct{}, cfg.MaxConcurrentBuffered),
+		Metrics:    newMetrics(),
 	}
 	s.maxBuffered = cfg.MaxBodyBytes
 	conns := make([]*config.Connection, 0, len(cfg.Connections)+1)
@@ -336,8 +340,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := st.conn.Name
+	// The response's X-Request-Id is set once the token checks out: without
+	// one, every refusal looks the same, whether or not the name exists.
 	st.id = requestID(r.Header.Get("X-Request-Id"))
-	rec.Header().Set("X-Request-Id", st.id)
 
 	defer func() {
 		p := recover()
@@ -372,12 +377,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if !s.authenticate(st.conn, r) {
-		if st.conn.ClientAuth == config.AuthBasic {
-			rec.Header().Set("WWW-Authenticate", `Basic realm="neubird-proxy"`)
-		}
+		// No WWW-Authenticate challenge: it would tell which names use
+		// Basic auth. Connectors send credentials up front.
 		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
 		return
 	}
+	rec.Header().Set("X-Request-Id", st.id)
 	if st.destErr != "" {
 		// Checked after the token, so a caller without one learns nothing
 		// about which hosts are allowed.
@@ -414,7 +419,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Body != nil {
-		r.Body = http.MaxBytesReader(rec, r.Body, s.cfg.MaxBodyBytes)
+		r.Body = http.MaxBytesReader(rec, r.Body, s.maxRequest)
 	}
 	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil {
 		reason, release, err := s.checkRequest(rec, st.conn, r)
@@ -636,37 +641,62 @@ func (s *Server) checkRequest(w http.ResponseWriter, c *config.Connection, r *ht
 			return reason, release, nil
 		}
 	}
-	candidates := []string{r.URL.RawQuery, string(body)}
-	for _, raw := range []string{r.URL.RawQuery, string(body)} {
+	if len(c.RequestDenyRes) == 0 {
+		return "", release, nil
+	}
+	// Each form the upstream might decode the request into is built,
+	// matched and dropped in turn, so at most one decoded copy is held
+	// (see requestBufferFactor).
+	match := func(cand string) string {
+		for i, re := range c.RequestDenyRes {
+			if re.MatchString(cand) {
+				return fmt.Sprintf("request matches request_deny_patterns[%d]", i)
+			}
+		}
+		return ""
+	}
+	bodyStr := string(body)
+	forms := []func() string{
+		func() string { return r.URL.RawQuery },
+		func() string { return bodyStr },
 		// Decoded leniently: one bad escape must not hide the rest from
 		// the patterns, since upstream decoders are lenient too.
-		if dec := lenientUnescape(raw); dec != raw {
-			candidates = append(candidates, dec)
+		func() string { return lenientUnescape(r.URL.RawQuery) },
+		func() string { return lenientUnescape(bodyStr) },
+	}
+	for _, form := range forms {
+		if reason := match(form()); reason != "" {
+			return reason, release, nil
 		}
 	}
 	// JSON string escapes (\u007c for |) are decoded by the upstream too.
-	if len(c.RequestDenyRes) > 0 {
-		dec, ok, err := jsonStrings(body)
-		if err != nil {
-			return "request body: " + err.Error(), release, nil
-		}
-		if ok {
-			candidates = append(candidates, dec)
-		}
+	// Only for UTF-8 bodies: decoding would triple invalid bytes, and the
+	// lexical pass below still sees every escape.
+	var reason string
+	var err error
+	if utf8.Valid(body) {
+		reason, err = jsonStrings(body, match)
 	}
-	for i, re := range c.RequestDenyRes {
-		for _, cand := range candidates {
-			if re.MatchString(cand) {
-				return fmt.Sprintf("request matches request_deny_patterns[%d]", i), release, nil
-			}
+	if err != nil {
+		return "request body: " + err.Error(), release, nil
+	}
+	if reason != "" {
+		return reason, release, nil
+	}
+	// Lexically too, so a token a lenient upstream parser accepts and
+	// encoding/json doesn't (NaN, comments) can't stop the decoding.
+	if bytes.Contains(body, []byte(`\`)) {
+		if reason := match(jsonUnescapeLexical(body)); reason != "" {
+			return reason, release, nil
 		}
 	}
 	return "", release, nil
 }
 
 // requestBufferFactor is how many times its size a request body may take
-// while checked: the body and its decoded copies.
-const requestBufferFactor = 4
+// while checked: the body, a string copy, and one decoded form at a time
+// (jsonStrings also holds its decoder's buffer while it builds its own).
+const requestBufferFactor = 5
 
 // lenientUnescape decodes %XX escapes and + as a space, leaving any
 // malformed escape as it is, as most form decoders do.
@@ -708,40 +738,97 @@ func unhex(c byte) byte {
 	}
 }
 
-// jsonStrings returns every string (keys included) in a JSON body,
-// decoded, one per line: of every document of a multi-document body
-// (NDJSON, Elasticsearch _bulk), up to the first that doesn't parse. False
-// if the body has no escapes worth decoding.
+// jsonStrings calls match with every string (keys included) in a JSON
+// body, decoded: of every document of a multi-document body (NDJSON,
+// Elasticsearch _bulk), up to the first that doesn't parse. It stops at the
+// first non-empty reason. Strings are matched one at a time, so nothing but
+// the decoder's buffer and the current string is held: decoding can grow
+// text (an invalid UTF-8 byte becomes three).
 //
 // errTooDeep means the body nests deeper than redact.MaxJSONDepth, which
 // no real request does; the decoder's state would grow with it.
-func jsonStrings(body []byte) (string, bool, error) {
+func jsonStrings(body []byte, match func(string) string) (string, error) {
 	if !bytes.Contains(body, []byte(`\`)) {
-		return "", false, nil
+		return "", nil
 	}
-	var b strings.Builder
 	dec := json.NewDecoder(bytes.NewReader(body))
 	depth := 0
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			break
+			return "", nil
 		}
 		switch t := tok.(type) {
 		case json.Delim:
 			if t == '{' || t == '[' {
 				if depth++; depth > redact.MaxJSONDepth {
-					return "", false, errTooDeep
+					return "", errTooDeep
 				}
 			} else {
 				depth--
 			}
 		case string:
-			b.WriteString(t)
-			b.WriteByte('\n')
+			if reason := match(t); reason != "" {
+				return reason, nil
+			}
 		}
 	}
-	return b.String(), true, nil
+}
+
+// jsonUnescapeLexical decodes JSON string escapes (\uXXXX, including
+// surrogate pairs, and \n, \", \\, \/ and the rest) wherever they appear
+// in b, without parsing it. Malformed escapes are left as they are.
+func jsonUnescapeLexical(b []byte) string {
+	var out strings.Builder
+	out.Grow(len(b))
+	for i := 0; i < len(b); i++ {
+		if b[i] != '\\' || i+1 >= len(b) {
+			out.WriteByte(b[i])
+			continue
+		}
+		switch c := b[i+1]; c {
+		case '"', '\\', '/':
+			out.WriteByte(c)
+			i++
+		case 'b', 'f', 'n', 'r', 't':
+			out.WriteByte(map[byte]byte{'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t'}[c])
+			i++
+		case 'u':
+			r, n := hex4(b[i+2:])
+			if n == 0 {
+				out.WriteByte(b[i])
+				continue
+			}
+			i += 1 + n
+			if utf16.IsSurrogate(r) && i+6 < len(b) && b[i+1] == '\\' && b[i+2] == 'u' {
+				if r2, n2 := hex4(b[i+3:]); n2 > 0 {
+					if d := utf16.DecodeRune(r, r2); d != unicode.ReplacementChar {
+						r = d
+						i += 2 + n2
+					}
+				}
+			}
+			out.WriteRune(r)
+		default:
+			out.WriteByte(b[i])
+		}
+	}
+	return out.String()
+}
+
+// hex4 reads four hex digits; n is 4, or 0 if they aren't there.
+func hex4(b []byte) (rune, int) {
+	if len(b) < 4 {
+		return 0, 0
+	}
+	var r rune
+	for _, c := range b[:4] {
+		if !isHex(c) {
+			return 0, 0
+		}
+		r = r<<4 | rune(unhex(c))
+	}
+	return r, 4
 }
 
 var errTooDeep = fmt.Errorf("JSON nested deeper than %d", redact.MaxJSONDepth)
@@ -754,99 +841,175 @@ func checkMCPTools(body []byte, tools map[string]bool) string {
 	if len(trimmed) == 0 {
 		return ""
 	}
-	var raws []json.RawMessage
-	if trimmed[0] == '[' {
-		if err := json.Unmarshal(trimmed, &raws); err != nil {
-			return "body is not JSON-RPC"
-		}
-	} else {
-		raws = []json.RawMessage{trimmed}
+	// JSON must be UTF-8; decoding would also triple each invalid byte.
+	if !utf8.Valid(trimmed) {
+		return "body is not JSON-RPC: not UTF-8"
 	}
-	for _, raw := range raws {
-		m, err := strictObject(raw)
-		if err != nil {
-			return "body is not JSON-RPC: " + err.Error()
-		}
-		var method string
-		if v, ok := m["method"]; ok && json.Unmarshal(v, &method) != nil {
+	// Walked one message at a time, keeping only the keys read: a batch
+	// of many tiny elements must not cost tens of times its size.
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	if trimmed[0] == '[' {
+		if _, err := dec.Token(); err != nil {
 			return "body is not JSON-RPC"
 		}
-		if method != "tools/call" {
-			continue
+		for dec.More() {
+			if reason := checkMCPMessage(dec, tools); reason != "" {
+				return reason
+			}
 		}
-		params, err := strictObject(m["params"])
-		if err != nil {
-			return "tools/call params: " + err.Error()
+		if tok, err := dec.Token(); err != nil || tok != json.Delim(']') {
+			return "body is not JSON-RPC"
 		}
-		var name string
-		if err := json.Unmarshal(params["name"], &name); err != nil {
-			return "tools/call without a tool name"
-		}
-		if !tools[name] {
-			return fmt.Sprintf("MCP tool %q is not in mcp_tools", name)
-		}
+	} else if reason := checkMCPMessage(dec, tools); reason != "" {
+		return reason
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return "body is not JSON-RPC: data after the message"
 	}
 	return ""
 }
 
-// foldKey maps every rune to the smallest in its Unicode simple-fold
-// orbit, so two keys fold equal exactly when strings.EqualFold says so.
-func foldKey(s string) string {
-	return strings.Map(func(r rune) rune {
-		min := r
-		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-			if f < min {
-				min = f
+// checkMCPMessage reads one JSON-RPC message from dec and refuses a
+// tools/call naming a tool not in tools. It reads in a single pass, keeping
+// only the method and tool name as strings: nothing (params in particular)
+// is copied, so a large argument costs no more than the body.
+func checkMCPMessage(dec *json.Decoder, tools map[string]bool) string {
+	var method, name string
+	var haveParams, haveName bool
+	err := readObject(dec, map[string]func() error{
+		"method": func() error { return dec.Decode(&method) },
+		"params": func() error {
+			tok, err := dec.Token()
+			if err != nil {
+				return err
 			}
+			if tok != json.Delim('{') {
+				// Positional or null params: no tool name to check. Only
+				// a tools/call needs one, which is refused below.
+				return skipRest(dec, tok)
+			}
+			haveParams = true
+			return readFields(dec, map[string]func() error{
+				"name": func() error {
+					haveName = true
+					return dec.Decode(&name)
+				},
+			})
+		},
+	})
+	if err != nil {
+		return "body is not JSON-RPC: " + err.Error()
+	}
+	if method != "tools/call" {
+		return ""
+	}
+	if !haveParams || !haveName {
+		return "tools/call without a tool name"
+	}
+	if !tools[name] {
+		// The name is quoted in the response and the audit line: a short
+		// prefix is enough to say which.
+		if len(name) > 64 {
+			name = strings.ToValidUTF8(name[:64], "") + "…"
 		}
-		return min
-	}, s)
+		return fmt.Sprintf("MCP tool %q is not in mcp_tools", name)
+	}
+	return ""
 }
 
-// strictObject decodes a JSON object whose keys are unambiguous: a key
-// that repeats, or differs from another only in case, is refused, since
-// parsers disagree on which one wins (Go's encoding/json matches field
-// names case-insensitively and keeps the last).
-func strictObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
+// readObject reads a JSON object from dec, calling the handler for each
+// wanted key to consume its value and skipping the rest.
+func readObject(dec *json.Decoder, want map[string]func() error) error {
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil, errors.New("not an object")
+		return errors.New("not an object")
 	}
-	out := map[string]json.RawMessage{}
+	return readFields(dec, want)
+}
+
+// readFields reads the rest of an object whose '{' has been read. A wanted
+// key that repeats, or appears in another spelling that folds to it, is
+// refused: parsers disagree on which one wins (encoding/json matches field
+// names with Unicode case folding, so "Method" or "paramſ" would be read
+// as the real key).
+func readFields(dec *json.Decoder, want map[string]func() error) error {
 	seen := map[string]bool{}
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		key, _ := tok.(string)
-		// Folded as encoding/json compares (Unicode simple folding, so
-		// "ſ" matches "s" and the Kelvin sign "k").
-		f := foldKey(key)
-		if seen[f] {
-			return nil, fmt.Errorf("ambiguous key %q", key)
-		}
-		seen[f] = true
-		// A key that folds to one this check reads, in another spelling,
-		// would be read by a case-insensitive server instead.
-		for _, k := range []string{"method", "params", "name"} {
-			if key != k && strings.EqualFold(key, k) {
-				return nil, fmt.Errorf("key %q is a variant of %q", key, k)
+		wanted := ""
+		for w := range want {
+			if strings.EqualFold(key, w) {
+				wanted = w
 			}
 		}
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return nil, err
+		switch {
+		case wanted == "":
+			if err := skipValue(dec); err != nil {
+				return err
+			}
+			continue
+		case key != wanted:
+			return fmt.Errorf("key %q is a variant of %q", key, wanted)
+		case seen[wanted]:
+			return fmt.Errorf("ambiguous key %q", key)
 		}
-		out[key] = v
+		seen[wanted] = true
+		if err := want[wanted](); err != nil {
+			return err
+		}
 	}
-	if _, err := dec.Token(); err != nil { // '}'
-		return nil, err
+	_, err := dec.Token() // '}'
+	return err
+}
+
+// skipRest reads past a value whose first token has been read.
+func skipRest(dec *json.Decoder, first json.Token) error {
+	if first != json.Delim('{') && first != json.Delim('[') {
+		return nil
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, errors.New("data after the object")
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok {
+		case json.Delim('{'), json.Delim('['):
+			if depth++; depth > redact.MaxJSONDepth {
+				return errTooDeep
+			}
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
 	}
-	return out, nil
+	return nil
+}
+
+// skipValue reads past one JSON value without keeping it.
+func skipValue(dec *json.Decoder) error {
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch tok {
+		case json.Delim('{'), json.Delim('['):
+			// The decoder's state grows with nesting; no real message
+			// nests this deep.
+			if depth++; depth > redact.MaxJSONDepth {
+				return errTooDeep
+			}
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+		if depth == 0 {
+			return nil
+		}
+	}
 }
 
 // anyTokenValid reports whether r carries a token that opens some
@@ -1012,7 +1175,14 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	kind := classify(h.Get("Content-Type"))
 	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
-		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.maxBuffered).WithFields(fields)
+		// An event must fit the budget at the SSE factor, which is larger
+		// than the buffered one: an event it couldn't reserve for would
+		// wait for its deadline and fail.
+		maxEvent := s.maxBuffered
+		if s.mem != nil {
+			maxEvent = min(maxEvent, s.mem.total/s.engine.SSEFactor())
+		}
+		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, maxEvent).WithFields(fields)
 		if s.mem != nil {
 			sse.WithBudget(ctxBudget{s.mem, work.ctx})
 		}
@@ -1034,7 +1204,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 	// Bound how many bodies are buffered at once, and, when the memory
 	// limit is known, how much memory they may take together: each
-	// reserves bufferFactor times its size (its declared length, or the
+	// reserves the engine's BufferFactor times its size (its declared length, or the
 	// cap when it has none).
 	select {
 	case s.buffered <- struct{}{}:
@@ -1048,7 +1218,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		if n := resp.ContentLength; n >= 0 && n < size && !gzipped {
 			size = n
 		}
-		reserve := s.mem.clamp(size * bufferFactor)
+		reserve := s.mem.clamp(size * s.engine.BufferFactor())
 		if err := s.mem.acquire(resp.Request.Context(), reserve); err != nil {
 			resp.Body.Close()
 			return err

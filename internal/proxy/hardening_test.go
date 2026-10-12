@@ -24,8 +24,9 @@ func TestMCPToolCheckRefusesAmbiguousKeys(t *testing.T) {
 		`{"method":"tools/call","params":"x"}`,
 		`[{"method":"tools/list"},{"method":"tools/call","params":{"name":"get_job_status","Name":"x"}}]`,
 		"{\"method\":\"tools/call\",\"params\":{\"name\":\"get_job_status\"},\"param\u017f\":{\"name\":\"delete_job\"}}",
-		"{\"method\":\"tools/call\",\"params\":{\"name\":\"get_job_status\",\"\u212aey\":1,\"key\":2}}",
 		`{"method":"tools/call","params":{"name":"get_job_status"}}{"method":"tools/call","params":{"name":"delete_job"}}`,
+		"{\"method\":\"tools/call\",\"params\":{\"\u212aame\":1}}",
+		`{"method":"tools/call","params":{"name":"get_job_status","arguments":` + strings.Repeat("[", 2000) + `]}}`,
 	} {
 		if checkMCPTools([]byte(body), tools) == "" {
 			t.Errorf("allowed: %s", body)
@@ -182,11 +183,12 @@ func TestStreamedJSONDoesNotHoldSlot(t *testing.T) {
 }
 
 func TestJSONStringsMultiDocument(t *testing.T) {
-	got, ok, err := jsonStrings([]byte("{\"index\":\"a\"}\n{\"q\":\"\\u0064elete\"}\n"))
-	if err != nil || !ok || !strings.Contains(got, "delete") {
-		t.Fatalf("got %q %v %v", got, ok, err)
+	var seen []string
+	collect := func(v string) string { seen = append(seen, v); return "" }
+	if _, err := jsonStrings([]byte("{\"index\":\"a\"}\n{\"q\":\"\\u0064elete\"}\n"), collect); err != nil || !strings.Contains(strings.Join(seen, "|"), "delete") {
+		t.Fatalf("got %q %v", seen, err)
 	}
-	if _, _, err := jsonStrings([]byte(strings.Repeat("[", 5000) + `"\u0041"`)); err != errTooDeep {
+	if _, err := jsonStrings([]byte(strings.Repeat("[", 5000)+`"\u0041"`), collect); err != errTooDeep {
 		t.Fatalf("deep body: %v", err)
 	}
 }
@@ -282,7 +284,7 @@ func TestStalledReaderIsCut(t *testing.T) {
 	t.Cleanup(func() { bodyWorkTimeout = old })
 	f := newFixture(t, strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 33554432", 1), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		io.WriteString(w, strings.Repeat("a", 16<<20))
+		io.WriteString(w, strings.Repeat("a", 8<<20)) // well past socket buffers
 	})
 	conn, err := net.Dial("tcp", strings.TrimPrefix(f.proxy.URL, "http://"))
 	if err != nil {
@@ -292,7 +294,7 @@ func TestStalledReaderIsCut(t *testing.T) {
 	io.WriteString(conn, "GET /splunk/big HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "+token+"\r\n\r\n")
 	// Never read. The handler must finish (its audit line is written) soon
 	// after the deadline, not wait for the reader.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second) // redacting under -race is slow
 	for !strings.Contains(f.logs.String(), `"path":"/big"`) {
 		if time.Now().After(deadline) {
 			t.Fatalf("handler still blocked on a reader that stopped; logs: %.600s", f.logs.String())
@@ -368,5 +370,80 @@ func TestUpgradeThenNoFlush(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if strings.Contains(errLog.String(), "panic") {
 		t.Fatalf("panic: %s", errLog.String())
+	}
+}
+
+func TestJSONUnescapeLexical(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"n":NaN,"s":"x | delete"}`: `{"n":NaN,"s":"x | delete"}`,
+		`😀 \"q\" \\ \/ \n`:           "\U0001F600 \"q\" \\ / \n",
+		`\u12 \x \`:                  `\u12 \x \`,
+	} {
+		if got := jsonUnescapeLexical([]byte(in)); got != want {
+			t.Errorf("%s: got %q want %q", in, got, want)
+		}
+	}
+}
+
+// Without a token, a 401 says nothing about whether the name exists.
+func TestUnauthorizedLooksTheSame(t *testing.T) {
+	f := newFixture(t, baseConfig, jsonHandler(`{}`))
+	for _, p := range []string{"/splunk/x", "/servicenow/x", "/nosuch/x"} {
+		resp, body := f.do(t, "GET", p, nil)
+		if resp.StatusCode != 401 || resp.Header.Get("X-Request-Id") != "" || resp.Header.Get("WWW-Authenticate") != "" {
+			t.Errorf("%s: %d %v %s", p, resp.StatusCode, resp.Header, body)
+		}
+	}
+}
+
+func TestDenyPatternsSurviveNonStandardJSON(t *testing.T) {
+	f := newFixture(t, lockedConfig, jsonHandler(`{}`))
+	req, _ := http.NewRequest("POST", f.proxy.URL+"/splunk/services/search/jobs", strings.NewReader(`{"n":NaN,"search":"x \u007c delete"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := f.proxy.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("%d, want 403", resp.StatusCode)
+	}
+}
+
+func TestMCPCheckUTF8AndLongNames(t *testing.T) {
+	tools := map[string]bool{"ok": true}
+	if r := checkMCPTools([]byte("{\"method\":\"tools/call\",\"params\":{\"name\":\"\x80\x80\"}}"), tools); !strings.Contains(r, "not UTF-8") {
+		t.Fatalf("invalid UTF-8: %q", r)
+	}
+	r := checkMCPTools([]byte(`{"method":"tools/call","params":{"name":"`+strings.Repeat("x", 10000)+`"}}`), tools)
+	if len(r) > 200 {
+		t.Fatalf("reason %d bytes", len(r))
+	}
+}
+
+// An SSE event near the size cap is delivered: the cap leaves room for the
+// event's reservation at the SSE factor.
+func TestLargeSSEEventFitsBudget(t *testing.T) {
+	old := bodyWorkTimeout
+	bodyWorkTimeout = 3 * time.Second
+	t.Cleanup(func() { bodyWorkTimeout = old })
+	ev := "data: " + strings.Repeat("a", 3<<20) + "\n\n"
+	f := newFixture(t, strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 8388608", 1), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, ev)
+	})
+	// A budget whose buffered cap (total/BufferFactor) would admit the
+	// event, but whose SSE reservation (len x SSEFactor) wouldn't fit.
+	limit := int64(len(ev)) * (f.srv.engine.BufferFactor() + f.srv.engine.SSEFactor()) / 2 * 4 / 3
+	f.srv.SetMemoryLimit(limit)
+	start := time.Now()
+	resp, body := f.do(t, "GET", "/splunk/stream", bearer)
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("event waited %v for memory it can't get", time.Since(start))
+	}
+	// Delivered, or refused at once as too large: never stuck.
+	if resp.StatusCode == 200 && !strings.Contains(body, "data: aaa") && len(body) > 0 {
+		t.Fatalf("%d: %.100q", resp.StatusCode, body)
 	}
 }

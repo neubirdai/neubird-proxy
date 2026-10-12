@@ -1,10 +1,12 @@
 package redact
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"unicode/utf8"
 )
 
 // ErrDocTooLarge ends a JSON stream whose single document exceeds the cap.
@@ -43,10 +45,6 @@ func (s *JSONStream) WithActivity(f func(busy bool)) *JSONStream {
 	return s
 }
 
-// jsonFactor is how many times its size decoding and redacting a document
-// may take.
-const jsonFactor = 12
-
 // WithBudget accounts for each later document while it's decoded: the
 // stream waits for a document's first byte outside the budget, then
 // reserves for the largest document it may be.
@@ -65,6 +63,9 @@ type countingReader struct {
 	n        int64
 	docStart int64
 	max      int64
+	hit      bool   // a Read was refused at the limit
+	carry    []byte // the start of a UTF-8 sequence split across reads
+	bad      bool   // invalid UTF-8 was seen; every Read fails from then on
 }
 
 // readSlack is how far past a document's limit the decoder may read ahead
@@ -76,8 +77,12 @@ const readSlack = 64 << 10
 // being read, decoded and redacted in full first. Redacting a buffered
 // document takes several times its size in memory.
 func (c *countingReader) Read(p []byte) (int, error) {
+	if c.bad {
+		return 0, ErrNotText
+	}
 	left := c.docStart + c.max + readSlack - c.n
 	if left <= 0 {
+		c.hit = true
 		return 0, ErrDocTooLarge
 	}
 	if int64(len(p)) > left {
@@ -85,7 +90,50 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	}
 	n, err := c.r.Read(p)
 	c.n += int64(n)
+	// JSON must be UTF-8, as text and SSE bodies must: the decoder would
+	// turn each invalid byte into U+FFFD, three bytes, and normalize then
+	// costs several times that.
+	// The decoder keeps bytes that come with an error and may never read
+	// again, so invalid input is withheld, not just reported.
+	if verr := c.validate(p[:n], err == io.EOF); verr != nil {
+		c.bad = true
+		return 0, verr
+	}
 	return n, err
+}
+
+// validate checks that b continues valid UTF-8, keeping an incomplete
+// sequence at its end for the next call; at EOF none may be left.
+func (c *countingReader) validate(b []byte, eof bool) error {
+	i := 0
+	for len(c.carry) > 0 && i < len(b) {
+		c.carry = append(c.carry, b[i])
+		i++
+		if utf8.FullRune(c.carry) {
+			if r, size := utf8.DecodeRune(c.carry); r == utf8.RuneError && size <= 1 {
+				return ErrNotText
+			}
+			c.carry = c.carry[:0]
+		}
+	}
+	rest := b[i:]
+	cut := len(rest)
+	for k := 1; k <= utf8.UTFMax-1 && k <= len(rest); k++ {
+		if s := rest[len(rest)-k]; utf8.RuneStart(s) {
+			if !utf8.FullRune(rest[len(rest)-k:]) {
+				cut = len(rest) - k
+			}
+			break
+		}
+	}
+	if !utf8.Valid(rest[:cut]) {
+		return ErrNotText
+	}
+	c.carry = append(c.carry, rest[cut:]...)
+	if eof && len(c.carry) > 0 {
+		return ErrNotText
+	}
+	return nil
 }
 
 // NewJSONStream decodes and redacts the first document before returning,
@@ -113,7 +161,7 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 	dec := json.NewDecoder(cr)
 	dec.UseNumber()
 	w := &jsonWriter{e: e, fields: fields}
-	w.enc = json.NewEncoder(&w.scratch)
+	w.enc = json.NewEncoder(&w.out)
 	w.enc.SetEscapeHTML(false)
 	s = &JSONStream{src: src, cr: cr, dec: dec, w: w, st: st, max: maxDoc, fields: fields}
 
@@ -123,7 +171,7 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 	w.st = local
 	tok, err := dec.Token()
 	if err == nil {
-		err = w.value(dec, tok, nil)
+		err = w.document(dec, tok)
 	}
 	if err != nil {
 		if errors.Is(err, ErrDocTooLarge) {
@@ -211,17 +259,46 @@ func (s *JSONStream) Read(p []byte) (int, error) {
 
 // probablyBuffered reports whether the decoder holds at least as much
 // unconsumed input as the last document took, and some input at all.
+//
+// Whitespace doesn't count: a run of it would send Read into next(), to wait
+// there for a document that hasn't arrived while finished ones are held back.
 func (s *JSONStream) probablyBuffered() bool {
 	b := s.cr.n - s.offset()
-	return b > 0 && b >= s.lastDoc
+	if b <= 0 || b < s.lastDoc {
+		return false
+	}
+	// Only up to the first non-whitespace byte is looked at.
+	ahead := bufio.NewReaderSize(s.dec.Buffered(), 16)
+	for {
+		c, err := ahead.ReadByte()
+		if err != nil {
+			return false
+		}
+		if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+			return true
+		}
+	}
 }
 
 func (s *JSONStream) next() {
 	start := s.offset()
 	s.cr.docStart = start
-	if (s.budget != nil || s.activity != nil) && s.dec.More() {
+	// Between documents only whitespace may come, and only readSlack of it:
+	// the decoder buffers it all while it looks for the next document,
+	// outside the budget and with no deadline (the stream may idle here).
+	max := s.cr.max
+	s.cr.max, s.cr.hit = 0, false
+	more := s.dec.More()
+	s.cr.max = max
+	if s.cr.hit {
+		// The decoder doesn't keep a read error from More: stop here, or
+		// Token would read on under the document's limit.
+		s.err = ErrStreamNotJSON
+		return
+	}
+	if (s.budget != nil || s.activity != nil) && more {
 		if s.budget != nil {
-			n := s.max * jsonFactor
+			n := s.max * s.w.e.BufferFactor()
 			if err := s.budget.Acquire(n); err != nil {
 				s.err = err
 				return
@@ -248,7 +325,7 @@ func (s *JSONStream) next() {
 		return
 	}
 	s.w.out.Reset()
-	if err := s.w.value(s.dec, tok, nil); err != nil {
+	if err := s.w.document(s.dec, tok); err != nil {
 		if errors.Is(err, ErrDocTooLarge) {
 			s.err = ErrDocTooLarge
 		} else {

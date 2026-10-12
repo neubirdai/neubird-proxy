@@ -456,7 +456,7 @@ func TestNormalizeOffsets(t *testing.T) {
 	if n != "a@b@c2" {
 		t.Fatalf("normalized %q", n)
 	}
-	if len(off) != len(n)+1 || off[len(n)] != len(in) {
+	if len(off) != len(n)+1 || int(off[len(n)]) != len(in) {
 		t.Fatalf("off %v", off)
 	}
 	for i := 1; i < len(off); i++ {

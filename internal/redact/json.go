@@ -3,8 +3,12 @@ package redact
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"unicode/utf8"
+	"unsafe"
 )
 
 // JSON masks string values inside one or more concatenated JSON documents
@@ -29,12 +33,32 @@ func (e *Engine) JSON(body []byte, st Stats) ([]byte, error) {
 }
 
 // JSONFields is JSON with a field allowlist; nil means no allowlist.
+//
+// JSON must be UTF-8: a body that isn't is refused, as the stream refuses it
+// (the decoder would turn each invalid byte into three).
 func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
+	if !utf8.Valid(body) {
+		return nil, ErrNotText
+	}
+	return e.jsonFields(bytes.NewReader(body), len(body), st, fields, false)
+}
+
+// innerJSON redacts JSON held in a string value (MCP tool text, Splunk
+// _raw). Its numbers get the value rules too: the outer value stays a
+// string whatever they become, so there's no type to keep.
+//
+// It reads the string in place: a copy would add its size again for every
+// such string while the outer document is still held.
+func (e *Engine) innerJSON(s string, st Stats) ([]byte, error) {
+	return e.jsonFields(strings.NewReader(s), len(s), st, nil, true)
+}
+
+func (e *Engine) jsonFields(body io.Reader, size int, st Stats, fields *Fields, numbersAsText bool) ([]byte, error) {
+	dec := json.NewDecoder(body)
 	dec.UseNumber()
-	w := &jsonWriter{e: e, st: st, fields: fields}
-	w.out.Grow(len(body))
-	w.enc = json.NewEncoder(&w.scratch)
+	w := &jsonWriter{e: e, st: st, fields: fields, numbersAsText: numbersAsText}
+	w.out.Grow(size)
+	w.enc = json.NewEncoder(&w.out)
 	w.enc.SetEscapeHTML(false)
 
 	// Local counts are committed only on success, so a fallback to Text
@@ -53,7 +77,7 @@ func (e *Engine) JSONFields(body []byte, st Stats, fields *Fields) ([]byte, erro
 		if docs > 0 {
 			w.out.WriteByte('\n')
 		}
-		if err := w.value(dec, tok, nil); err != nil {
+		if err := w.document(dec, tok); err != nil {
 			return nil, err
 		}
 		docs++
@@ -76,6 +100,9 @@ type jsonWriter struct {
 	scratch bytes.Buffer
 	enc     *json.Encoder
 	depth   int
+	// numbersAsText applies value rules to numbers, writing a changed one
+	// as a string (see innerJSON).
+	numbersAsText bool
 }
 
 // MaxJSONDepth is the deepest nesting redacted as JSON. Deeper input isn't
@@ -84,6 +111,20 @@ const MaxJSONDepth = 1000
 
 // ErrTooDeep is JSON nested deeper than MaxJSONDepth.
 var ErrTooDeep = fmt.Errorf("redact: JSON nested deeper than %d", MaxJSONDepth)
+
+// ErrScalarDocument is a document that is a bare string, number or
+// literal. Redacted as JSON, numbers would pass unmasked: "4111 1111 1111
+// 1111" parses as four of them. Callers redact such input as text.
+var ErrScalarDocument = errors.New("redact: top-level JSON value is not an object or array")
+
+// document redacts one top-level document, which must be an object or an
+// array.
+func (w *jsonWriter) document(dec *json.Decoder, tok json.Token) error {
+	if d, ok := tok.(json.Delim); !ok || (d != '{' && d != '[') {
+		return ErrScalarDocument
+	}
+	return w.value(dec, tok, nil)
+}
 
 func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) error {
 	switch t := tok.(type) {
@@ -161,9 +202,13 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 			w.fieldMask(t)
 		case blocked != nil:
 			w.blocked(blocked, t)
-		case looksLikeJSON(t):
-			if inner, err := w.e.JSON([]byte(t), w.st); err == nil {
-				w.str(string(inner))
+		case looksLikeJSON(t) && !w.numbersAsText:
+			// One level only (Splunk _raw, MCP tool text): each level holds
+			// its own copies, so deeper nesting is redacted as text.
+			if inner, err := w.e.innerJSON(t, w.st); err == nil {
+				// No string copy of the redacted inner JSON: it isn't
+				// changed or kept after this.
+				w.str(unsafe.String(unsafe.SliceData(inner), len(inner)))
 				break
 			}
 			w.str(w.e.String(t, w.st))
@@ -175,6 +220,12 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 			w.fieldMask(t.String())
 		} else if blocked != nil {
 			w.blocked(blocked, t.String())
+		} else if r := t.String(); w.numbersAsText {
+			if m := w.e.String(r, w.st); m != r {
+				w.str(m)
+			} else {
+				w.out.WriteString(r)
+			}
 		} else {
 			w.out.WriteString(t.String())
 		}
@@ -206,11 +257,11 @@ func (w *jsonWriter) fieldMask(v string) {
 	w.str(w.e.mask("FIELD", v))
 }
 
+// str writes s as a JSON string. The encoder writes into out directly (no
+// scratch copy); its trailing newline is cut off.
 func (w *jsonWriter) str(s string) {
-	w.scratch.Reset()
 	_ = w.enc.Encode(s) // cannot fail for a string
-	b := w.scratch.Bytes()
-	w.out.Write(b[:len(b)-1]) // drop Encode's trailing newline
+	w.out.Truncate(w.out.Len() - 1)
 }
 
 func looksLikeJSON(s string) bool {

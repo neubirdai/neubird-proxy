@@ -171,8 +171,10 @@ func (e *Engine) RuleNames() []string {
 	return out
 }
 
+// span is one match. int32 fields: a body is far below 2 GiB, and text
+// dense with matches holds one span per few bytes.
 type span struct {
-	start, end, rule int
+	start, end, rule int32
 }
 
 // String masks every rule match in s.
@@ -197,7 +199,11 @@ func (e *Engine) String(orig string, st Stats) string {
 		if nDigits < r.minDigits {
 			continue
 		}
-		if len(r.needles) > 0 {
+		// (?i) also folds the Kelvin sign to k and the long s to s, which
+		// an ASCII needle search can't see: with either present, keyword
+		// rules run over the whole string.
+		folds := hasFoldRunes(s)
+		if len(r.needles) > 0 && !folds {
 			if lower == "" {
 				lower = asciiLower(s)
 			}
@@ -213,14 +219,18 @@ func (e *Engine) String(orig string, st Stats) string {
 			}
 			regions = clusters
 		case scopeNeedles:
-			regions = needleWindows(s, lower, r.needles, r.before, r.after)
+			if folds {
+				regions = [][2]int{{0, len(s)}}
+			} else {
+				regions = needleWindows(s, lower, r.needles, r.before, r.after)
+			}
 		default:
 			regions = [][2]int{{0, len(s)}}
 		}
-		for _, loc := range findIn(r, s, regions) {
+		forEachMatch(r, s, regions, func(loc []int) {
 			a, z := loc[2*r.group], loc[2*r.group+1]
 			if a < 0 || a == z {
-				continue
+				return
 			}
 			m := s[a:z]
 			if r.validate != nil && !r.validate(m) {
@@ -230,13 +240,13 @@ func (e *Engine) String(orig string, st Stats) string {
 					// candidates.
 					spans = e.subMatches(s, a, z, i, spans)
 				}
-				continue
+				return
 			}
 			if e.isAllowed(m) {
-				continue
+				return
 			}
-			spans = append(spans, span{a, z, i})
-		}
+			spans = append(spans, span{int32(a), int32(z), int32(i)})
+		})
 	}
 	if len(spans) == 0 {
 		return orig
@@ -262,9 +272,9 @@ func (e *Engine) String(orig string, st Stats) string {
 				st[e.rules[spans[j].rule].name]++
 			}
 		}
-		oa, oz := first.start, end
+		oa, oz := int(first.start), int(end)
 		if off != nil {
-			oa, oz = off[first.start], off[end]
+			oa, oz = int(off[first.start]), int(off[end])
 		}
 		b.WriteString(orig[pos:oa])
 		// HMAC over the normalized value, so encoded and plain forms of the
@@ -304,7 +314,7 @@ func (e *Engine) subMatches(s string, start, end, rule int, spans []span) []span
 			a, z := groups[g][0], groups[h][1]
 			m := s[a:z]
 			if r.anchored.MatchString(m) && r.validate(m) && !e.isAllowed(m) {
-				spans = append(spans, span{a, z, rule})
+				spans = append(spans, span{int32(a), int32(z), int32(rule)})
 				g = h
 				break
 			}
@@ -350,6 +360,24 @@ func (e *Engine) isAllowed(m string) bool {
 
 // mask renders [REDACTED:LABEL], or with HMAC masking
 // [REDACTED:LABEL:<16 hex>] so equal values correlate across events.
+// BufferFactor is how many times its size redacting a buffered body or a
+// stream document may take (measured peaks plus a margin), and SSEFactor
+// the same for an SSE event. HMAC masks are longer than labels, so text
+// dense with matches grows more with them.
+func (e *Engine) BufferFactor() int64 {
+	if e.hmacKey != nil {
+		return 24
+	}
+	return 18
+}
+
+func (e *Engine) SSEFactor() int64 {
+	if e.hmacKey != nil {
+		return 27
+	}
+	return 20
+}
+
 func (e *Engine) mask(label, value string) string {
 	if e.hmacKey == nil {
 		return "[REDACTED:" + label + "]"
@@ -382,27 +410,96 @@ func containsAny(s string, needles []string) bool {
 // coordinates. Each region carries one byte of context on each side (when
 // there is one), so \b and similar assertions at its edges see the real
 // neighbors; matches are kept only if they start inside the region proper.
-func findIn(r valueRule, s string, regions [][2]int) [][]int {
-	if len(regions) == 1 && regions[0] == [2]int{0, len(s)} {
-		return r.re.FindAllStringSubmatchIndex(s, -1)
-	}
-	var out [][]int
+// matchChunk is how many matches are found per regexp call: all of them
+// at once, for text dense with matches, would cost several times its size.
+const matchChunk = 1024
+
+// forEachMatch calls f with every match of r within the regions of s, a
+// chunk at a time. Each search starts one byte before where it may match,
+// so \b sees the byte before; a match starting on that byte is skipped.
+//
+// A full chunk is cut at its last gap: the matches before the last match
+// that doesn't touch its predecessor are reported, and the next search
+// starts at that match. Nothing can start on the gap byte before it (the
+// search would have found it), so restarting there loses no match; at a
+// match's last byte it could (a phone's optional "1 " prefix starts on the
+// previous number's last digit).
+func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 	for _, reg := range regions {
-		a, z := reg[0], reg[1]
-		ca, cz := max(0, a-1), min(len(s), z+1)
-		for _, loc := range r.re.FindAllStringSubmatchIndex(s[ca:cz], -1) {
-			if loc[0]+ca < a || loc[1]+ca > z {
-				continue
-			}
-			for k := range loc {
-				if loc[k] >= 0 {
-					loc[k] += ca
+		start, z := reg[0], reg[1]
+		cz := min(len(s), z+1)
+		var expect []int // the match a resumed search must find first
+		for start <= z {
+			ca := max(0, start-1)
+			n := matchChunk
+			locs := r.re.FindAllStringSubmatchIndex(s[ca:cz], n)
+			for _, loc := range locs {
+				for k := range loc {
+					if loc[k] >= 0 {
+						loc[k] += ca
+					}
 				}
 			}
-			out = append(out, loc)
+			if expect != nil && (len(locs) == 0 || locs[0][0] != expect[0] || locs[0][1] != expect[1]) {
+				// Restarting mid-text changed what ^ or \b see (a custom
+				// rule): finish the region from its start in one search,
+				// reporting only what follows the resume point.
+				ra := max(0, reg[0]-1)
+				locs = r.re.FindAllStringSubmatchIndex(s[ra:cz], -1)
+				for _, loc := range locs {
+					for k := range loc {
+						if loc[k] >= 0 {
+							loc[k] += ra
+						}
+					}
+					if loc[0] >= start && loc[0] >= reg[0] && loc[1] <= z {
+						f(loc)
+					}
+				}
+				break
+			}
+			cut := len(locs)
+			if len(locs) == n {
+				cut = 0
+				for k := len(locs) - 1; k > 0; k-- {
+					if locs[k][0] > locs[k-1][1] {
+						cut = k
+						break
+					}
+				}
+				if cut == 0 {
+					// No gap: every match touches the next. Finish the
+					// region in one search.
+					locs = r.re.FindAllStringSubmatchIndex(s[ca:cz], -1)
+					for _, loc := range locs {
+						for k := range loc {
+							if loc[k] >= 0 {
+								loc[k] += ca
+							}
+						}
+					}
+					cut = len(locs)
+				}
+			}
+			for _, loc := range locs[:cut] {
+				if loc[0] < start || loc[1] > z {
+					continue
+				}
+				f(loc)
+			}
+			if cut == len(locs) {
+				break
+			}
+			start = locs[cut][0]
+			expect = []int{locs[cut][0], locs[cut][1]}
 		}
 	}
-	return out
+}
+
+// hasFoldRunes reports whether s holds a rune that (?i) folds onto an ASCII
+// letter: U+212A KELVIN SIGN (k) or U+017F LATIN SMALL LETTER LONG S (s).
+func hasFoldRunes(s string) bool {
+	return strings.Contains(s, "\u212a") || strings.Contains(s, "\u017f")
 }
 
 func isDigitShape(c byte) bool {
@@ -427,11 +524,20 @@ func digitClusters(s string) [][2]int {
 		}
 		if d >= 4 {
 			out = append(out, [2]int{i, j})
+			if len(out) > maxWindows(s) {
+				return [][2]int{{0, len(s)}}
+			}
 		}
 		i = j
 	}
 	return out
 }
+
+// maxWindows is how many windows a string may be split into before the
+// rules just run over all of it: the list costs 16 bytes a window, and
+// text dense with candidates ("@ @ @ ...") would make it many times the
+// text's size.
+func maxWindows(s string) int { return len(s)/64 + 16 }
 
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
@@ -449,7 +555,20 @@ func needleWindows(s, lower string, needles []string, before, after int) [][2]in
 				break
 			}
 			p := from + k
-			a, z := max(0, p-before), min(len(s), p+len(n)+after)
+			// before and after count non-space bytes: the patterns allow
+			// any whitespace between a keyword and its value, as in
+			// column-aligned dumps ("password        = x").
+			a, z := p, p+len(n)
+			for c := 0; a > 0 && c < before; a-- {
+				if !isSpace(s[a-1]) {
+					c++
+				}
+			}
+			for c := 0; z < len(s) && c < after; z++ {
+				if !isSpace(s[z]) {
+					c++
+				}
+			}
 			for a > 0 && !isSpace(s[a-1]) {
 				a--
 			}
@@ -457,7 +576,13 @@ func needleWindows(s, lower string, needles []string, before, after int) [][2]in
 				z++
 			}
 			ws = append(ws, [2]int{a, z})
-			from = max(p+len(n), z-len(n)) // skip occurrences already inside this window
+			if len(ws) > maxWindows(s) {
+				return [][2]int{{0, len(s)}}
+			}
+			// The next occurrence may sit inside this window, but its value
+			// can run past the window's end: it gets a window of its own
+			// (the cap above bounds how many).
+			from = p + len(n)
 		}
 	}
 	if len(ws) <= 1 {

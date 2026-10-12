@@ -63,9 +63,6 @@ type Budget interface {
 
 var eventNameRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
 
-// sseFactor is how many times its size redacting an event takes.
-const sseFactor = 12
-
 // pendingChunk is the granularity of reservations for buffered input.
 const pendingChunk = 1 << 20
 
@@ -118,9 +115,9 @@ func (r *SSEReader) compactIn(consumed int) {
 func (r *SSEReader) redactEvent(ev []byte) ([]byte, error) {
 	if r.budget != nil {
 		// The input's reservation counts toward the event's: only the rest
-		// is asked for, which never exceeds the budget (an event is at most
-		// a twelfth of it).
-		if n := int64(len(ev))*sseFactor - r.reserved; n > 0 {
+		// is asked for, which fits the budget: the caller caps events at the
+		// budget divided by SSEFactor.
+		if n := int64(len(ev))*r.e.SSEFactor() - r.reserved; n > 0 {
 			if err := r.budget.Acquire(n); err != nil {
 				return nil, err
 			}
@@ -296,33 +293,41 @@ func eventEnd(b []byte, from int) (end, next, resume int) {
 
 // event rewrites one event's lines, each terminated by \n.
 func (r *SSEReader) event(ev []byte) []byte {
-	lines := splitLines(ev)
-	var data []string
-	dataAt := -1
-	var out bytes.Buffer
-
-	type line struct {
-		text   string
-		isData bool
+	// Lines are handled as they're read, with no per-line slices: an event
+	// of many short lines would otherwise cost tens of times its size.
+	// Lines before the first data line go to out, the data payload is
+	// gathered in data, and lines after it wait in after, so the redacted
+	// data keeps its place.
+	var out, data, after bytes.Buffer
+	sawData := false
+	// Clients use only the last event and id line of an event, so only
+	// those are kept: each line would otherwise grow to a mask.
+	var lastEvent, lastID string
+	emit := func(text string) {
+		w := &out
+		if sawData {
+			w = &after
+		}
+		w.WriteString(text)
+		w.WriteByte('\n')
 	}
-	var kept []line
-	for _, l := range lines {
+	forEachLine(ev, func(l string) {
 		field, value, hasColon := strings.Cut(l, ":")
 		if hasColon {
 			value = strings.TrimPrefix(value, " ")
 		}
 		switch {
 		case field == "data":
-			if dataAt < 0 {
-				dataAt = len(kept)
-				kept = append(kept, line{isData: true})
+			if sawData {
+				data.WriteByte('\n')
 			}
-			data = append(data, value)
+			sawData = true
+			data.WriteString(value)
 		case field == "retry":
 			// A reconnection delay in milliseconds; anything else is
 			// dropped, as clients ignore it.
 			if v := strings.TrimSpace(value); v != "" && strings.Trim(v, "0123456789") == "" && len(v) <= 10 {
-				kept = append(kept, line{text: "retry: " + v})
+				emit("retry: " + v)
 			}
 		case r.fields != nil && field != "" && field != "event" && field != "id":
 			// Unknown fields carry data the allowlist can't check; clients
@@ -332,60 +337,86 @@ func (r *SSEReader) event(ev []byte) []byte {
 			// Comment line; clients ignore it, but it still leaves MetLife.
 			if r.fields != nil {
 				r.st["field_not_allowed"]++
-				kept = append(kept, line{text: ":"})
+				emit(":")
 				break
 			}
-			kept = append(kept, line{text: ":" + r.e.String(l[1:], r.st)})
-		case r.fields != nil && field == "event" && !eventNameRe.MatchString(value):
-			// Event types are short names (message, ping); anything else is
-			// data the allowlist didn't approve.
-			kept = append(kept, line{text: "event: " + r.e.mask("FIELD", value)})
-			r.st["field_not_allowed"]++
-		case r.fields != nil && field == "id":
-			// The id is opaque to the agent; only resumption uses it.
-			kept = append(kept, line{text: "id: " + r.e.mask("FIELD", value)})
+			emit(":" + r.e.String(l[1:], r.st))
+		case field == "event":
+			lastEvent = value
+		case field == "id":
+			lastID = value
 		default:
 			// event, id and unknown fields. A redacted id breaks resumption
 			// via Last-Event-ID for that event, which is the safe failure.
-			kept = append(kept, line{text: r.e.String(l, r.st)})
+			emit(r.e.String(l, r.st))
 		}
-	}
+	})
 
-	for _, l := range kept {
-		if !l.isData {
-			out.WriteString(l.text)
-			out.WriteByte('\n')
-			continue
+	if lastEvent != "" || lastID != "" {
+		var head bytes.Buffer
+		switch {
+		case lastEvent == "":
+		case r.fields != nil && !eventNameRe.MatchString(lastEvent):
+			// Event types are short names (message, ping); anything else is
+			// data the allowlist didn't approve.
+			r.st["field_not_allowed"]++
+			head.WriteString("event: " + r.e.mask("FIELD", lastEvent) + "\n")
+		default:
+			head.WriteString("event: " + r.e.String(lastEvent, r.st) + "\n")
 		}
-		payload := strings.Join(data, "\n")
-		redacted, err := r.e.JSONFields([]byte(payload), r.st, r.fields)
+		switch {
+		case lastID == "":
+		case r.fields != nil:
+			// The id is opaque to the agent; only resumption uses it.
+			head.WriteString("id: " + r.e.mask("FIELD", lastID) + "\n")
+		default:
+			// A redacted id breaks resumption via Last-Event-ID for that
+			// event, which is the safe failure.
+			head.WriteString("id: " + r.e.String(lastID, r.st) + "\n")
+		}
+		head.Write(out.Bytes())
+		out = head
+	}
+	if sawData {
+		payload := data.Bytes()
+		redacted, err := r.e.JSONFields(payload, r.st, r.fields)
 		switch {
 		case err == nil:
 		case r.fields != nil:
 			r.st["field_not_allowed"]++
-			redacted = []byte(r.e.mask("FIELD", payload))
+			redacted = []byte(r.e.mask("FIELD", string(payload)))
 		default:
-			redacted = []byte(r.e.String(payload, r.st))
+			redacted = []byte(r.e.String(string(payload), r.st))
 		}
-		for _, d := range strings.Split(string(redacted), "\n") {
+		data = bytes.Buffer{}
+		// One data line per line of the result, as strings.Split would
+		// give: an empty payload is still one (empty) data line.
+		for {
+			line, rest, more := bytes.Cut(redacted, []byte{'\n'})
 			out.WriteString("data: ")
-			out.WriteString(d)
+			out.Write(line)
 			out.WriteByte('\n')
+			if !more {
+				break
+			}
+			redacted = rest
 		}
 	}
+	out.Write(after.Bytes())
 	return out.Bytes()
 }
 
-func splitLines(b []byte) []string {
-	var lines []string
+// forEachLine calls f with each line of b, split on \n, \r\n or \r. A
+// final line without a terminator counts too.
+func forEachLine(b []byte, f func(string)) {
 	start := 0
 	for i := 0; i < len(b); i++ {
 		switch b[i] {
 		case '\n':
-			lines = append(lines, string(b[start:i]))
+			f(string(b[start:i]))
 			start = i + 1
 		case '\r':
-			lines = append(lines, string(b[start:i]))
+			f(string(b[start:i]))
 			if i+1 < len(b) && b[i+1] == '\n' {
 				i++
 			}
@@ -393,7 +424,6 @@ func splitLines(b []byte) []string {
 		}
 	}
 	if start < len(b) {
-		lines = append(lines, string(b[start:]))
+		f(string(b[start:]))
 	}
-	return lines
 }

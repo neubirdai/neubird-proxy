@@ -81,8 +81,8 @@ var builtins = map[string]builtin{
 		values: []pattern{
 			{re: regexp.MustCompile(`(?i)(?:\b(?:dob|date[ _-]?of[ _-]?birth|birth[ _-]?date|birthday|born(?:[ _-]on)?)\b|\bd\.o\.b\.?)` + sep +
 				`(?P<v>\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|` +
-				`(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2},? \d{2,4}|` +
-				`\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{2,4})`),
+				`(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.? \d{1,2},? \d{2,4}|` +
+				`\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.? \d{2,4})`),
 				needles: []string{"dob", "birth", "born", "d.o.b"}, minDigits: 2, scope: scopeNeedles, before: 24, after: 48},
 		},
 		key: regexp.MustCompile(`(?i)^(?:dob|date_?of_?birth|birth_?date|birthday|u_dob)$`),

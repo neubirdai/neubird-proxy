@@ -298,16 +298,18 @@ func TestConfigRejectsWeakSettings(t *testing.T) {
 		return map[string]string{"LONG": strings.Repeat("x", 32), "SHORT": "abc"}[k], true
 	}
 	for name, c := range map[string]struct{ yaml, want string }{
-		"short token":            {"client_token_env: SHORT\nconnections: [{name: a, upstream: 'https://x'}]", "at least 32"},
-		"http upstream":          {"client_token_env: LONG\nconnections: [{name: a, upstream: 'http://x'}]", "plain http"},
-		"bad method":             {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', methods: [TRACE]}]", "unsupported method"},
-		"forwarded cookie":       {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', request_headers: [cookie]}]", "Cookie cannot be forwarded"},
-		"apim trace header":      {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', request_headers: [Ocp-Apim-Trace]}]", "cannot be forwarded"},
-		"bad path regex":         {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', paths: ['(']}]", "paths[0]"},
-		"bad deny regex":         {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', request_deny_patterns: ['(']}]", "request_deny_patterns[0]"},
-		"bad rate limit":         {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', rate_limit: {requests_per_second: 0, burst: 1}}]", "rate_limit"},
-		"no token anywhere":      {"connections: [{name: a, upstream: 'https://x'}]", "no client token"},
-		"token header forwarded": {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', client_auth: header, client_auth_header: X-Tok, request_headers: [x-tok]}]", "carries the proxy token"},
+		"short token":                   {"client_token_env: SHORT\nconnections: [{name: a, upstream: 'https://x'}]", "at least 32"},
+		"http upstream":                 {"client_token_env: LONG\nconnections: [{name: a, upstream: 'http://x'}]", "plain http"},
+		"bad method":                    {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', methods: [TRACE]}]", "unsupported method"},
+		"forwarded cookie":              {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', request_headers: [cookie]}]", "Cookie cannot be forwarded"},
+		"apim trace header":             {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', request_headers: [Ocp-Apim-Trace]}]", "cannot be forwarded"},
+		"bad path regex":                {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', paths: ['(']}]", "paths[0]"},
+		"bad deny regex":                {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', request_deny_patterns: ['(']}]", "request_deny_patterns[0]"},
+		"bad rate limit":                {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', rate_limit: {requests_per_second: 0, burst: 1}}]", "rate_limit"},
+		"no token anywhere":             {"connections: [{name: a, upstream: 'https://x'}]", "no client token"},
+		"token in a credential header":  {"client_token_env: LONG\nneubird_destinations: {client_auth: header, client_auth_header: X-Neubird-Upstream-Authorization}", "can't carry the proxy token"},
+		"token in Authorization header": {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', client_auth: header, client_auth_header: authorization}]", "can't carry the proxy token"},
+		"token header forwarded":        {"client_token_env: LONG\nconnections: [{name: a, upstream: 'https://x', client_auth: header, client_auth_header: X-Tok, request_headers: [x-tok]}]", "carries the proxy token"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := config.Parse([]byte(c.yaml), envs)
