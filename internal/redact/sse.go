@@ -85,13 +85,10 @@ func (r *SSEReader) reserveIn() error {
 	if want <= r.reserved {
 		return nil
 	}
-	// Give back what's held before waiting for the larger amount, so the
-	// stream never holds memory while it waits.
-	if r.reserved > 0 {
-		r.budget.Release(r.reserved)
-		r.reserved = 0
-	}
-	if err := r.budget.Acquire(want); err != nil {
+	// The input buffered so far stays reserved while this waits: it's
+	// still in memory. The wait is bounded by the caller's deadline for a
+	// partly received event (see WithActivity).
+	if err := r.budget.Acquire(want - r.reserved); err != nil {
 		return err
 	}
 	r.reserved = want
@@ -108,27 +105,27 @@ func (r *SSEReader) compactIn(consumed int) {
 	} else {
 		r.in = append([]byte(nil), r.in...)
 	}
-	if r.budget != nil && r.reserved > 0 && len(r.in) == 0 {
-		r.budget.Release(r.reserved)
-		r.reserved = 0
+	if r.budget != nil {
+		keep := (int64(cap(r.in)) + pendingChunk - 1) / pendingChunk * pendingChunk
+		if keep < r.reserved {
+			r.budget.Release(r.reserved - keep)
+			r.reserved = keep
+		}
 	}
 }
 
 // redactEvent is event, within the memory budget when one is set.
 func (r *SSEReader) redactEvent(ev []byte) ([]byte, error) {
 	if r.budget != nil {
-		// The input's reservation goes first, so the stream never holds
-		// memory while it waits for more (the event's reservation covers
-		// the input too). reserveIn takes it again on the next read.
-		if r.reserved > 0 {
-			r.budget.Release(r.reserved)
-			r.reserved = 0
+		// The input's reservation counts toward the event's: only the rest
+		// is asked for, which never exceeds the budget (an event is at most
+		// a twelfth of it).
+		if n := int64(len(ev))*sseFactor - r.reserved; n > 0 {
+			if err := r.budget.Acquire(n); err != nil {
+				return nil, err
+			}
+			defer r.budget.Release(n)
 		}
-		n := int64(len(ev)) * sseFactor
-		if err := r.budget.Acquire(n); err != nil {
-			return nil, err
-		}
-		defer r.budget.Release(n)
 	}
 	return r.event(ev), nil
 }
@@ -150,6 +147,11 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 		}
 		n, err := r.src.Read(r.chunk)
 		r.in = append(r.in, r.chunk[:n]...)
+		if r.activity != nil && len(r.in) > 0 {
+			// Reserving and redacting what arrived counts as the event's
+			// time too: waits for memory end with the deadline.
+			r.activity(true)
+		}
 		derr := r.reserveIn()
 		if derr == nil {
 			derr = r.drain()
@@ -190,6 +192,9 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 	}
 	n := copy(p, r.out)
 	r.out = r.out[n:]
+	if len(r.out) == 0 {
+		r.out = nil // don't keep a large event's output while idle
+	}
 	return n, nil
 }
 

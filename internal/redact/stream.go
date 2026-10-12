@@ -31,6 +31,7 @@ type JSONStream struct {
 	out      []byte
 	err      error
 	lastDoc  int64 // input size of the last document, for batching
+	base     int64 // input consumed by decoders replaced (see shrink)
 	budget   Budget
 	activity func(busy bool)
 }
@@ -164,6 +165,31 @@ func NewJSONStream(src io.ReadCloser, e *Engine, st Stats, maxDoc int64, fields 
 // every write, and one write per small Splunk result costs more than the
 // redaction. The check keeps a batch from ever waiting on the upstream for
 // long.
+// offset is the input consumed so far, across decoders.
+func (s *JSONStream) offset() int64 { return s.base + s.dec.InputOffset() }
+
+// largeBuffer is the capacity above which buffers are dropped after a
+// document rather than kept for the next: a stream may idle between
+// documents for long, and only the document's work is in the budget.
+const largeBuffer = 1 << 20
+
+// shrink lets go of buffers a large document grew: the writer's, and the
+// decoder's (a new decoder takes over what the old one had read ahead).
+func (s *JSONStream) shrink() {
+	if s.w.out.Cap() > largeBuffer {
+		s.w.out = bytes.Buffer{}
+	}
+	if s.w.scratch.Cap() > largeBuffer {
+		s.w.scratch = bytes.Buffer{}
+	}
+	if s.lastDoc > largeBuffer {
+		ahead, _ := io.ReadAll(s.dec.Buffered())
+		s.base = s.offset()
+		s.dec = json.NewDecoder(io.MultiReader(bytes.NewReader(ahead), s.cr))
+		s.dec.UseNumber()
+	}
+}
+
 func (s *JSONStream) Read(p []byte) (int, error) {
 	for len(s.out) == 0 {
 		if s.err != nil {
@@ -176,18 +202,21 @@ func (s *JSONStream) Read(p []byte) (int, error) {
 	}
 	n := copy(p, s.out)
 	s.out = s.out[n:]
+	if len(s.out) == 0 {
+		s.out = nil // don't keep a large document's output while idle
+	}
 	return n, nil
 }
 
 // probablyBuffered reports whether the decoder holds at least as much
 // unconsumed input as the last document took, and some input at all.
 func (s *JSONStream) probablyBuffered() bool {
-	b := s.cr.n - s.dec.InputOffset()
+	b := s.cr.n - s.offset()
 	return b > 0 && b >= s.lastDoc
 }
 
 func (s *JSONStream) next() {
-	start := s.dec.InputOffset()
+	start := s.offset()
 	s.cr.docStart = start
 	if (s.budget != nil || s.activity != nil) && s.dec.More() {
 		if s.budget != nil {
@@ -226,12 +255,13 @@ func (s *JSONStream) next() {
 		}
 		return
 	}
-	if s.dec.InputOffset()-start > s.max {
+	if s.offset()-start > s.max {
 		s.err = ErrDocTooLarge
 		return
 	}
-	s.lastDoc = s.dec.InputOffset() - start
+	s.lastDoc = s.offset() - start
 	s.out = append(append(s.out, s.w.out.Bytes()...), '\n')
+	s.shrink()
 }
 
 // Bytes returns the redacted output of a single-document body in full.

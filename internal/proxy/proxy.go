@@ -997,7 +997,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 	// An upstream may not take long over a body: while it's partly
 	// received, it holds buffers, budget and a slot.
-	work := newDeadlineBody(resp.Body, bodyWorkTimeout)
+	work := newDeadlineBody(resp.Request.Context(), resp.Body, bodyWorkTimeout)
 	defer work.Busy(false) // streams take over below
 	resp.Body = work
 
@@ -1006,7 +1006,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	if kind == kindSSE {
 		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.maxBuffered).WithFields(fields)
 		if s.mem != nil {
-			sse.WithBudget(ctxBudget{s.mem, resp.Request.Context()})
+			sse.WithBudget(ctxBudget{s.mem, work.ctx})
 		}
 		// A stream may idle between events, but not halfway through one.
 		sse.WithActivity(work.Busy)
@@ -1085,7 +1085,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			// Later documents are decoded after this returns: each within
 			// the budget, and the upstream may not stall halfway through.
 			if s.mem != nil {
-				js.WithBudget(ctxBudget{s.mem, resp.Request.Context()})
+				js.WithBudget(ctxBudget{s.mem, work.ctx})
 			}
 			js.WithActivity(work.Busy)
 			st.stream = js
@@ -1144,17 +1144,26 @@ var bodyWorkTimeout = time.Minute
 // deadlineBody closes its body when a unit of work (Busy(true) to
 // Busy(false)) takes longer than the timeout, which ends the pending Read
 // with an error.
+//
+// Its context (ctx) ends then too, and when the body is closed: memory
+// waits use it, so a wait during a unit of work is bounded the same way.
 type deadlineBody struct {
 	io.ReadCloser
+	ctx     context.Context
+	cancel  context.CancelFunc
 	timeout time.Duration
 	timer   *time.Timer
 	mu      sync.Mutex
 	armed   bool
 }
 
-func newDeadlineBody(rc io.ReadCloser, timeout time.Duration) *deadlineBody {
+func newDeadlineBody(ctx context.Context, rc io.ReadCloser, timeout time.Duration) *deadlineBody {
 	b := &deadlineBody{ReadCloser: rc, timeout: timeout}
-	b.timer = time.AfterFunc(time.Hour, func() { b.ReadCloser.Close() })
+	b.ctx, b.cancel = context.WithCancel(ctx)
+	b.timer = time.AfterFunc(time.Hour, func() {
+		b.cancel()
+		b.ReadCloser.Close()
+	})
 	b.timer.Stop()
 	return b
 }
@@ -1175,6 +1184,7 @@ func (b *deadlineBody) Busy(busy bool) {
 
 func (b *deadlineBody) Close() error {
 	b.Busy(false)
+	b.cancel()
 	return b.ReadCloser.Close()
 }
 

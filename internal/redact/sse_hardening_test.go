@@ -88,3 +88,29 @@ func TestSSENoHoldAndWait(t *testing.T) {
 		t.Fatalf("err %v, %d bytes", err, len(out))
 	}
 }
+
+// After a large document, a stream idling for the next one doesn't keep
+// the buffers that document grew.
+func TestJSONStreamShrinksAfterLargeDocument(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	big := `{"a":"` + strings.Repeat("x", 3<<20) + `"}` + "\n"
+	pr, pw := io.Pipe()
+	go func() { io.WriteString(pw, `{"first":1}`+"\n"+big) }() // then idles
+	s, _, _, err := NewJSONStream(pr, e, Stats{}, 8<<20, nil, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64<<10)
+	got := 0
+	for got < len(big)+len(`{"first":1}`+"\n") {
+		n, err := s.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got += n
+	}
+	if s.out != nil || s.w.out.Cap() > largeBuffer || s.w.scratch.Cap() > largeBuffer || s.base == 0 {
+		t.Fatalf("kept: out %d, w.out %d, scratch %d, decoder replaced %v", cap(s.out), s.w.out.Cap(), s.w.scratch.Cap(), s.base != 0)
+	}
+	pw.Close()
+}
