@@ -196,6 +196,34 @@ methods and tools are allowed. Which hosts the pod can reach at all should
 also be enforced below it, so a fault in one layer is still contained by
 the other. See Kubernetes hardening.
 
+## Credentials
+
+Who holds what, and what NeuBird sees:
+
+| Credential | Held by | NeuBird sees it |
+|---|---|---|
+| Proxy token (`client_token_env`) | Both: the customer generates it (`neubird-proxy token`) and gives it to NeuBird | Yes; it's NeuBird's only credential. The proxy checks it and removes it; it never goes upstream |
+| Upstream credentials (`headers`, `upstream_defaults.headers`, `upstream_basic_auth`): APIM subscription keys, API tokens, passwords | The customer, in a Kubernetes Secret (for example from Key Vault) | No. The proxy adds them to the upstream request; they aren't in any response, log or tool output |
+| Tunnel key | The customer; made in the cluster, never sent | No; only its public fingerprint |
+| Join token | Issued by NeuBird, used once by the proxy | Yes (NeuBird issued it); the relay keeps only its hash |
+| `REDACTION_HMAC_KEY` | The customer | No |
+
+How the proxy keeps it that way:
+- **Values only from the environment.** Every `*_env` field and `${VAR}`
+  resolves from the pod's environment; the config file holds names, never
+  values.
+- **NeuBird can't supply or override upstream credentials.** Client
+  `Authorization`, cookies and subscription-key headers are dropped (see
+  What a request goes through, step 9), and `request_headers` refuses to
+  allowlist credential headers.
+- **Nothing echoes them back.** `Set-Cookie` and `Ocp-Apim-*` response
+  headers are stripped, and secrets that appear in response bodies are
+  masked by the secret rules (see Rules).
+- **Nothing logs or prints them.** The audit line has no header values,
+  query values or upstream URLs, and no tool prints a secret.
+- **Rotation is the customer's.** Change the Secret and restart; NeuBird is
+  involved only when the proxy token itself rotates (see Deploy).
+
 ## Redaction
 
 - **JSON** is walked token by token, so key order and number precision
