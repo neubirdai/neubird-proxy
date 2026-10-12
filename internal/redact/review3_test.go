@@ -275,3 +275,44 @@ func TestAmpersandsLinear(t *testing.T) {
 		}
 	})
 }
+
+// Normalization can glue a keyword to the character before it (a digit of
+// another script, an entity for a letter, an invisible character between
+// two letters), so the normalized pass misses it; the pass over the text
+// as written must still run and keep its match.
+func TestKeywordBoundaryAfterNormalization(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for _, in := range []string{
+		"٣password=hunter2", "x‎password=hunter2", "x️password=hunter2",
+		"_‎http://user:hunter2@host", "_٣http://user:hunter2@host",
+		"&#97;password=hunter2", "&#95;http://user:hunter2@host",
+		"password=abc&#00000059;defghij", "password=abc&#x000003b;defghij",
+	} {
+		if out := e.String(in, Stats{}); strings.Contains(out, "hunter2") || strings.Contains(out, "defghij") {
+			t.Errorf("%q -> %q", in, out)
+		}
+	}
+}
+
+// Matches found a chunk at a time, through touching matches, are the
+// matches of one search over the whole text.
+func TestDenseTouchingMatchesChunked(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for _, unit := range []string{";pwd=%%%", ";pwd=aaa", "1 212-555-0147", "ab://u:p@"} {
+		s := strings.Repeat(unit, 5000)
+		for _, r := range e.rules {
+			if r.find != nil {
+				continue
+			}
+			want := r.re.FindAllStringSubmatchIndex(s, -1)
+			var got [][]int
+			forEachMatch(r, s, [][2]int{{0, len(s)}}, func(loc []int) { got = append(got, append([]int(nil), loc...)) })
+			if len(want) == 0 && len(got) == 0 {
+				continue
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("%s on %q: %d matches, want %d", r.name, unit, len(got), len(want))
+			}
+		}
+	}
+}

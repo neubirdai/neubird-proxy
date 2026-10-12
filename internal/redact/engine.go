@@ -198,6 +198,11 @@ func (e *Engine) String(orig string, st Stats) string {
 	var clusters [][2]int
 	clustersDone := false
 	var spans []span
+	// own[i] is where rule i's spans are in spans, for the raw pass.
+	var own [][2]int
+	if off != nil {
+		own = make([][2]int, len(e.rules))
+	}
 	for i, r := range e.rules {
 		if nDigits < r.minDigits {
 			continue
@@ -230,6 +235,7 @@ func (e *Engine) String(orig string, st Stats) string {
 		default:
 			regions = [][2]int{{0, len(s)}}
 		}
+		lo := len(spans)
 		forEachMatch(r, s, regions, func(loc []int) {
 			a, z := loc[2*r.group], loc[2*r.group+1]
 			if a < 0 || a == z {
@@ -250,9 +256,12 @@ func (e *Engine) String(orig string, st Stats) string {
 			}
 			spans = append(spans, span{int32(a), int32(z), int32(i)})
 		})
+		if own != nil {
+			own[i] = [2]int{lo, len(spans)}
+		}
 	}
-	if off != nil && encodesDelimiters(orig) {
-		spans = e.rawMatches(orig, off, spans)
+	if off != nil {
+		spans = e.rawMatches(orig, off, spans, own)
 	}
 	if len(spans) == 0 {
 		return orig
@@ -294,8 +303,11 @@ func (e *Engine) String(orig string, st Stats) string {
 }
 
 // rawMatches runs the raw rules over orig, the text as written, and adds
-// their matches as spans of the normalized text that cover them.
-func (e *Engine) rawMatches(orig string, off []int32, spans []span) []span {
+// their matches as spans of the normalized text that cover them, unless a
+// span of the same rule from the normalized pass already does. own holds
+// where each rule's normalized spans are in spans (in order: matches come
+// left to right and don't overlap).
+func (e *Engine) rawMatches(orig string, off []int32, spans []span, own [][2]int) []span {
 	var lower string
 	folds := hasFoldRunes(orig)
 	for i, r := range e.rules {
@@ -305,6 +317,8 @@ func (e *Engine) rawMatches(orig string, off []int32, spans []span) []span {
 		if r.rawRe != nil {
 			r.re, r.group = r.rawRe, r.rawRe.SubexpIndex("v")
 		}
+		prev := spans[own[i][0]:own[i][1]]
+		j := 0
 		if len(r.needles) > 0 && !folds {
 			if lower == "" {
 				lower = asciiLower(orig)
@@ -319,9 +333,7 @@ func (e *Engine) rawMatches(orig string, off []int32, spans []span) []span {
 		}
 		forEachMatch(r, orig, regions, func(loc []int) {
 			a, z := loc[2*r.group], loc[2*r.group+1]
-			// A match with nothing decoded in it is the normalized pass's
-			// match again.
-			if a < 0 || a == z || !needsNormalize(orig[loc[0]:loc[1]]) {
+			if a < 0 || a == z {
 				return
 			}
 			if m := orig[a:z]; (r.validate != nil && !r.validate(m)) || e.isAllowed(m) {
@@ -332,30 +344,16 @@ func (e *Engine) rawMatches(orig string, off []int32, spans []span) []span {
 			from := off[sort.Search(len(off), func(k int) bool { return int(off[k]) > a })-1]
 			na := sort.Search(len(off), func(k int) bool { return off[k] >= from })
 			nz := sort.Search(len(off), func(k int) bool { return int(off[k]) >= z })
+			for j < len(prev) && int(prev[j].end) < nz {
+				j++
+			}
+			if j < len(prev) && int(prev[j].start) <= na {
+				return // the normalized pass has it
+			}
 			spans = append(spans, span{int32(na), int32(nz), int32(i)})
 		})
 	}
 	return spans
-}
-
-// encodesDelimiters reports whether s holds an encoding that decodes to a
-// character that can end a value: a percent-escape or entity candidate, or
-// full-width punctuation (U+FF01 to U+FF5E are EF BC 81 to EF BD 9E).
-func encodesDelimiters(s string) bool {
-	if strings.ContainsAny(s, "%&") {
-		return true
-	}
-	for i := strings.IndexByte(s, 0xEF); i >= 0 && i+1 < len(s); {
-		if c := s[i+1]; c == 0xBC || c == 0xBD {
-			return true
-		}
-		k := strings.IndexByte(s[i+1:], 0xEF)
-		if k < 0 {
-			break
-		}
-		i += 1 + k
-	}
-	return false
 }
 
 // subMatches retries a match that failed validation, over runs of its
@@ -551,17 +549,12 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 					}
 				}
 				if cut == 0 {
-					// No gap: every match touches the next. Finish the
-					// region in one search.
-					locs = r.findAll(s[ca:cz], -1)
-					for _, loc := range locs {
-						for k := range loc {
-							if loc[k] >= 0 {
-								loc[k] += ca
-							}
-						}
-					}
-					cut = len(locs)
+					// No gap: every match touches the next. Resume at the
+					// last match anyway, so a region dense with matches is
+					// still found a chunk at a time; if the previous
+					// match's last byte changes what is found there, the
+					// expect check below finishes the region in one search.
+					cut = len(locs) - 1
 				}
 			}
 			for _, loc := range locs[:cut] {
