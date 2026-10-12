@@ -11,16 +11,11 @@ env:
   existingSecret: neubird-proxy-env
 config:
   client_token_env: NEUBIRD_PROXY_TOKEN
-  connections:
-    - name: splunk
-      upstream: https://splunk.example.com:8089
-      client_auth: bearer
-      methods: [GET, POST]
-      paths: [/services/search/jobs, "/services/search/jobs/[A-Za-z0-9._-]+(/(results|control))?"]
-      headers:
-        Authorization: Bearer ${SPLUNK_TOKEN}
-      request_deny_patterns:
-        - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|collect|delete|script|run|map|dbxquery)\\b"
+  neubird_destinations:
+    hosts: ["*.example.com", "splunk.example.com:8089"]
+    methods: [GET, POST]
+    request_deny_patterns:
+      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|collect|delete|script|run|map|dbxquery)\\b"
   redaction:
     mask: hmac
     hmac_key_env: REDACTION_HMAC_KEY

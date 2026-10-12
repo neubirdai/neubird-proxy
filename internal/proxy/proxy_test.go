@@ -24,9 +24,10 @@ const (
 )
 
 type fixture struct {
-	proxy *httptest.Server
-	srv   *Server
-	logs  *syncBuffer
+	proxy    *httptest.Server
+	srv      *Server
+	logs     *syncBuffer
+	upstream string // the fake upstream's base URL
 
 	mu   sync.Mutex
 	last *http.Request // last request seen by the upstream
@@ -51,6 +52,7 @@ func newFixture(t *testing.T, yamlTmpl string, handler http.HandlerFunc) *fixtur
 	}))
 	t.Cleanup(up.Close)
 
+	f.upstream = up.URL
 	yml := strings.ReplaceAll(yamlTmpl, "UPSTREAM", up.URL)
 	cfg, err := config.Parse([]byte(yml), func(k string) (string, bool) {
 		v, ok := map[string]string{

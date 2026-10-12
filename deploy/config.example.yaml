@@ -1,7 +1,7 @@
 # neubird-proxy configuration. Mounted from a ConfigMap; secrets are
 # referenced by environment variable name and come from a Kubernetes Secret.
-# Hostnames, API paths, allowlists and the member_id pattern are
-# placeholders for MetLife to confirm against each connector's real calls.
+# Hostnames, allowlists and the member_id pattern are placeholders for
+# MetLife to confirm.
 
 listen: ":8443"          # NeuBird-facing listener (exposed via the load balancer)
 admin_listen: ":9090"    # /healthz, /readyz, /metrics (cluster-internal only)
@@ -14,10 +14,10 @@ admin_listen: ":9090"    # /healthz, /readyz, /metrics (cluster-internal only)
 #   key_file: /etc/neubird-proxy/tls/tls.key
 #   client_ca_file: /etc/neubird-proxy/tls/neubird-client-ca.crt
 
-# Optional: extra CA bundle for APIM's internal certificate.
+# Optional: extra CA bundle for internal certificates on your systems.
 # upstream_ca_file: /etc/neubird-proxy/ca/ca.crt
 
-# Default token for connections that do not set their own (32+ characters).
+# The token NeuBird sends (32+ characters); checked, then removed.
 client_token_env: NEUBIRD_PROXY_TOKEN
 # During a rotation, the outgoing token is accepted too. Remove afterwards.
 # client_token_previous_env: NEUBIRD_PROXY_TOKEN_PREVIOUS
@@ -26,69 +26,30 @@ max_body_bytes: 20971520      # 20 MiB; larger bodies are refused (502), never p
 max_concurrent_requests: 256  # beyond this, 503
 max_concurrent_buffered: 4    # and memory is budgeted from the container's limit (README: Latency and capacity)
 
-upstream_defaults:
-  headers:
-    Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY}
-
-connections:
-  - name: splunk
-    upstream: https://int.apis.metlife.com/splunk
-    client_auth: bearer
-    # Search jobs only: create (POST), poll and read results (GET).
-    methods: [GET, POST]
-    paths:
-      - /services/search/(v2/)?jobs
-      - /services/search/(v2/)?jobs/[A-Za-z0-9._-]+(/(results|events|results_preview|summary))?
-      - /services/search/(v2/)?jobs/export
-    # SPL commands that write, send, delete or reach other systems.
-    request_deny_patterns:
-      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
-    rate_limit: {requests_per_second: 5, burst: 20}
-
-  - name: servicenow
-    upstream: https://int.apis.metlife.com/servicenow
-    client_auth: basic
-    # A separate token, so a leak of one does not open the other.
-    client_token_env: NEUBIRD_PROXY_TOKEN_SERVICENOW
-    # Read-only (the default is GET, HEAD) and only the tables the agent needs.
-    paths:
-      - /api/now/table/(incident|problem|change_request|cmdb_ci[a-z_]*)(/[0-9a-f]{32})?
-      - /api/now/stats/(incident|problem|change_request)
-    # Only these JSON fields leave unmasked; every other string or number
-    # becomes [REDACTED:FIELD], so free-text fields (description,
-    # work_notes, comments) and people references stay inside MetLife.
-    # Placeholder list: confirm against what the connector actually reads.
-    response_fields:
-      - result.sys_id
-      - result.number
-      - result.short_description
-      - result.state
-      - result.priority
-      - result.impact
-      - result.urgency
-      - result.category
-      - result.opened_at
-      - result.resolved_at
-      - result.sys_updated_on
-      - result.cmdb_ci.display_value
-      - result.assignment_group.display_value
-      - result.stats
-    rate_limit: {requests_per_second: 5, burst: 20}
-
-  - name: maestro
-    upstream: https://int.apis.metlife.com/maestro-mcp
-    client_auth: bearer
-    # MCP streamable HTTP: POST for JSON-RPC, GET for the SSE stream,
-    # DELETE to end the session.
-    methods: [GET, POST, DELETE]
-    paths: [/mcp]
-    # tools/call is refused for any tool not listed. Placeholder names.
-    mcp_tools: [get_job_status, list_failed_jobs, get_job_log]
-    rate_limit: {requests_per_second: 10, burst: 30}
-  # Fallback for a connector that cannot take a base URL with a path:
-  #   host: maestro.proxy.metlife.com
-  # Backend not fronted by APIM: inject its credential from the Secret.
-  #   upstream_basic_auth: {username_env: SN_USER, password_env: SN_PASSWORD}
+# NeuBird names the destination host of each request (the endpoint URL of
+# its connection) and sends that system's credentials; the proxy checks the
+# host against these patterns, then redacts the response. Hostnames are
+# placeholders for MetLife to confirm.
+neubird_destinations:
+  # Optional; omitted means any host name. "*.domain", "host[:port]", or an
+  # exact IP address (wildcards never match IPs).
+  hosts:
+    - "*.apis.metlife.com"
+    - "maestro.corp.metlife.com"
+  # A ceiling for every destination: Splunk search jobs and MCP need POST,
+  # MCP sessions end with DELETE.
+  methods: [GET, HEAD, POST, DELETE]
+  # The headers NeuBird may set for the destination, sent as
+  # X-Neubird-Upstream-<Header>. Here the backend's token and the APIM
+  # subscription key.
+  credential_headers: [Authorization, Ocp-Apim-Subscription-Key]
+  # SPL commands that write, send, delete or reach other systems.
+  request_deny_patterns:
+    - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
+  rate_limit: {requests_per_second: 10, burst: 30}
+  # Optional JSON field allowlist, applied to every destination's responses:
+  # every other string or number becomes [REDACTED:FIELD].
+  # response_fields: [result.sys_id, result.number, result.state]
 
 redaction:
   # Omit builtins to enable the full default set. windows_account is opt-in.

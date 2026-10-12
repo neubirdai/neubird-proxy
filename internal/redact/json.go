@@ -75,11 +75,23 @@ type jsonWriter struct {
 	out     bytes.Buffer
 	scratch bytes.Buffer
 	enc     *json.Encoder
+	depth   int
 }
+
+// MaxJSONDepth is the deepest nesting redacted as JSON. Deeper input isn't
+// JSON any real API returns, and recursing into it could exhaust the stack.
+const MaxJSONDepth = 1000
+
+// ErrTooDeep is JSON nested deeper than MaxJSONDepth.
+var ErrTooDeep = fmt.Errorf("redact: JSON nested deeper than %d", MaxJSONDepth)
 
 func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) error {
 	switch t := tok.(type) {
 	case json.Delim:
+		if w.depth++; w.depth > MaxJSONDepth {
+			return ErrTooDeep
+		}
+		defer func() { w.depth-- }()
 		switch t {
 		case '{':
 			w.out.WriteByte('{')
@@ -95,7 +107,13 @@ func (w *jsonWriter) value(dec *json.Decoder, tok json.Token, blocked *keyRule) 
 				if i > 0 {
 					w.out.WriteByte(',')
 				}
-				w.str(w.e.String(key, w.st))
+				w.path = append(w.path, key)
+				if w.fields != nil && !w.fields.allowsKey(w.path) {
+					w.fieldMask(key)
+				} else {
+					w.str(w.e.String(key, w.st))
+				}
+				w.path = w.path[:len(w.path)-1]
 				w.out.WriteByte(':')
 				child := blocked
 				if child == nil {

@@ -9,8 +9,10 @@ The proxy runs in your cluster and opens outbound tunnels (TLS, port 443) to
 your dedicated NeuBird relay; NeuBird's requests come back through them.
 Nothing connects in to your cluster.
 
-The example has two connections: Splunk through its MCP server, and the
-ServiceNow REST API. Swap in your own systems as you go.
+You set once which hosts NeuBird may reach. Your systems are then added,
+changed and removed in NeuBird, as connections with their own URL and
+credentials, without touching the proxy. The example allows two systems:
+Splunk (through its MCP server) and ServiceNow. Swap in your own as you go.
 [configuration.md](configuration.md) is the reference for every setting, and
 the chart's [README](../README.md) for its values.
 
@@ -29,9 +31,10 @@ You need:
 - Docker on your machine, to run the proxy's tools before anything is
   deployed. Every tool is a subcommand of the same image, so the version you
   check with is the version you deploy.
-- For each system, its URL and a credential for the proxy to use. The proxy
-  holds these; NeuBird never sees them.
-- Outbound access from the cluster to the relay on port 443.
+- The hostnames of the systems NeuBird should reach. Their credentials go
+  into NeuBird, not into the proxy (step 7).
+- Outbound access from the cluster to the relay on port 443, and from the
+  cluster to those systems.
 
 Set a shortcut for running the tools:
 
@@ -62,25 +65,17 @@ Create `config.yaml` (or start from `docs/examples/config.yaml`):
 # them from environment variables, which come from a Kubernetes Secret.
 client_token_env: NEUBIRD_PROXY_TOKEN
 
-connections:
-  # NeuBird's connection URL ends in /splunk/services/mcp
-  - name: splunk
-    upstream: https://splunk.example.com
-    client_auth: bearer
-    methods: [POST, DELETE]            # MCP uses POST for every call
-    paths: [/services/mcp]             # nothing else on this host is reachable
-    headers:
-      Authorization: Bearer ${SPLUNK_MCP_TOKEN}   # sent to Splunk, never to NeuBird
-
-  # NeuBird's connection URL ends in /servicenow
-  - name: servicenow
-    upstream: https://yourinstance.service-now.com
-    client_auth: basic                 # NeuBird sends its token as a Basic password
-    paths:                             # GET and HEAD only, by default
-      - /api/now/table/(incident|problem|change_request)(/[0-9a-f]{32})?
-    upstream_basic_auth:
-      username_env: SN_USER
-      password_env: SN_PASSWORD
+# NeuBird names the system each request is for (the endpoint URL of its
+# connection, such as https://splunk.example.com) and sends that system's
+# credentials. The proxy only forwards to hosts that match these patterns.
+neubird_destinations:
+  hosts:
+    - splunk.example.com
+    - yourinstance.service-now.com
+  methods: [GET, HEAD, POST, DELETE]   # Splunk MCP uses POST, and DELETE to end a session
+  # SPL commands that write, send, delete or reach other systems.
+  request_deny_patterns:
+    - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
 
 redaction:
   # All built-in rules are on by default: emails, SSNs, phones, cards, IP
@@ -93,13 +88,15 @@ redaction:
 
 A few things to know:
 
-- **`name`** is the connection name NeuBird uses in its URL, so `splunk`
-  serves NeuBird's `.../splunk/...` requests.
-- **`paths`** patterns must match the whole path after the prefix. Leave a
-  connection's `paths` out and every URL under its upstream is reachable;
-  the proxy allows that, but warns at every start.
-- **`methods`** defaults to GET and HEAD (read-only). List more only where
-  you need them.
+- **`hosts`** is the list of systems NeuBird may reach: exact names, or a
+  domain such as `*.corp.example.com`. It's optional; without it NeuBird may
+  reach any host name the pod can. Either way, IP addresses are reached only
+  when listed exactly, and loopback, link-local and cloud metadata addresses
+  never.
+- **`methods`** defaults to GET and HEAD (read-only). List more only if a
+  system needs them, as Splunk's MCP server does.
+- **`request_deny_patterns`** refuse a request whose query or body matches,
+  whichever system it's for.
 
 ## 2. Validate it
 
@@ -109,29 +106,28 @@ np validate -offline -config config.yaml
 
 `-offline` checks the config without its secrets: missing variables get
 placeholders, and are listed at the end. A good config prints `VALID`, a
-summary of each connection, and any warnings:
+summary, and any warnings:
 
 ```
 VALID config.yaml
 
-CONNECTION  UPSTREAM                              AUTH    METHODS      PATHS  MCP TOOLS  FIELDS  MODE
-splunk      https://splunk.example.com            bearer  POST,DELETE  1      -          all     redact
-servicenow  https://yourinstance.service-now.com  basic   GET,HEAD     1      -          all     redact
+CONNECTION            UPSTREAM                                         AUTH    METHODS               PATHS  MCP TOOLS  FIELDS  MODE
+neubird_destinations  splunk.example.com,yourinstance.service-now.com  bearer  GET,HEAD,POST,DELETE  any    -          all     NeuBird credentials
 
 redaction: mask=label, rules: private_key, jwt, aws_access_key, ..., member_id, ...
 
 warnings:
   - tls is not set: the proxy listener is plain HTTP and relies on the load balancer for TLS
-  - connection splunk: allows POST, DELETE with no request_deny_patterns or mcp_tools
+  - neubird_destinations: NeuBird chooses the destination host within splunk.example.com, yourinstance.service-now.com and supplies the credentials
 
-not checked (offline, placeholders used): NEUBIRD_PROXY_TOKEN, SN_PASSWORD, SN_USER, SPLUNK_MCP_TOKEN
+not checked (offline, placeholders used): NEUBIRD_PROXY_TOKEN
 ```
 
-Both warnings are expected at this point:
+Both warnings are expected:
 - **TLS**: ignore it. It's about the request listener, which the chart turns
   off; the chart adds the tunnel part of the config in step 5.
-- **The Splunk warning** goes away in step 6, when you list the MCP tools
-  the agent may call.
+- **neubird_destinations** says what NeuBird may do, so it's visible in
+  every pod's log.
 
 A broken config lists every problem in one go, each with the setting it's
 in. Fix them and run it again.
@@ -143,7 +139,7 @@ response from one of your systems as `sample.json`, or use the synthetic
 ServiceNow incident in `docs/examples/sample.json`, then:
 
 ```bash
-np preview -config config.yaml -connection servicenow sample.json
+np preview -config config.yaml sample.json
 ```
 
 It shows each changed line, with the original above and what NeuBird
@@ -166,38 +162,18 @@ legend:     - returned by the system   + received by NeuBird
 For a security review, write it as a side-by-side HTML report:
 
 ```bash
-np preview -config config.yaml -connection servicenow -html - sample.json > report.html
+np preview -config config.yaml -html - sample.json > report.html
 ```
 
 The preview and the report contain the original data, so handle them as
 sensitive.
 
 Notice that "Dana Whitfield" got through. Names, addresses and other free
-text have no pattern to match. For fields the agent doesn't need, add a
-field allowlist to the connection, and every other field is masked:
-
-```yaml
-    response_fields:
-      - result.sys_id
-      - result.number
-      - result.state
-      - result.priority
-      - result.short_description
-      - result.assignment_group.display_value
-```
-
-Run `preview` again. The description is now masked whole, while the fields
-you listed still get every rule:
-
-```
-redactions: field_not_allowed 1, member_id 1
-            (field_not_allowed: a field not in response_fields, masked whole as [REDACTED:FIELD] before any other rule)
-legend:     - returned by the system   + received by NeuBird
-    8 -       "short_description": "Member portal login fails for MET220019384",
-      +       "short_description": "Member portal login fails for [REDACTED:MEMBER_ID]",
-    9 -       "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) reports a login loop since 09:10.",
-      +       "description": "[REDACTED:FIELD]",
-```
+text have no pattern to match. Add a custom rule for formats you know, or a
+field allowlist, `response_fields`, under `neubird_destinations`: every
+field not listed is masked whole. The allowlist applies to every system's
+responses, so it suits a proxy whose systems all return the fields you list;
+check each system's samples with `preview`.
 
 Repeat until the output is what you're comfortable sending to NeuBird.
 
@@ -231,7 +207,7 @@ To preview with the real codes, put the key in an env file. Without it,
 
 ```bash
 printf 'REDACTION_HMAC_KEY=%s\n' "$(np token)" > hmac.env   # keep this file safe; step 4 stores the key
-np preview -config config.yaml -env-file hmac.env -connection servicenow incidents.json
+np preview -config config.yaml -env-file hmac.env incidents.json
 ```
 
 With three incidents, two of them from the same caller
@@ -271,23 +247,19 @@ If the agent doesn't need to tell values apart, keep the default,
 ## 4. Create the secrets
 
 Create the namespace (set your own name), then one Secret holding the proxy
-token and the systems' credentials:
+token and the join token. Your systems' credentials don't go here: they're
+entered in NeuBird (step 7).
 
 ```bash
 NS=neubird
 kubectl create namespace $NS
 kubectl label namespace $NS pod-security.kubernetes.io/enforce=restricted
 
-printf 'Splunk MCP token: '; read -rs SPLUNK; echo
-printf 'ServiceNow password: '; read -rs SNPW; echo
 printf 'NeuBird join token: '; read -rs JOIN; echo
 kubectl -n $NS create secret generic neubird-proxy \
   --from-literal=NEUBIRD_PROXY_TOKEN="$(np token)" \
-  --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN" \
-  --from-literal=SPLUNK_MCP_TOKEN="$SPLUNK" \
-  --from-literal=SN_USER=neubird-integration \
-  --from-literal=SN_PASSWORD="$SNPW"
-unset SPLUNK SNPW JOIN
+  --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN"
+unset JOIN
 ```
 
 If you chose HMAC masking, add the key from `hmac.env` too, then delete
@@ -303,7 +275,7 @@ The proxy refuses to start with `mask: hmac` and no key, so a missing key
 shows up immediately rather than as wrong codes.
 
 `np token` generates the proxy token, so nobody types it. `read -rs` keeps
-the credentials off the screen and out of your shell history.
+the join token off the screen and out of your shell history.
 
 ## 5. Install with Helm
 
@@ -347,46 +319,53 @@ key's fingerprint instead (`kubectl -n $NS exec deploy/neubird-proxy --
 /neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key`); the pods
 turn ready once it's recorded.
 
-The `starting` line lists the connections and the hash of the config they
-run. Any `risky configuration` lines are settings worth a second look.
+The `starting` line shows the hash of the config the pod runs. Any `risky
+configuration` lines are settings worth a second look.
 
-## 6. Test each connection
+## 6. Test the tunnel and each system
 
-Run the test inside a proxy pod, so it uses the pod's real secrets and
-network and nobody copies credentials anywhere:
+Run the test inside a proxy pod, so it uses the pod's real network:
 
 ```bash
 kubectl -n $NS exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml
 ```
 
-For each connection, it checks DNS, TCP and TLS, then sends a real request
-through the proxy as NeuBird would. Here's an example for an MCP
-connection:
+Without arguments it checks the tunnel to each relay:
 
 ```
-splunk -> https://splunk.example.com
+tunnel -> acme.tunnel.neubird.ai:443
+  ok    identity   tenant acme, proxy aks-prod; key sha256:0f9f…
+  ok    dns        acme.tunnel.neubird.ai -> 20.1.2.3
+  ok    relay      acme.tunnel.neubird.ai:443: mutual TLS and neubird-tunnel/1 in 41ms; relay certificate "acme.tunnel.neubird.ai" expires in 364 days
+```
+
+Pass a system's URL to check that the proxy may and can reach it:
+
+```bash
+kubectl -n $NS exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml \
+  https://splunk.example.com https://yourinstance.service-now.com
+```
+
+```
+https://splunk.example.com -> neubird_destinations
+  ok    hosts      allowed by neubird_destinations.hosts
   ok    dns        splunk.example.com -> 10.20.30.40
   ok    tcp        splunk.example.com:443 connected in 18ms
   ok    tls        TLS 1.3, certificate "splunk.example.com" from "Example CA", expires in 106 days
-  ok    initialize HTTP 200, application/json, 154 bytes, 172ms; redactions: none
-  info  server     Splunk_MCP_Server 1.2.1, protocol 2025-06-18
-  ok    tools/list HTTP 200, application/json, 7228 bytes, 325ms; redactions: none
-  warn  tools      10 tools, all allowed (no mcp_tools): splunk_get_info, splunk_run_query, ...
 ```
 
-Each failure says where it broke:
+No request is sent: the credentials are NeuBird's. Each failure says where
+it broke:
 
 | Failure | Usually means |
 |---|---|
+| `FAIL hosts` | The host isn't in `neubird_destinations.hosts` |
 | `FAIL dns` | The name doesn't resolve from inside the cluster |
 | `FAIL tcp` | A firewall, or your NetworkPolicy, doesn't allow the system |
 | `FAIL tls`, "set upstream_ca_file" | The system uses an internal CA: pass its bundle with the chart's `upstreamCA` |
-| "rejected the credentials" | The system refused the credential in the Secret |
-| "refused by the proxy: path_not_allowed" | The test probe's path isn't in `paths`; pass `-path` with one that is |
 
-For an MCP connection, the last lines list the server's tools. Copy the
-ones the agent should use into the connection's `mcp_tools`, and every
-other tool is refused. Then upgrade; a config change rolls the pods:
+To change the config later, edit `config.yaml` and upgrade; a config change
+rolls the pods:
 
 ```bash
 { echo 'config:'; sed 's/^/  /' config.yaml; } > config-values.yaml
@@ -394,50 +373,34 @@ helm upgrade neubird-proxy ./neubird-proxy-<version>.tgz -n $NS \
   -f values.yaml -f config-values.yaml --set-file relayCA.cert=relay-ca.crt
 ```
 
-## 7. Check the masking on live data
+## 7. Connect NeuBird
 
-Capture a real response through a connection and compare it with what
-NeuBird would receive:
+The tunnels are already up (step 5). In NeuBird, add each system as a
+connection, as you would without the proxy: its URL (for example
+`https://splunk.example.com/services/mcp`) and its credentials. Then choose
+access through the NeuBird proxy and enter:
 
-```bash
-kubectl -n $NS exec deploy/neubird-proxy -- /neubird-proxy preview -config /etc/neubird-proxy/config.yaml \
-  -connection servicenow -live -path /api/now/table/incident
-```
-
-For MCP, pass the tool call:
-
-```bash
-kubectl -n $NS exec deploy/neubird-proxy -- /neubird-proxy preview -config /etc/neubird-proxy/config.yaml \
-  -connection splunk -live -method POST -path /services/mcp \
-  -data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"splunk_run_query","arguments":{"query":"search index=main | head 20"}}}'
-```
-
-Add `-html - > report.html` to either for the side-by-side report.
-
-## 8. Connect NeuBird
-
-The tunnels are already up (step 5). In NeuBird, create one connection per
-system, with the URL NeuBird gives you for it and, as its credential, the
-proxy token:
-
-- Splunk MCP: bearer token.
-- ServiceNow: Basic auth with any user name and the token as the password.
-
-Print the token with:
+- the **relay URL** NeuBird gives you;
+- the **proxy token**. Print it with:
 
 ```bash
 kubectl -n $NS get secret neubird-proxy -o jsonpath='{.data.NEUBIRD_PROXY_TOKEN}' | base64 -d
 ```
 
+NeuBird sends each request through the relay and the tunnel, naming the
+system's host, and the proxy forwards it only if the host is in `hosts`.
+Adding, changing or removing a system later happens in NeuBird; the proxy
+needs a change only when a new system's host isn't covered by `hosts`.
+
 To cut NeuBird off at any time: change the token in the Secret and restart
 the pods, or scale the Deployment to 0.
 
-## 9. Watch it work
+## 8. Watch it work
 
 Every request gets one audit line: that it came through the tunnel
-(`"via":"tunnel"`), which connection and path, the status, the time, and how
-many values each rule masked. Matched values and query values are
-never logged.
+(`"via":"tunnel"`), the system it went to (`destination`), the path, the
+status, the time, and how many values each rule masked. Credentials,
+matched values and query values are never logged.
 
 ```bash
 kubectl -n $NS logs -l app=neubird-proxy -f
@@ -453,13 +416,13 @@ done | np metrics -
 
 ## Next steps
 
-- **Tighten each connection.** List `paths` and `mcp_tools` from what
-  NeuBird's connectors actually call; the audit lines show every method,
-  path and query parameter name. Add `response_fields` where free text
-  doesn't need to leave.
-- **Lock down egress by hostname**: generate a policy for your systems and
-  the relay with `neubird-proxy netpol` ([configuration.md](configuration.md),
-  Egress by hostname).
+- **Keep `hosts` narrow.** List the systems, or the narrowest domains that
+  cover them, rather than `*`.
+- **Lock down egress at the network**, so the pod can reach only your
+  systems and the relay, whatever `hosts` says (configuration.md, Egress).
+- **Tighten the request rules.** The audit lines show every method, path
+  and query parameter name; add `request_deny_patterns` for anything
+  NeuBird shouldn't send, and drop methods no system needs.
 - **Correlate without revealing values:** if you skipped it in step 3,
   see the HMAC section there.
 - **Rotate the token** without downtime: add the new token to the Secret,

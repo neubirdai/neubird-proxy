@@ -36,6 +36,32 @@ func NewFields(patterns []string) (*Fields, error) {
 	return f, nil
 }
 
+// allowsKey reports whether the last key of path may leave as it is: it's
+// inside an allowed field, or on the way to one (a literal segment of a
+// pattern, or a * position). Any other key is masked like a value: a query
+// can put data in keys (Splunk chart ... by name).
+func (f *Fields) allowsKey(path []string) bool {
+	if f.allows(path) {
+		return true
+	}
+	for _, p := range f.pats {
+		if len(p) < len(path) {
+			continue
+		}
+		ok := true
+		for i := range path {
+			if p[i] != "*" && p[i] != path[i] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *Fields) allows(path []string) bool {
 	for _, p := range f.pats {
 		if len(p) > len(path) {

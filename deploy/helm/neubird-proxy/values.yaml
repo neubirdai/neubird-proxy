@@ -50,13 +50,14 @@ tunnelKey:
 env:
   existingSecret: ""
 
-# The proxy's configuration (docs/configuration.md): connections,
-# redaction, limits. The chart sets the rest: the tunnel section (from
-# `tunnel` above), listen: off and admin_listen: :9090. ${VAR} placeholders
-# are filled from env.
+# The proxy's configuration (docs/configuration.md): the hosts NeuBird may
+# reach (neubird_destinations), redaction, limits. The chart sets the rest:
+# the tunnel section (from `tunnel` above), listen: off and admin_listen:
+# :9090. ${VAR} placeholders are filled from env.
 config:
   client_token_env: NEUBIRD_PROXY_TOKEN
-  connections: []
+  # neubird_destinations:
+  #   hosts: ["*.corp.example.com"]   # optional; omitted means any host name
   # redaction:
   #   mask: hmac
   #   hmac_key_env: REDACTION_HMAC_KEY
@@ -70,7 +71,8 @@ podDisruptionBudget:
   minAvailable: 1
 
 # Off by default. When on: no inbound traffic except metricsFrom on 9090;
-# outbound only DNS, the relays (relayCIDRs, port 443) and your upstreams.
+# outbound only DNS, the relays (relayCIDRs, port 443) and your systems
+# (upstreams).
 networkPolicy:
   enabled: false
   relayCIDRs: []           # NeuBird's relay addresses, e.g. ["203.0.113.10/32"]

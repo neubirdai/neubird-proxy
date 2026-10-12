@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -50,6 +51,25 @@ const (
 	AuthHeader = "header" // <client_auth_header>: <token>
 )
 
+// UpstreamCredentialPrefix marks a request header carrying a NeuBird-held
+// backend credential in open mode: X-Neubird-Upstream-Authorization becomes
+// Authorization.
+const UpstreamCredentialPrefix = "X-Neubird-Upstream-"
+
+// DefaultCredentialHeaders is what NeuBird may set in open mode when
+// neubird_destinations lists no credential_headers.
+var DefaultCredentialHeaders = []string{"Authorization"}
+
+// credentialHeaderDenied are headers NeuBird may never set, whatever
+// credential_headers says: they steer the transport, APIM or the audit trail.
+var credentialHeaderDenied = map[string]bool{
+	"Host": true, "Cookie": true, "Proxy-Authorization": true,
+	"Content-Length": true, "Transfer-Encoding": true, "Connection": true,
+	"Upgrade": true, "Te": true, "Trailer": true, "X-Request-Id": true,
+	"Ocp-Apim-Trace": true, "Apim-Debug-Authorization": true,
+	"Accept-Encoding": true, "Range": true, "If-Range": true,
+}
+
 const (
 	MaskLabel = "label"
 	MaskHMAC  = "hmac"
@@ -73,6 +93,11 @@ type Config struct {
 	UpstreamDefaults       Upstream     `yaml:"upstream_defaults"`
 	Connections            []Connection `yaml:"connections"`
 	Redaction              Redaction    `yaml:"redaction"`
+	// NeubirdDestinations ("open mode"), when set, lets NeuBird name the
+	// destination host of a request instead of a configured connection, within
+	// the host patterns listed here. No per-backend entries; credentials are
+	// always NeuBird's. See the README, "Open mode".
+	NeubirdDestinations *NeubirdDestinations `yaml:"neubird_destinations"`
 	// Tunnel, when set, makes the proxy also (or, with listen: "off",
 	// only) serve NeuBird through outbound connections to a NeuBird relay.
 	// See docs/tunnel-protocol.md.
@@ -158,6 +183,12 @@ type Connection struct {
 	ResponseFields []string `yaml:"response_fields"`
 	// MCPTools allowlists the tools a tools/call request may name.
 	MCPTools []string `yaml:"mcp_tools"`
+	// NeuBirdCredentials is set on open mode's shared policy only: NeuBird
+	// sends the backend credential (X-Neubird-Upstream-<Header>) and the
+	// proxy forwards it as <Header>, for the headers in CredentialHeaders.
+	// Named connections always use the customer's credentials.
+	NeuBirdCredentials bool     `yaml:"-"`
+	CredentialHeaders  []string `yaml:"-"`
 
 	UpstreamURL *url.URL `yaml:"-"`
 	// ClientTokens are the accepted tokens: this connection's own, or the
@@ -173,6 +204,123 @@ type Connection struct {
 	// ResolvedHeaders is upstream_defaults.headers overlaid with this
 	// connection's headers, with ${VAR} references expanded.
 	ResolvedHeaders map[string]string `yaml:"-"`
+	// CredentialHeaderSet holds the canonical upstream header names NeuBird
+	// may set (open mode only).
+	CredentialHeaderSet map[string]bool `yaml:"-"`
+}
+
+// NeubirdDestinations is open mode: requests to /_neubird/dest/<path> carry
+// X-Neubird-Destination (scheme://host[:port]) and go there if the host
+// matches Hosts. Everything a connection applies applies here too, from one
+// shared policy.
+type NeubirdDestinations struct {
+	// Hosts are patterns (default "*"): "*" (any host name), "*.example.com" (any name
+	// under it), "host.example.com", or an IP address; each may end in
+	// ":port". An IP address is reached only when listed exactly; "*" and
+	// "*.domain" match names, never IP literals.
+	Hosts               []string   `yaml:"hosts"`
+	ClientAuth          string     `yaml:"client_auth"`
+	ClientAuthHeader    string     `yaml:"client_auth_header"`
+	ClientTokenEnv      string     `yaml:"client_token_env"`
+	Methods             []string   `yaml:"methods"`
+	RequestHeaders      []string   `yaml:"request_headers"`
+	RequestDenyPatterns []string   `yaml:"request_deny_patterns"`
+	RateLimit           *RateLimit `yaml:"rate_limit"`
+	ResponseFields      []string   `yaml:"response_fields"`
+	CredentialHeaders   []string   `yaml:"credential_headers"`
+
+	// Conn is the shared policy as a connection, resolved like any other;
+	// the proxy sets its upstream per request. Not routable by name.
+	Conn *Connection `yaml:"-"`
+	// Patterns are the parsed Hosts.
+	Patterns []HostPattern `yaml:"-"`
+}
+
+// DestinationsConnName labels open-mode requests in metrics and audit lines.
+// It can't collide with a connection: names start with [a-z0-9].
+const DestinationsConnName = "_destinations"
+
+// HostPattern is one parsed neubird_destinations.hosts entry.
+type HostPattern struct {
+	Any    bool   // "*"
+	Suffix string // "*.example.com" -> ".example.com"
+	Exact  string // a host name or IP literal
+	Port   string // "" means any port
+	IP     bool   // Exact is an IP literal
+}
+
+// Match reports whether host (lower-case, no trailing dot) and port (never
+// empty: the scheme's default filled in) match the pattern.
+func (p HostPattern) Match(host, port string, hostIsIP bool) bool {
+	if p.Port != "" && p.Port != port {
+		return false
+	}
+	switch {
+	case p.Exact != "":
+		return host == p.Exact
+	case hostIsIP:
+		return false // wildcards never cover IP literals
+	case p.Any:
+		return true
+	default:
+		return strings.HasSuffix(host, p.Suffix) && len(host) > len(p.Suffix)
+	}
+}
+
+var hostLabelsRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+func parseHostPattern(raw string) (HostPattern, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	var p HostPattern
+	host := v
+	if h, port, err := net.SplitHostPort(v); err == nil {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return p, fmt.Errorf("%q: bad port", raw)
+		}
+		host, p.Port = h, port
+	}
+	host = strings.TrimSuffix(host, ".")
+	switch {
+	case host == "*":
+		p.Any = true
+	case strings.HasPrefix(host, "*."):
+		if !hostLabelsRe.MatchString(host[2:]) || !strings.Contains(host[2:], ".") {
+			return p, fmt.Errorf("%q: a wildcard needs a domain of two or more labels, e.g. *.example.com", raw)
+		}
+		p.Suffix = host[1:]
+	case net.ParseIP(host) != nil:
+		p.Exact, p.IP = net.ParseIP(host).String(), true
+	case hostLabelsRe.MatchString(host):
+		p.Exact = host
+	default:
+		return p, fmt.Errorf("%q: not \"*\", \"*.domain\", a host name or an IP address", raw)
+	}
+	return p, nil
+}
+
+// MatchDestination reports whether any pattern allows host:port.
+func (d *NeubirdDestinations) MatchDestination(host, port string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	isIP := net.ParseIP(host) != nil
+	if isIP {
+		host = net.ParseIP(host).String()
+	}
+	for _, p := range d.Patterns {
+		if p.Match(host, port, isIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// AnyHost reports whether a bare "*" pattern is listed.
+func (d *NeubirdDestinations) AnyHost() bool {
+	for _, p := range d.Patterns {
+		if p.Any {
+			return true
+		}
+	}
+	return false
 }
 
 // RateLimit is a token bucket per connection and per pod, so the
@@ -210,8 +358,9 @@ type CustomRule struct {
 }
 
 var (
-	connNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-	envRefRe   = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	connNameRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	envRefRe     = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	headerNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 	// Paths the proxy answers itself are not valid connection names.
 	reservedNames = map[string]bool{"healthz": true, "readyz": true, "metrics": true}
 )
@@ -336,31 +485,74 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			fail("tls configures the inbound listener, which listen: off turns off")
 		}
 	}
-	if len(c.Connections) == 0 {
-		fail("connections: at least one connection is required")
+	if len(c.Connections) == 0 && c.NeubirdDestinations == nil {
+		fail("connections: at least one connection (or neubird_destinations) is required")
+	}
+	type target struct {
+		conn  *Connection
+		where string
+		dest  bool
+	}
+	var targets []target
+	for i := range c.Connections {
+		targets = append(targets, target{&c.Connections[i], fmt.Sprintf("connections[%d] (%s)", i, c.Connections[i].Name), false})
+	}
+	if d := c.NeubirdDestinations; d != nil {
+		if len(d.Hosts) == 0 {
+			// Not restricting is the customer's call: any host name, with
+			// the same guard rails (no IP literals, no internal addresses).
+			d.Hosts = []string{"*"}
+		}
+		d.Patterns = nil
+		for i, h := range d.Hosts {
+			p, err := parseHostPattern(h)
+			if err != nil {
+				fail("neubird_destinations.hosts[%d]: %v", i, err)
+				continue
+			}
+			d.Patterns = append(d.Patterns, p)
+		}
+		// The shared policy, resolved below like a connection. Its upstream
+		// is a placeholder the proxy replaces per request.
+		d.Conn = &Connection{
+			Name:                DestinationsConnName,
+			Upstream:            "https://neubird-destination.invalid",
+			ClientAuth:          d.ClientAuth,
+			ClientAuthHeader:    d.ClientAuthHeader,
+			ClientTokenEnv:      d.ClientTokenEnv,
+			Methods:             d.Methods,
+			RequestHeaders:      d.RequestHeaders,
+			RequestDenyPatterns: d.RequestDenyPatterns,
+			RateLimit:           d.RateLimit,
+			ResponseFields:      d.ResponseFields,
+			NeuBirdCredentials:  true,
+			CredentialHeaders:   d.CredentialHeaders,
+		}
+		targets = append(targets, target{d.Conn, "neubird_destinations", true})
 	}
 	names := map[string]bool{}
 	hosts := map[string]bool{}
-	for i := range c.Connections {
-		conn := &c.Connections[i]
-		where := fmt.Sprintf("connections[%d] (%s)", i, conn.Name)
+	for _, tg := range targets {
+		conn, where := tg.conn, tg.where
 
-		switch {
-		case !connNameRe.MatchString(conn.Name):
-			fail("%s: name must match %s", where, connNameRe)
-		case reservedNames[conn.Name]:
-			fail("%s: name %q is reserved", where, conn.Name)
-		case names[conn.Name]:
-			fail("%s: duplicate name", where)
-		}
-		names[conn.Name] = true
-
-		if conn.Host != "" {
-			conn.Host = strings.ToLower(conn.Host)
-			if hosts[conn.Host] {
-				fail("%s: duplicate host %q", where, conn.Host)
+		if !tg.dest {
+			switch {
+			case !connNameRe.MatchString(conn.Name):
+				fail("%s: name must match %s", where, connNameRe)
+			case reservedNames[conn.Name]:
+				fail("%s: name %q is reserved", where, conn.Name)
+			case names[conn.Name]:
+				fail("%s: duplicate name", where)
 			}
-			hosts[conn.Host] = true
+			names[conn.Name] = true
+
+			if conn.Host != "" {
+				conn.Host = strings.ToLower(conn.Host)
+				if hosts[conn.Host] {
+					fail("%s: duplicate host %q", where, conn.Host)
+				}
+				hosts[conn.Host] = true
+			}
 		}
 
 		switch {
@@ -402,8 +594,13 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		}
 
 		conn.ResolvedHeaders = map[string]string{}
-		for k, v := range c.UpstreamDefaults.Headers {
-			conn.ResolvedHeaders[k] = v
+		// upstream_defaults.headers (an APIM subscription key, say) are for
+		// the configured upstreams; open mode reaches other hosts, which must
+		// never receive them.
+		if !tg.dest {
+			for k, v := range c.UpstreamDefaults.Headers {
+				conn.ResolvedHeaders[k] = v
+			}
 		}
 		for k, v := range conn.Headers {
 			conn.ResolvedHeaders[k] = v
@@ -458,7 +655,34 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			case "Authorization", "Proxy-Authorization", "Cookie", "Ocp-Apim-Subscription-Key", "Ocp-Apim-Trace", "Apim-Debug-Authorization":
 				fail("%s: request_headers: %s cannot be forwarded", where, ch)
 			}
+			if strings.HasPrefix(ch, UpstreamCredentialPrefix) {
+				fail("%s: request_headers: %s is a credential header", where, ch)
+			}
+			if conn.ClientAuth == AuthHeader && strings.EqualFold(ch, conn.ClientAuthHeader) {
+				// It carries the proxy token, which must never go upstream.
+				fail("%s: request_headers: %s carries the proxy token (client_auth_header)", where, ch)
+			}
 			conn.HeaderSet[ch] = true
+		}
+
+		if conn.NeuBirdCredentials {
+			hs := conn.CredentialHeaders
+			if len(hs) == 0 {
+				hs = DefaultCredentialHeaders
+			}
+			conn.CredentialHeaderSet = map[string]bool{}
+			for _, h := range hs {
+				ch := http.CanonicalHeaderKey(h)
+				switch {
+				case !headerNameRe.MatchString(h):
+					fail("%s: credential_headers: %q is not a header name", where, h)
+				case credentialHeaderDenied[ch], strings.HasPrefix(ch, "X-Forwarded-"), strings.HasPrefix(ch, UpstreamCredentialPrefix):
+					fail("%s: credential_headers: %s cannot be set by NeuBird", where, ch)
+				case conn.HeaderSet[ch]:
+					fail("%s: credential_headers: %s is also in request_headers", where, ch)
+				}
+				conn.CredentialHeaderSet[ch] = true
+			}
 		}
 		for j, p := range conn.ResponseFields {
 			for _, seg := range strings.Split(p, ".") {

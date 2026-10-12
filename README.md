@@ -1,10 +1,11 @@
 # neubird-proxy
 
 A redacting reverse proxy that MetLife runs in their AKS cluster between
-NeuBird and MetLife's internal APIM endpoints. It limits what NeuBird can ask
-for, and masks PII and secrets in every response before the data leaves
-MetLife. Design: *MetLife Redaction Proxy: Engineering Proposal* (Sep 30,
-2026). Open security work: [docs/security-plan.md](docs/security-plan.md).
+NeuBird and MetLife's internal systems. It limits which systems NeuBird can
+reach and what it can send them, and masks PII and secrets in every
+response before the data leaves MetLife. Design: *MetLife Redaction Proxy:
+Engineering Proposal* (Sep 30, 2026). Open security work:
+[docs/security-plan.md](docs/security-plan.md).
 
 **New here? Start with [the getting started guide](deploy/helm/neubird-proxy/docs/getting-started.md)**:
 config, check the masking, install with Helm, connect, in about an hour.
@@ -13,76 +14,78 @@ Customers get everything they need inside the Helm chart
 guide, and the [configuration reference](deploy/helm/neubird-proxy/docs/configuration.md).
 
 ```
-NeuBird ──(proxy token)──▶ neubird-proxy ──(APIM subscription key)──▶ APIM (internal) ──(Key Vault creds)──▶ Splunk / Maestro / ServiceNow
-                             │ allowlists requests, redacts responses
+NeuBird ──▶ relay ⇄ tunnel (opened by the proxy, :443) ⇄ neubird-proxy ──▶ Splunk / Maestro / ServiceNow / APIM
+             (proxy token + the system's credentials)      │ checks the host, request rules; redacts responses
 ```
+
+MetLife sets once which hosts NeuBird may reach (`neubird_destinations`).
+Systems are then added, changed and removed in NeuBird, each as a
+connection with its own URL and credentials, with no change to the proxy.
 
 ## What a request goes through
 
-In order; the first check that fails ends the request.
+NeuBird sends each request to `/_neubird/dest/<path>`, naming the system
+in `X-Neubird-Destination: https://host[:port]` (the endpoint URL of its
+connection). In order; the first check that fails ends the request.
 
 1. **Capacity.** Beyond `max_concurrent_requests` in flight, the proxy returns 503.
 2. **Path hygiene.** Paths with `.` or `..` segments (including
-   percent-encoded, double-encoded and backslash forms) get a 400, so a
-   request can't enter through one connection and be normalized upstream
-   into another.
-3. **Routing.** The first path segment names the connection:
-   `/splunk/services/search/jobs?x=1` goes to
-   `<splunk upstream>/services/search/jobs?x=1`. A connection can also claim a
-   hostname (`host:`) for connectors that cannot take a base URL with a path.
-4. **Token.** The token must be one this connection accepts: its own
-   `client_token_env`, or the top-level current or previous token. It must be
-   sent in the form the connection expects (a Bearer token, a Basic password,
-   or a named header), so connectors need no code change. Tokens shorter than
-   32 characters are refused at startup.
-5. **Method allowlist.** GET and HEAD only, unless the connection lists
-   `methods`. Anything else gets a 405.
-6. **Path allowlist.** If `paths` is set, the path after the prefix must fully
-   match one of the patterns, or the request gets a 403.
-7. **Rate limit.** Per connection and per pod, when `rate_limit` is set;
+   percent-encoded, double-encoded, backslash and `..;` forms) get a 400,
+   so a path can't be normalized upstream into a different API.
+3. **Token.** The proxy token, in the form `client_auth` sets (a Bearer
+   token, a Basic password, or a named header). Tokens shorter than 32
+   characters are refused at startup.
+4. **Destination.** The host must match `neubird_destinations.hosts`, or the
+   request gets `403 destination_not_allowed`. This is checked after the
+   token, so a caller without it learns nothing about the hosts.
+5. **Method allowlist.** GET and HEAD only, unless `methods` lists more.
+   Anything else gets a 405.
+6. **Rate limit.** Per pod, shared by every host, when `rate_limit` is set;
    over the limit gets a 429.
-8. **Request checks.** The query string and body are checked raw and
-   URL-decoded against `request_deny_patterns`, for example Splunk commands
-   that write or send data. On an MCP connection with `mcp_tools`, a
-   `tools/call` (alone or in a batch) naming any other tool is refused, and so
-   is a POST body that isn't JSON-RPC. Either gets a 403.
-9. **Header allowlist.** Only allowlisted client headers go upstream. This
-   drops the NeuBird token, cookies, `Ocp-Apim-Trace`, a client-supplied
-   subscription key, and `Accept-Encoding`/`Range` (bodies must arrive whole
-   and uncompressed). The proxy adds the APIM subscription key and an
+7. **Request checks.** The query string and body are checked raw,
+   URL-decoded (leniently, so one malformed escape doesn't hide the rest),
+   and with JSON string escapes decoded, against `request_deny_patterns`,
+   for example Splunk commands that write or send data. A match gets a 403.
+   The patterns are a blocklist: they catch what they name, in the
+   encodings above.
+8. **Headers.** Only allowlisted client headers go upstream. This drops the
+   proxy token, cookies, `Ocp-Apim-Trace`, and `Accept-Encoding`/`Range`
+   (bodies must arrive whole and uncompressed). The system's credentials
+   arrive as `X-Neubird-Upstream-<Header>` and are forwarded as `<Header>`,
+   only for the headers in `credential_headers`. The proxy adds an
    `X-Request-Id`.
+9. **Connect.** Connections to loopback, link-local (including
+   `169.254.169.254`), unspecified and multicast addresses, other cloud
+   metadata addresses (`168.63.129.16`, `100.100.100.200`,
+   `fd00:ec2::254`) and the pod's own addresses are refused, whatever the
+   name resolved to.
 10. **Response.**
     - Stripped: `Set-Cookie`, all `Ocp-Apim-*` headers, and trailers.
     - Dropped: 1xx informational responses such as 103 Early Hints, whose
       headers would otherwise reach the client before redaction runs.
+    - Redirects to the same host: rewritten to point back through the
+      proxy. The proxy never follows a redirect itself.
     - Redacted: every remaining header value, then the body.
     - Refused if it can't be redacted (see Fail closed).
 
-With `tls.client_ca_file`, the TLS handshake also requires a client
-certificate from that CA before any of this runs (mutual TLS).
+## Outbound tunnel
 
-`passthrough: true` skips step 10's redaction and fail-closed checks for a
-connection MetLife has cleared, such as Elastic. Every pod start logs a
-warning for it.
-
-## Outbound tunnel (optional)
-
-With a `tunnel:` section, the proxy connects *out* to NeuBird's relay, and
-NeuBird's requests arrive over that connection. With `listen: "off"`,
-nothing is exposed inbound at all.
+The proxy connects *out* to NeuBird's relay, and NeuBird's requests arrive
+over that connection; with `listen: "off"`, nothing is exposed inbound at
+all. The Helm chart always deploys it this way: it adds the `tunnel`
+section and `listen: "off"` itself.
 
 What the customer needs on their network:
-- **Outbound HTTPS** to their own relay, `<tenant>.tunnel.neubird.ai:443`,
-  nothing else. Each customer has a dedicated relay; if they allowlist by IP
-  rather than hostname, NeuBird gives them its fixed IP addresses.
+- **Outbound HTTPS** to their own relay, `<tenant>.tunnel.neubird.ai:443`.
+  Each customer has a dedicated relay; if they allowlist by IP rather than
+  hostname, NeuBird gives them its fixed IP addresses.
 - **No TLS inspection** of that traffic. A corporate proxy that re-signs
   outbound HTTPS breaks mutual TLS. A plain HTTP proxy is fine: the tunnel
   uses `HTTPS_PROXY` with `CONNECT`.
 
-Requests that arrive through the tunnel take exactly the same path as
-inbound ones: token check, allowlists, redaction, and the audit line
-(marked `via: tunnel`). On NeuBird's side, the relay runs in the NeuBird
-tenant's own namespace and only that tenant's ace can call it.
+Requests that arrive through the tunnel get every check above and the
+audit line (marked `via: tunnel`). On NeuBird's side, the relay runs in the
+NeuBird tenant's own namespace and only that tenant's ace can call it.
 Protocol: [docs/tunnel-protocol.md](docs/tunnel-protocol.md). Design:
 [docs/outbound-tunnel-design.md](docs/outbound-tunnel-design.md).
 
@@ -95,6 +98,7 @@ tunnel:
   key_file: /etc/neubird-proxy-tunnel/tunnel.key    # made here (keygen), never sent
   ca_file: /etc/neubird-proxy-tunnel/relay-ca.crt   # pins NeuBird's relay CA
   connections_per_relay: 2    # two tunnels per pod, for faster failover
+  join_token_env: NEUBIRD_JOIN_TOKEN   # optional: enroll the key with a join token
 ```
 
 **Identity.** The proxy has its own key and NeuBird records the key's
@@ -105,15 +109,30 @@ standard (CNCF) for naming workloads in certificates, the way a website
 certificate names a domain. The relay accepts the connection only if the
 key is the one recorded for that customer (`acme`) and proxy (`aks-prod`).
 
-**Setting it up.** The key is created here and never leaves:
+**Setting it up.** The key is created here and never leaves. There are two
+ways for NeuBird to learn it.
+
+With a join token (what the Helm chart does by default):
+1. NeuBird sends you your relay's hostname, its relay CA certificate, and
+   a join token for your tenant and proxy name (`nbjt_…`, single use, with
+   an expiry).
+2. Put the token in the environment variable named by
+   `tunnel.join_token_env`. The chart generates the key in a Secret.
+3. On its first connect, the proxy presents the token and the relay records
+   the key (`enrolled with the join token` in the log). Restarts and other
+   replicas with the same key get `key already enrolled`. Once enrolled, the
+   token can be removed.
+
+With the fingerprint:
 1. Run `neubird-proxy keygen -tenant <tenant> -proxy <name>`, with the
    tenant name NeuBird gives you. It writes `tunnel.key`, which stays with
    you, and prints its fingerprint (`sha256:…`).
 2. Send NeuBird the fingerprint; it isn't secret. NeuBird records it and
    returns its relay CA certificate and your relay's hostname.
 3. Put the key and relay CA in a Secret mounted at the paths above.
-4. Generate the proxy token with `neubird-proxy token`, and give it to
-   NeuBird through your usual secure channel.
+
+Either way, generate the proxy token with `neubird-proxy token` and give it
+to NeuBird through your usual secure channel.
 
 Nothing expires: the proxy re-mints its certificate on every connect.
 To rotate the key, run `keygen` again, send NeuBird the new fingerprint,
@@ -124,9 +143,10 @@ the old key, moving the tunnels over without failing any request.
 fingerprint. A proxy set up with a NeuBird-signed certificate can keep it
 (`tunnel.cert_file`): NeuBird records its key's fingerprint the same way.
 
-`validate` checks the files and shows the tunnel identity and certificate
-expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
-`netpol` includes the relays in the egress rules.
+`validate` checks the files and shows the tunnel identity, certificate
+expiry, and whether a join token is set. `test` checks DNS, TCP and the
+mutual-TLS handshake to each relay. `netpol` includes the relays in the
+egress rules.
 
 **Behavior:**
 - Each pod keeps `connections_per_relay` tunnels to every relay address.
@@ -141,42 +161,88 @@ expiry. `test` checks DNS, TCP and the mutual-TLS handshake to each relay.
 
 ## What NeuBird can reach
 
-A request through the proxy can only reach URLs under a configured
-connection's base URL, and with `paths` set, only the paths listed. Three
-layers enforce this:
+NeuBird names the host of every request, so the host patterns are the
+boundary:
 
-1. **The destination never comes from the request.** Each connection's
-   upstream is a fixed base URL in the config. A request only picks a
-   connection by name: the first path segment, or a configured `host:`. An
-   unknown name gets `404 unknown_connection` and nothing is sent anywhere.
-   A full URL in the request line, the `Host` header, or `X-Forwarded-Host`
-   (stripped) never changes the host, port or scheme. So the proxy can't be
-   used to reach other internal systems.
-2. **A request can't leave its connection's base path.** The rest of the
-   path is appended to the base URL. `.` and `..` segments are refused with
-   `400 invalid_path`, including percent-encoded, double-encoded and
-   backslash forms. Without that, `/splunk/../servicenow/` could be resolved
-   by APIM into a different API. Upstream redirects (`Location`) are
-   rewritten to point back through the proxy.
-3. **`paths`, `methods` and `mcp_tools` restrict what's allowed within the
-   connection.**
-   - `paths` patterns must match the whole path after the prefix (they're
-     anchored), or the request gets `403 path_not_allowed`.
-   - `methods` defaults to GET and HEAD.
-   - `mcp_tools` limits which tools a `tools/call` may name.
+```yaml
+neubird_destinations:
+  hosts: ["*.apis.metlife.com", "maestro.corp.metlife.com"]   # optional; omitted means "*"
+  methods: [GET, HEAD, POST]       # for every host (default GET, HEAD)
+  request_deny_patterns: [...]     # optional
+  rate_limit: {requests_per_second: 10, burst: 30}   # optional, shared
+```
 
-**Without `paths`, every URL under the base URL is reachable**, with the
-allowed methods. Take a Splunk connection with base
-`https://apim/splunk` and no `paths`: it can read any Splunk REST endpoint
-behind that APIM route, not just search results. The pod logs a warning for
-this at every start, and `neubird-proxy validate` shows it. Production
-configs should list `paths` from an inventory of what each connector calls
-(see the security plan, item 1).
+- **Patterns.** `*.example.com` matches any name under that domain (it
+  needs two or more labels), `host` matches exactly, and either may end in
+  `:port`. `*` matches any host name. An IP address is reached only when
+  listed exactly: wildcards never match IP literals.
+- **`hosts` is optional.** Without it, NeuBird may reach any host name the
+  pod can, and the other guard rails still apply. Every pod start warns
+  about the hosts NeuBird may reach, and loudly when `*` is listed.
+- **Never the pod or the cloud's metadata.** Connections to loopback,
+  link-local (including `169.254.169.254`), unspecified and multicast
+  addresses, `168.63.129.16`, `100.100.100.200`, `fd00:ec2::254` and the
+  pod's own addresses are refused, whatever the name resolved to. Other
+  private addresses are allowed: the systems usually live there, so with
+  `*` (or no `hosts`) NeuBird can reach any internal system the pod can,
+  including through a DNS name it controls. Keep `hosts` to your domains,
+  and restrict egress at the network.
+- **Behind an outbound proxy** (`HTTPS_PROXY`), the outbound proxy
+  resolves and dials the hosts, so the address check above only sees the
+  outbound proxy; the proxy warns at startup. Put the systems in
+  `NO_PROXY`, or rely on `hosts` and the network.
+- **The destination is `scheme://host[:port]` only**, with no user info,
+  path or query; `https` unless `allow_http_upstreams` is set.
+- **A request stays on its host.** `.` and `..` segments are refused, and
+  the proxy never follows a redirect: a same-host redirect is rewritten to
+  come back through the proxy, where it's checked again.
+- **Methods and request rules apply to every host.** Paths aren't
+  restricted per host: within an allowed host and method, any path is
+  reachable.
 
-**The network should enforce this too.** The proxy decides which paths,
-methods and tools are allowed. Which hosts the pod can reach at all should
-also be enforced below it, so a fault in one layer is still contained by
-the other. See Kubernetes hardening.
+**The network should enforce the hosts too.** The proxy decides which hosts
+it will forward to; which hosts the pod can reach at all should also be
+enforced below it, so a fault in one layer is still contained by the other.
+See Kubernetes hardening.
+
+## Credentials
+
+Who holds what, and what NeuBird sees:
+
+| Credential | Held by | NeuBird sees it |
+|---|---|---|
+| The systems' credentials (API tokens, OAuth tokens, APIM subscription keys) | NeuBird, in each of its connections | Yes: it sends them with each request |
+| Proxy token (`client_token_env`) | Both: the customer generates it (`neubird-proxy token`) and gives it to NeuBird | Yes. The proxy checks it and removes it; it never reaches a system |
+| Tunnel key | The customer; made in the cluster, never sent | No; only its public fingerprint |
+| Join token | Issued by NeuBird, used once by the proxy | Yes (NeuBird issued it); the relay keeps only its hash |
+| `REDACTION_HMAC_KEY` | The customer | No |
+
+NeuBird also knows the systems' hostnames: they're the URLs of its
+connections, and every request names one.
+
+How the proxy handles the systems' credentials:
+- **Only the headers you list.** NeuBird sends them as
+  `X-Neubird-Upstream-<Header>`; the proxy forwards only those in
+  `credential_headers` (default `Authorization`) and drops any other.
+  `Host`, `Cookie`, `X-Forwarded-*`, APIM trace headers and transport
+  headers can't be listed.
+- **Only to allowed hosts.** A credential goes only to the host the request
+  names, after the host check. The proxy never follows a redirect, so it
+  never carries a credential to another host.
+- **Nothing echoes or logs them.** `Set-Cookie` and `Ocp-Apim-*` response
+  headers are stripped, secrets that appear in response bodies are masked
+  by the secret rules (see Rules), and the audit line holds no header
+  values, query values or credentials.
+- **Proxy values only from the environment.** Every `*_env` field and
+  `${VAR}` resolves from the pod's environment; the config file holds
+  names, never values.
+
+## Status API
+
+`GET /_neubird/status` with `Authorization: Bearer <proxy token>` tells
+NeuBird how to send requests: how the token is sent (`client_auth`) and
+which credential headers the proxy forwards. Nothing about hosts or
+secrets. Any other token gets a 401.
 
 ## Redaction
 
@@ -192,16 +258,21 @@ the other. See Kubernetes hardening.
     not change type.
 - **Text, XML and CSV** get whole-body rules.
 - **`text/event-stream`** (MCP) is redacted one event at a time, including
-  `event:` and `id:` lines, and each event is flushed immediately.
+  `event:` and `id:` lines, and each event is flushed immediately. A
+  `retry:` line passes only as a number.
 - **Gzip** is decoded.
 - **Field allowlist.** With `response_fields`, only the listed JSON fields
-  leave unmasked. Every other string or number becomes `[REDACTED:FIELD]`,
+  leave unmasked, in every host's responses. Every other string or number becomes `[REDACTED:FIELD]`,
   whatever it contains, and allowed fields still get every rule. A response
   that isn't JSON is refused (`not_json`), because the allowlist can't be
   checked. For SSE, a data payload that isn't JSON is masked whole. Patterns
   are dot paths of keys, where `*` matches any one key. Array elements add
   no segment, so `result.number` covers every element of a `result` array.
-  A pattern allows everything beneath it.
+  A pattern allows everything beneath it. Object keys that aren't on a
+  pattern's path are masked too, since a query can turn values into keys
+  (`chart … by name`); keys at a `*` position pass as they are. Under an
+  allowlist, SSE comment and unknown lines are dropped, `id:` values and
+  event names that aren't short names are masked.
 - **Before matching**, text is normalized: percent-escapes (`%40`), HTML
   entities (`&#64;`, `&commat;`), full-width characters (`２１９`), and
   invisible characters (zero-width space, soft hyphen) are decoded or
@@ -280,8 +351,8 @@ Regex finds identifiers with a recognizable shape or keyword. It does not find:
   example config has one for `*.corp.metlife.com`.
 - **Unformatted numbers without a keyword**, such as a bare 9-digit SSN.
 
-For free text, use `response_fields`: fields nobody approved never leave in
-the clear. The fields that must pass as free text, like Splunk `_raw` and
+For free text, use `neubird_destinations.response_fields`: fields nobody
+approved never leave in the clear. The fields that must pass as free text, like Splunk `_raw` and
 MCP tool output, still depend on the rules, and NER is the remaining gap
 there; see the plan.
 
@@ -291,52 +362,44 @@ To measure the rules on your own data without sending it anywhere:
 neubird-proxy -config config.yaml -redact sample.json > redacted.json   # counts per rule on stderr
 ```
 
-`-redact` reads only the `redaction` section, so it needs no connection
-secrets.
+`-redact` reads only the `redaction` section, so it needs no secrets.
 
 ## Config
 
 See [`deploy/config.example.yaml`](deploy/config.example.yaml), which is a
 locked-down example. Secrets never appear in the file. Every `*_env` field and
-every `${VAR}` in a header value must resolve to a non-empty environment
-variable, or the proxy refuses to start. Unknown YAML fields are errors.
+every `${VAR}` must resolve to a non-empty environment variable, or the proxy
+refuses to start. Unknown YAML fields are errors.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `listen` | `:8443` | NeuBird-facing listener; `off` for tunnel only |
+| `listen` | `:8443` | Inbound listener; `off` for tunnel only (what the Helm chart sets) |
 | `admin_listen` | `:9090` | Health and metrics listener |
-| `tls.cert_file`, `tls.key_file` | none | Terminate TLS in the pod; both are required if `tls` is set |
-| `tls.client_ca_file` | none | Require client certificates from this PEM CA bundle (mutual TLS) |
-| `upstream_ca_file` | system roots | Extra PEM CA bundle to trust for upstreams |
-| `allow_http_upstreams` | `false` | Allow `http://` upstreams; otherwise only `https://` is accepted |
-| `client_token_env` | none | Env var with the default token, 32+ characters; required unless every connection sets its own |
+| `tls.cert_file`, `tls.key_file`, `tls.client_ca_file` | none | TLS, and optionally client certificates, on the inbound listener |
+| `upstream_ca_file` | system roots | Extra PEM CA bundle to trust for the systems |
+| `allow_http_upstreams` | `false` | Allow `http://` destinations; otherwise only `https://` |
+| `client_token_env` | none | Env var with the proxy token, 32+ characters |
 | `client_token_previous_env` | none | Also accepted during a rotation; remove it afterwards |
 | `max_body_bytes` | 20 MiB | Cap for request bodies, buffered response bodies, each SSE event and each streamed JSON document |
 | `max_concurrent_requests` | 256 | In-flight requests before the proxy returns 503 |
 | `max_concurrent_buffered` | 4 | Response bodies buffered for redaction at once; others wait |
-| `upstream_defaults.headers` | none | Headers set on every upstream request; values may use `${VAR}` |
-| `connections[].name` | required | Path prefix; `[a-z0-9][a-z0-9_-]*`, not `healthz`, `readyz` or `metrics` |
-| `connections[].upstream` | required | Absolute https base URL; no query string |
-| `connections[].host` | none | Also route requests for this `Host` to the connection, with no path prefix |
-| `connections[].client_token_env` | top-level | A token for this connection only; the top-level tokens then do not open it |
-| `connections[].client_auth` | `bearer` | `bearer`, `basic` (token as the password) or `header` |
-| `connections[].client_auth_header` | none | Header name when `client_auth: header` |
-| `connections[].methods` | `[GET, HEAD]` | Allowed methods |
-| `connections[].paths` | any | RE2 patterns, each matched against the whole path after the prefix |
-| `connections[].request_deny_patterns` | none | RE2 patterns; a match anywhere in the query or body, raw or URL-decoded, is refused |
-| `connections[].request_headers` | none | Client headers to forward in addition to the defaults (Accept, Content-Type, User-Agent, conditional and MCP headers). Credentials, cookies and APIM trace headers are refused |
-| `connections[].rate_limit` | none | `{requests_per_second, burst}` per pod |
-| `connections[].response_fields` | none | JSON field allowlist; see Redaction |
-| `connections[].mcp_tools` | none | Tools a `tools/call` may name; needs `POST` in `methods` |
-| `connections[].headers` | none | Per-connection upstream headers, overriding the defaults |
-| `connections[].upstream_basic_auth` | none | `{username_env, password_env}` injected as upstream Basic auth |
-| `connections[].passthrough` | `false` | Skip redaction and fail-closed checks for this connection |
+| `neubird_destinations.hosts` | `["*"]` | Host patterns NeuBird may name: `*`, `*.domain`, `host`, or an exact IP; each may end in `:port` |
+| `neubird_destinations.methods` | `[GET, HEAD]` | Allowed methods, for every host |
+| `neubird_destinations.request_deny_patterns` | none | RE2 patterns; a match anywhere in the query or body, raw or URL-decoded, is refused |
+| `neubird_destinations.credential_headers` | `[Authorization]` | Headers NeuBird may set for the system, as `X-Neubird-Upstream-<Header>` |
+| `neubird_destinations.request_headers` | none | Client headers to forward in addition to the defaults (Accept, Content-Type, User-Agent, conditional and MCP headers). Credentials, cookies and APIM trace headers are refused |
+| `neubird_destinations.rate_limit` | none | `{requests_per_second, burst}` per pod, shared by every host |
+| `neubird_destinations.response_fields` | none | JSON field allowlist for every host's responses; see Redaction |
+| `neubird_destinations.client_auth` | `bearer` | How the proxy token is sent: `bearer`, `basic` (as the password) or `header` |
+| `neubird_destinations.client_auth_header` | none | Header name when `client_auth: header` |
+| `neubird_destinations.client_token_env` | top-level | A token for this section instead of the top-level one |
 | `tunnel.relays` | none | Relay `host:port` addresses; setting `tunnel` enables the outbound tunnel |
 | `tunnel.tenant`, `tunnel.proxy` | required with `tunnel` (unless `cert_file`) | The names NeuBird gives you; the proxy mints its certificate for them |
 | `tunnel.key_file` | required with `tunnel` | The tunnel key, from `neubird-proxy keygen`; NeuBird records its fingerprint |
 | `tunnel.cert_file` | none | A certificate for the key to present instead of minting one |
 | `tunnel.ca_file` | required with `tunnel` | CA that signs the relays' certificates, pinned |
 | `tunnel.connections_per_relay` | 1 | Tunnels each pod keeps to each relay (1 to 8) |
+| `tunnel.join_token_env` | none | Env var with a join token from NeuBird; the proxy enrolls its key with it on first connect. Unlike other `*_env` fields it may be unset or empty |
 | `redaction.builtins` | default set | Built-in rules, in precedence order |
 | `redaction.blocked_key_patterns` | none | RE2 patterns matched against JSON keys; every value under a matching key is masked |
 | `redaction.custom[]` | none | `{name, regex}` value rules, applied after the builtins |
@@ -362,7 +425,7 @@ environment or from `-env-file secrets.env` (`KEY=VALUE` lines).
 
 **`validate`: is this config right?** Runs every check the proxy runs at
 startup and reports all problems in one go, with the field each is in. It
-then summarizes each connection and prints the startup warnings. With
+then summarizes the config and prints the startup warnings. With
 `-offline` it needs no secrets: missing variables get placeholders and are
 listed.
 
@@ -370,63 +433,51 @@ listed.
 $ neubird-proxy validate -offline -config config.yaml
 VALID config.yaml
 
-CONNECTION  UPSTREAM                                 AUTH    METHODS   PATHS  MCP TOOLS  FIELDS      MODE
-splunk      https://int.apis.metlife.com/splunk      bearer  GET,POST  3      -          all         redact
-servicenow  https://int.apis.metlife.com/servicenow  basic   GET,HEAD  2      -          14 allowed  redact
+CONNECTION            UPSTREAM                                     AUTH    METHODS               PATHS  MCP TOOLS  FIELDS  MODE
+neubird_destinations  *.apis.metlife.com,maestro.corp.metlife.com  bearer  GET,HEAD,POST,DELETE  any    -          all     NeuBird credentials
 ...
 warnings:
   - tls is not set: the proxy listener is plain HTTP and relies on the load balancer for TLS
-not checked (offline, placeholders used): APIM_SUBSCRIPTION_KEY, NEUBIRD_PROXY_TOKEN
+  - neubird_destinations: NeuBird chooses the destination host within *.apis.metlife.com, maestro.corp.metlife.com and supplies the credentials
+not checked (offline, placeholders used): NEUBIRD_PROXY_TOKEN
 ```
 
-**`test`: does each connection work?** (Output below is from the test
-deployment, run in its pod.) Checks the network layer by layer
-(DNS, TCP, TLS with the certificate and its expiry), so a failure names
-where it broke. Then it sends a real request through the proxy's own
-handler, as NeuBird would.
-- **For MCP connections** it runs `initialize` and `tools/list`, and
-  compares the server's tools with `mcp_tools`: which are allowed, which are
-  blocked, and which are listed but not offered (a typo or a renamed tool).
-- **For other connections** it sends a GET to the first plain path in
-  `paths`, or `/`. Pick the probe with `-method`, `-path` and `-data`, and
-  see the redacted body with `-show`.
-- **Results** distinguish a refusal by the proxy's own policy from an
-  upstream that rejects its credentials. The exit status is non-zero if any
-  connection fails.
+**`test`: can the proxy reach the relay and the systems?** Without
+arguments it checks the tunnel to each relay: the identity, DNS, and the
+mutual-TLS handshake. Given a system's URL, it checks that `hosts` allows
+it, then DNS, TCP and TLS (with the certificate and its expiry), so a
+failure names where it broke. It sends no request to the system: the
+credentials are NeuBird's. The exit status is non-zero if any check fails.
 
 ```
-splunk -> https://splunk-e2e.tools.neubird.ai
-  ok    dns        splunk-e2e.tools.neubird.ai -> 20.120.243.98
-  ok    tcp        splunk-e2e.tools.neubird.ai:443 connected in 18ms
-  ok    tls        TLS 1.3, certificate "*.tools.neubird.ai" from "Amazon RSA 2048 M01", expires in 106 days
-  ok    initialize HTTP 200, application/json, 154 bytes, 172ms; redactions: none
-  info  server     Splunk_MCP_Server 1.2.1, protocol 2025-06-18
-  ok    tools/list HTTP 200, application/json, 7228 bytes, 325ms; redactions: none
-  ok    tools      9 of 10 server tools allowed: splunk_get_index_info, splunk_get_indexes, ...
-  info  tools      blocked by mcp_tools: splunk_run_saved_search
+$ neubird-proxy test -config config.yaml https://splunk.apis.metlife.com
+https://splunk.apis.metlife.com -> neubird_destinations
+  ok    hosts      allowed by neubird_destinations.hosts
+  ok    dns        splunk.apis.metlife.com -> 10.20.30.40
+  ok    tcp        splunk.apis.metlife.com:443 connected in 18ms
+  ok    tls        TLS 1.3, certificate "*.apis.metlife.com" from "MetLife Issuing CA", expires in 106 days
 
-all 1 connections OK
+all 1 destinations OK
 ```
 
 **`preview`: what will NeuBird see?** Shows a response next to what NeuBird
 would receive for it, line by line, with the rules that matched. The sample
 goes through the proxy's real handler, so the output is exactly what
 NeuBird gets, including a refusal (a binary body, say).
-- **The sample** is a file, or with `-live` a response captured through the
-  connection (`-path`, `-method`, `-data`).
+- **The sample** is a file: save a typical response from a system.
 - **`-html report.html`** writes a side-by-side report for a security
   review. `-html -` writes only the report to stdout, for
   `kubectl exec … > report.html`.
 - **Both show the original data**, so treat the output as sensitive.
 
 ```
-$ neubird-proxy preview -config config.yaml -connection servicenow sample.json
-redactions: field_not_allowed 7, member_id 1
+$ neubird-proxy preview -config config.yaml sample.json
+redactions: field_not_allowed 1, member_id 1
             (field_not_allowed: a field not in response_fields, masked whole as [REDACTED:FIELD] before any other rule)
 legend:     - returned by the system   + received by NeuBird
-    6 -       "short_description": "Member portal login fails for MET220019384",
+    8 -       "short_description": "Member portal login fails for MET220019384",
       +       "short_description": "Member portal login fails for [REDACTED:MEMBER_ID]",
-    7 -       "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) ...",
+    9 -       "description": "Caller Dana Whitfield (dana.whitfield@example.org, 646-555-0192) ...",
       +       "description": "[REDACTED:FIELD]",
 ```
 
@@ -437,13 +488,13 @@ fingerprint of a key or certificate.
 **`token`** prints a new random 64-character token:
 `--from-literal=NEUBIRD_PROXY_TOKEN="$(neubird-proxy token)"`.
 
-**`netpol`** generates egress rules that allow only the configured
-upstreams: a CiliumNetworkPolicy, a NetworkPolicy, or a host list for a
-firewall. See Kubernetes hardening.
+**`netpol`** generates egress rules that allow only the relay and the
+hosts in `neubird_destinations.hosts`: a CiliumNetworkPolicy, a
+NetworkPolicy, or a host list for a firewall. See Kubernetes hardening.
 
 **`metrics`** sums `/metrics` from one or more pods (URLs, files, or `-`)
-into per-connection tables of requests by status, redactions by rule,
-blocks by reason, and bytes:
+into tables of requests by status, redactions by rule, blocks by reason,
+and bytes:
 
 ```bash
 for p in $(kubectl -n NS get pods -l app=neubird-proxy -o name); do
@@ -457,44 +508,45 @@ Connectors see these in addition to upstream responses. Upstream error
 responses such as 4xx and 5xx pass through, and their bodies are redacted
 too. Every response carries `X-Request-Id`: the caller's own if it sent a
 short plain one (the relay always does, so one ID follows a request through
-the relay's log, the audit line and the upstream), otherwise a new one.
+the relay's log, the audit line and the system), otherwise a new one.
 
 | Status | `error` | When |
 |---|---|---|
 | 400 | `invalid_path` | Path has a `.` or `..` segment, in any encoding |
-| 400 | `upgrade_not_supported` | WebSocket or another protocol upgrade on a redacting connection |
-| 401 | `unauthorized` | Missing or wrong token, a token scoped to another connection, or the token sent in the wrong form |
-| 403 | `path_not_allowed` | Path not matched by `paths` |
-| 403 | `request_denied` | Query or body matched `request_deny_patterns[i]` (the index is in `reason`), or a `tools/call` named a tool not in `mcp_tools` |
-| 404 | `unknown_connection` | No connection matches the host or first path segment |
+| 400 | `upgrade_not_supported` | WebSocket or another protocol upgrade |
+| 401 | `unauthorized` | Missing or wrong proxy token, or the token sent in the wrong form |
+| 403 | `destination_not_allowed` | `X-Neubird-Destination` missing, not `scheme://host[:port]`, plain `http` without `allow_http_upstreams`, or a host not in `hosts` (checked after the token) |
+| 403 | `request_denied` | Query or body matched `request_deny_patterns[i]` (the index is in `reason`) |
+| 404 | `unknown_connection` | The path isn't under `/_neubird/dest`, with a valid token (without one, 401) |
 | 405 | `method_not_allowed` | Method not in `methods`; `Allow` lists the ones that are |
 | 413 | `request_too_large` | Request body over `max_body_bytes` |
-| 429 | `rate_limited` | Connection rate limit exceeded; `Retry-After: 1` |
+| 429 | `rate_limited` | Rate limit exceeded; `Retry-After: 1` |
 | 502 | `redaction_blocked` | Fail closed; `reason` is one of `body_too_large`, `not_text`, `unsupported_content_type`, `unsupported_content_encoding`, `bad_gzip`, `partial_content`, `upgrade_not_supported`, `not_json` (with `response_fields`) |
-| 502 | `upstream_unavailable` | Upstream unreachable or the request to it failed; the cause is logged, not returned |
+| 502 | `upstream_unavailable` | The system is unreachable, refused as an internal address, or the request to it failed; the cause is logged, not returned |
 | 503 | `overloaded` | `max_concurrent_requests` reached; `Retry-After: 1` |
 
 ## Operations
 
-- **`:8443`** is the proxy, and the only port behind the load balancer.
-  Optional in-pod TLS via `tls:`.
+- **Tunnel only** (the Helm chart): no proxy port at all; requests arrive
+  over the outbound tunnel.
 - **`:9090`** serves `/healthz`, `/readyz` and `/metrics`, cluster-internal
   only.
 - **Startup** logs the config's SHA-256, so every ConfigMap change is visible
-  in the logs. It also logs a warning for each passthrough connection, each
-  connection without a paths allowlist, each connection allowing writes
-  without deny patterns or `mcp_tools`, a plain-HTTP listener or one without
-  mTLS, `allow_http_upstreams`, and a pending token rotation.
-- **Audit:** one JSON line per request with `request_id`, connection,
-  `remote_addr`, `forwarded_for` (as sent by the load balancer), method,
-  path (itself redacted), `query_keys` (parameter names, never values),
-  status, bytes, duration, per-rule match counts, and the block reason.
-  Matched values and query values are never logged. Upstream errors log
-  their cause, never the URL.
+  in the logs. It also logs a warning naming the hosts NeuBird may reach
+  (and another when `hosts` includes `*`), `allow_http_upstreams`, and a
+  pending token rotation.
+- **Audit:** one JSON line per request with `request_id`, `destination`
+  (the system's `scheme://host[:port]`), `via: tunnel`, `remote_addr`,
+  method, path (itself redacted), `query_keys` (parameter names, never
+  values), status, bytes, duration, per-rule match counts, and the block
+  reason. Credentials, matched values and query values are never logged.
+  Upstream errors log their cause, never the URL.
 - **Metrics:** `neubird_proxy_requests_total{connection,code}`,
   `neubird_proxy_redactions_total{connection,rule}`,
   `neubird_proxy_blocked_total{connection,reason}`, and
-  `neubird_proxy_response_bytes_total{connection}`.
+  `neubird_proxy_response_bytes_total{connection}`, where `connection` is
+  `_destinations` for requests to the systems (labels never carry hosts, so
+  NeuBird can't grow them).
 - **Runtime:** stateless, no disk. Runs as two replicas with a read-only root
   filesystem, as non-root, with no capabilities.
 
@@ -514,6 +566,9 @@ a clean 502.
 - If a later document is over the cap or isn't valid JSON, the stream is
   cut, because a 502 can no longer be sent. The audit line records
   `json_doc_too_large` or `json_stream_invalid`.
+- The upstream gets a minute to send a buffered body, or each document or
+  event of a stream once it has started; otherwise the response is cut. A
+  stream may idle as long as it likes between documents and events.
 
 Measured end to end through the proxy on one core (Apple M4 Max), for a
 Splunk export of 50,000 results (about 18 MB). Medians of 3–7 runs:
@@ -550,8 +605,11 @@ counted:
 - A body over the cap is refused as soon as the proxy has read past the
   cap, not after decoding it.
 - `max_concurrent_buffered` (default 4) still limits how many are buffered at
-  once. Streamed responses hold one document at a time and count against
-  both only while their first document is decoded. Redaction is single-threaded per response; see the plan
+  once. A streamed response holds a slot only while its first document is
+  decoded; later documents and SSE events (and the input buffered while
+  one arrives) reserve memory from the same budget while they're
+  processed. Request bodies that are checked have their own budget, an
+  eighth of the memory limit, held until the response is done. Redaction is single-threaded per response; see the plan
 for the throughput work.
 
 ## Kubernetes hardening
@@ -566,13 +624,13 @@ independently of the proxy's own checks:
 | Pod security context | Non-root user 65532, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp |
 | Service account | A dedicated one with no Role bindings, and its token isn't mounted: the proxy can't talk to the Kubernetes API |
 | No inbound port | Tunnel-only: the proxy dials out to the relay; nothing connects in |
-| NetworkPolicy (`networkPolicy.enabled`) | In: only the admin port, from `metricsFrom`. Out: DNS, the relay's addresses on 443, and the listed upstream ranges. Or a hostname policy from `neubird-proxy netpol` (below) |
+| NetworkPolicy (`networkPolicy.enabled`) | In: only the admin port, from `metricsFrom`. Out: DNS, the relay's addresses on 443, and the systems' listed ranges. Or a hostname policy from `neubird-proxy netpol` (below) |
 | Resources | A 512 MiB memory limit; response buffering is sized to it (see Latency and capacity) |
 
 **Restricting egress by hostname.** A standard NetworkPolicy matches IP
-ranges and ports, not hostnames. The chart's policy allows upstream CIDRs,
-which may be wider than the hosts the proxy needs. To allow exactly the
-configured upstream hosts and the relay, generate the rules from the
+ranges and ports, not hostnames. The chart's policy allows CIDRs, which may
+be wider than the hosts NeuBird needs. To allow exactly the hosts in
+`neubird_destinations.hosts` and the relay, generate the rules from the
 running config (`/etc/neubird-proxy/config.yaml` in the pod, which includes
 the tunnel section); they select the chart's pods by `app: neubird-proxy`:
 
@@ -583,22 +641,26 @@ neubird-proxy netpol -config config.yaml -format list                          #
 ```
 
 - **Cilium**, including Azure CNI powered by Cilium: the generated policy
-  allows only the upstream hostnames and ports. It also lets the pod
-  *resolve* only those names, so a lookup of anything else fails.
-- **No FQDN-aware CNI:** `-format kubernetes` resolves the hosts now and
-  allows their current addresses. That suits a private APIM endpoint with
-  stable IPs. Regenerate it when they change; for anything behind a CDN,
-  use hostname rules instead.
+  allows only those hostnames and ports, and `*.domain` as an FQDN pattern.
+  Cilium's `*` matches one label only, so `a.b.domain` needs its own entry.
+  It also lets the pod *resolve* only those names, so a lookup of anything
+  else fails.
+- **No FQDN-aware CNI:** `-format kubernetes` resolves the exact hosts now
+  and allows their current addresses; patterns are left out with a warning.
+  That suits a private APIM endpoint with stable IPs. Regenerate it when
+  they change; for anything behind a CDN, use hostname rules instead.
 - **Azure Firewall application rules, AWS Network Firewall, or Route 53
   Resolver DNS Firewall:** `-format list` prints what to allow.
+- **`hosts` with `*`** can't be expressed as a host rule (`netpol` warns):
+  allow the systems' address ranges instead.
 
-Regenerate the policy whenever connections change, so the network and the
+Regenerate the policy whenever `hosts` changes, so the network and the
 proxy agree on what's reachable.
 
-**Paths stay with the proxy.** The upstreams are HTTPS, so the network
-can't see request paths without breaking TLS to inspect it. So the network
-enforces which hosts the pod can reach, and the proxy enforces which paths,
-methods and MCP tools are allowed on them (see What NeuBird can reach).
+**Paths stay with the proxy.** The systems are HTTPS, so the network can't
+see request paths without breaking TLS to inspect it. So the network
+enforces which hosts the pod can reach, and the proxy enforces which
+methods and requests are allowed on them (see What NeuBird can reach).
 Either layer still contains the other if one is misconfigured.
 
 **Image admission.** Deploy by digest, not tag. Enforce signed images, or
@@ -649,11 +711,9 @@ go test ./internal/proxy -run Golden -update   # regenerate golden files, then r
 
 ## Open questions (from the proposal)
 
-For NeuBird engineering: do our Splunk, ServiceNow and MCP connectors accept a
-base URL with a path prefix? Do they follow absolute URLs from responses? Where
-does the proxy token go in each connector's UI? What is the largest expected
-response body (this sets `max_body_bytes`)? Which exact endpoints and methods
-does each connector call (this sets `paths` and `methods`)?
+For NeuBird engineering: what is the largest expected response body (this
+sets `max_body_bytes`)? Which methods does each connector need (this sets
+`methods`)?
 
 For MetLife: will ServiceNow be fronted by APIM? One subscription key or one per
 API? What are the real member ID and PHI formats? Is regex-only detection

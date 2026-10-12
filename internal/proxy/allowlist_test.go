@@ -52,8 +52,8 @@ func TestResponseFieldAllowlist(t *testing.T) {
 		}
 	})
 	_, body := f.do(t, "GET", "/servicenow/api/now/table/incident", bearer)
-	want := `{"result":[{"number":"INC0010042","priority":"2","description":"[REDACTED:FIELD]",` +
-		`"assignment_group":{"display_value":"Digital Identity L2","link":"[REDACTED:FIELD]"}}]}`
+	want := `{"result":[{"number":"INC0010042","priority":"2","[REDACTED:FIELD]":"[REDACTED:FIELD]",` +
+		`"assignment_group":{"display_value":"Digital Identity L2","[REDACTED:FIELD]":"[REDACTED:FIELD]"}}]}`
 	if body != want {
 		t.Fatalf("got  %s\nwant %s", body, want)
 	}
@@ -83,7 +83,7 @@ func TestMCPToolAllowlist(t *testing.T) {
 		return resp.StatusCode, string(b)
 	}
 	code, body := post(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_job_status","arguments":{"job":"X"}}}`)
-	if code != 200 || strings.Contains(body, "Maria") || !strings.Contains(body, `"text":"[REDACTED:FIELD]"`) {
+	if code != 200 || strings.Contains(body, "Maria") || !strings.Contains(body, `"[REDACTED:FIELD]":"[REDACTED:FIELD]"`) {
 		t.Fatalf("allowed tool: %d %s", code, body)
 	}
 	for _, bad := range []string{

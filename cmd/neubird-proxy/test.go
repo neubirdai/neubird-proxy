@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -39,8 +40,10 @@ func cmdTest(args []string, stdout, stderr io.Writer) int {
 	show := fs.Bool("show", false, "print the redacted response body (first 2000 bytes)")
 	timeout := fs.Duration("timeout", 30*time.Second, "per-request timeout")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: neubird-proxy test [flags] [connection ...]")
-		fmt.Fprintln(stderr, "\nTests every connection, or the ones named. Needs the real secrets: run it in a")
+		fmt.Fprintln(stderr, "usage: neubird-proxy test [flags] [connection | https://host[:port] ...]")
+		fmt.Fprintln(stderr, "\nTests every connection, or the ones named. A URL is checked as a")
+		fmt.Fprintln(stderr, "neubird_destinations host: the host patterns, then DNS, TCP and TLS.")
+		fmt.Fprintln(stderr, "Needs the real secrets: run it in a")
 		fmt.Fprintln(stderr, "proxy pod (kubectl exec <pod> -- /neubird-proxy test) or pass -env-file.")
 		fs.PrintDefaults()
 	}
@@ -68,12 +71,21 @@ func cmdTest(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var conns []*config.Connection
+	var dests []string
 	if fs.NArg() == 0 {
 		for i := range cfg.Connections {
 			conns = append(conns, &cfg.Connections[i])
 		}
 	}
 	for _, name := range fs.Args() {
+		if strings.Contains(name, "://") {
+			if cfg.NeubirdDestinations == nil {
+				fmt.Fprintf(stderr, "error: %s: the config has no neubird_destinations\n", name)
+				return 2
+			}
+			dests = append(dests, name)
+			continue
+		}
 		c, err := findConnection(cfg, name)
 		if err != nil {
 			fmt.Fprintln(stderr, "error:", err)
@@ -84,6 +96,12 @@ func cmdTest(args []string, stdout, stderr io.Writer) int {
 
 	t := &tester{cfg: cfg, p: p, out: stdout, timeout: *timeout, show: *show}
 	failed := 0
+	for _, d := range dests {
+		if !t.destination(d) {
+			failed++
+		}
+		fmt.Fprintln(stdout)
+	}
 	if cfg.Tunnel != nil && fs.NArg() == 0 {
 		if !t.tunnel() {
 			failed++
@@ -101,8 +119,38 @@ func cmdTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%d check(s) FAILED\n", failed)
 		return 1
 	}
+	if len(dests) > 0 && len(conns) == 0 {
+		fmt.Fprintf(stdout, "all %d destinations OK\n", len(dests))
+		return 0
+	}
 	fmt.Fprintf(stdout, "all %d connections OK\n", len(conns))
 	return 0
+}
+
+// destination checks a host NeuBird would name: that neubird_destinations
+// allows it, then DNS, TCP and TLS. No request is sent: the credentials for
+// these hosts are NeuBird's.
+func (t *tester) destination(raw string) bool {
+	t.ok = true
+	fmt.Fprintf(t.out, "%s -> neubird_destinations\n", raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		t.line("FAIL", "hosts", "%s is not scheme://host[:port]", raw)
+		return false
+	}
+	d := t.cfg.NeubirdDestinations
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[u.Scheme]
+	}
+	if !d.MatchDestination(strings.ToLower(u.Hostname()), port) {
+		t.line("FAIL", "hosts", "%s:%s is not in neubird_destinations.hosts (%s)", u.Hostname(), port, strings.Join(d.Hosts, ", "))
+		return false
+	}
+	t.line("ok", "hosts", "allowed by neubird_destinations.hosts")
+	c := *d.Conn
+	c.UpstreamURL = &url.URL{Scheme: u.Scheme, Host: u.Host}
+	return t.network(&c) && t.ok
 }
 
 type probeSpec struct{ method, path, data, contentType string }

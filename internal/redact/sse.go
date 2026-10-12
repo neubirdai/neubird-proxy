@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
+	"sync/atomic"
 )
 
 // ErrEventTooLarge ends a stream whose single event exceeds the size cap.
@@ -27,6 +29,13 @@ type SSEReader struct {
 	st     Stats
 	max    int
 	fields *Fields
+	budget Budget
+
+	reserved int64       // budget held for in's capacity
+	pending  atomic.Bool // part of an event is buffered; read from other goroutines
+	activity func(busy bool)
+	progress bool // an event completed since the activity was last reported
+	scan     int  // where eventEnd resumes in in: the start of a line
 
 	in    []byte
 	out   []byte
@@ -45,14 +54,113 @@ func (r *SSEReader) WithFields(f *Fields) *SSEReader {
 	return r
 }
 
+// Budget is shared memory accounting: Acquire blocks until n bytes are
+// free (or fails), Release returns them.
+type Budget interface {
+	Acquire(n int64) error
+	Release(n int64)
+}
+
+var eventNameRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
+
+// sseFactor is how many times its size redacting an event takes.
+const sseFactor = 12
+
+// pendingChunk is the granularity of reservations for buffered input.
+const pendingChunk = 1 << 20
+
+// WithBudget accounts for the reader's memory: the input buffered while an
+// event arrives, and redacting each event.
+func (r *SSEReader) WithBudget(b Budget) *SSEReader {
+	r.budget = b
+	return r
+}
+
+// reserveIn makes sure in's capacity is covered by the budget.
+func (r *SSEReader) reserveIn() error {
+	if r.budget == nil {
+		return nil
+	}
+	want := (int64(cap(r.in)) + pendingChunk - 1) / pendingChunk * pendingChunk
+	if want <= r.reserved {
+		return nil
+	}
+	// The input buffered so far stays reserved while this waits: it's
+	// still in memory. The wait is bounded by the caller's deadline for a
+	// partly received event (see WithActivity).
+	if err := r.budget.Acquire(want - r.reserved); err != nil {
+		return err
+	}
+	r.reserved = want
+	return nil
+}
+
+// compactIn drops consumed input: in starts over (and its reservation is
+// returned) when empty, else the rest moves to a buffer of its own size.
+func (r *SSEReader) compactIn(consumed int) {
+	r.in = r.in[consumed:]
+	r.scan = 0
+	if len(r.in) == 0 {
+		r.in = nil
+	} else {
+		r.in = append([]byte(nil), r.in...)
+	}
+	if r.budget != nil {
+		keep := (int64(cap(r.in)) + pendingChunk - 1) / pendingChunk * pendingChunk
+		if keep < r.reserved {
+			r.budget.Release(r.reserved - keep)
+			r.reserved = keep
+		}
+	}
+}
+
+// redactEvent is event, within the memory budget when one is set.
+func (r *SSEReader) redactEvent(ev []byte) ([]byte, error) {
+	if r.budget != nil {
+		// The input's reservation counts toward the event's: only the rest
+		// is asked for, which never exceeds the budget (an event is at most
+		// a twelfth of it).
+		if n := int64(len(ev))*sseFactor - r.reserved; n > 0 {
+			if err := r.budget.Acquire(n); err != nil {
+				return nil, err
+			}
+			defer r.budget.Release(n)
+		}
+	}
+	return r.event(ev), nil
+}
+
 func (r *SSEReader) Read(p []byte) (int, error) {
 	for len(r.out) == 0 {
 		if r.err != nil {
 			return 0, r.err
 		}
+		r.pending.Store(len(r.in) > 0)
+		if r.activity != nil {
+			// The deadline covers one event: it starts over whenever an
+			// event completes.
+			if r.progress {
+				r.activity(false)
+				r.progress = false
+			}
+			r.activity(len(r.in) > 0)
+		}
 		n, err := r.src.Read(r.chunk)
 		r.in = append(r.in, r.chunk[:n]...)
-		derr := r.drain()
+		if r.activity != nil && len(r.in) > 0 {
+			// Reserving and redacting what arrived counts as the event's
+			// time too: waits for memory end with the deadline.
+			r.activity(true)
+		}
+		derr := r.reserveIn()
+		if derr == nil {
+			derr = r.drain()
+		}
+		if derr == nil {
+			// What's left of a partial event stays reserved while the
+			// next read waits.
+			derr = r.reserveIn()
+		}
 		switch {
 		case derr != nil:
 			// Complete events already in out are released; the offending
@@ -69,20 +177,54 @@ func (r *SSEReader) Read(p []byte) (int, error) {
 					r.err = ErrNotText
 					break
 				}
-				r.out = append(r.out, r.event(r.in)...)
-				r.in = nil
+				out, err := r.redactEvent(r.in)
+				r.compactIn(len(r.in))
+				if err != nil {
+					r.err = err
+					break
+				}
+				r.out = append(r.out, out...)
 			}
 			r.err = io.EOF
 		case err != nil:
 			r.err = err
 		}
 	}
+	if r.activity != nil && len(r.in) == 0 {
+		// Nothing partly received: the deadline isn't the upstream's while
+		// the output is written downstream.
+		r.activity(false)
+		r.progress = false
+	}
 	n := copy(p, r.out)
 	r.out = r.out[n:]
+	if len(r.out) == 0 {
+		r.out = nil // don't keep a large event's output while idle
+	}
 	return n, nil
 }
 
-func (r *SSEReader) Close() error { return r.src.Close() }
+func (r *SSEReader) Close() error {
+	err := r.src.Close()
+	r.in = nil
+	if r.budget != nil && r.reserved > 0 {
+		r.budget.Release(r.reserved)
+		r.reserved = 0
+	}
+	return err
+}
+
+// WithActivity reports when part of an event is buffered (busy) and when
+// none is, so the caller can bound how long an event may take to arrive.
+func (r *SSEReader) WithActivity(f func(busy bool)) *SSEReader {
+	r.activity = f
+	return r
+}
+
+// Pending reports whether part of an event is buffered, waiting for the
+// rest.
+// It's safe to call while Read runs.
+func (r *SSEReader) Pending() bool { return r.pending.Load() }
 
 // Err is the error that ended the stream, if any, other than io.EOF.
 func (r *SSEReader) Err() error {
@@ -97,8 +239,9 @@ func (r *SSEReader) Err() error {
 // arrives in pieces or in a single read.
 func (r *SSEReader) drain() error {
 	for {
-		end, next := eventEnd(r.in)
+		end, next, resume := eventEnd(r.in, r.scan)
 		if end < 0 {
+			r.scan = resume
 			return nil
 		}
 		if end > r.max {
@@ -107,9 +250,14 @@ func (r *SSEReader) drain() error {
 		if !IsText(r.in[:end]) {
 			return ErrNotText
 		}
-		r.out = append(r.out, r.event(r.in[:end])...)
+		out, err := r.redactEvent(r.in[:end])
+		if err != nil {
+			return err
+		}
+		r.out = append(r.out, out...)
 		r.out = append(r.out, '\n')
-		r.in = r.in[next:]
+		r.compactIn(next)
+		r.progress = true
 	}
 }
 
@@ -118,9 +266,12 @@ func (r *SSEReader) drain() error {
 // or -1 if no complete event is buffered. A trailing \r is ambiguous (it
 // may start \r\n) until more input arrives; at EOF the leftover is
 // flushed as a partial event, which splitLines handles.
-func eventEnd(b []byte) (end, next int) {
-	lineStart := 0
-	for i := 0; i < len(b); i++ {
+//
+// Scanning starts at from, a line start already known not to end an event;
+// resume is where the next call can start.
+func eventEnd(b []byte, from int) (end, next, resume int) {
+	lineStart := from
+	for i := from; i < len(b); i++ {
 		c := b[i]
 		if c != '\n' && c != '\r' {
 			continue
@@ -128,19 +279,19 @@ func eventEnd(b []byte) (end, next int) {
 		term := 1
 		if c == '\r' {
 			if i+1 == len(b) {
-				return -1, -1
+				return -1, -1, lineStart
 			}
 			if i+1 < len(b) && b[i+1] == '\n' {
 				term = 2
 			}
 		}
 		if i == lineStart {
-			return lineStart, i + term
+			return lineStart, i + term, 0
 		}
 		lineStart = i + term
 		i += term - 1
 	}
-	return -1, -1
+	return -1, -1, lineStart
 }
 
 // event rewrites one event's lines, each terminated by \n.
@@ -168,10 +319,31 @@ func (r *SSEReader) event(ev []byte) []byte {
 			}
 			data = append(data, value)
 		case field == "retry":
-			kept = append(kept, line{text: l})
+			// A reconnection delay in milliseconds; anything else is
+			// dropped, as clients ignore it.
+			if v := strings.TrimSpace(value); v != "" && strings.Trim(v, "0123456789") == "" && len(v) <= 10 {
+				kept = append(kept, line{text: "retry: " + v})
+			}
+		case r.fields != nil && field != "" && field != "event" && field != "id":
+			// Unknown fields carry data the allowlist can't check; clients
+			// ignore them anyway.
+			r.st["field_not_allowed"]++
 		case field == "" && hasColon:
 			// Comment line; clients ignore it, but it still leaves MetLife.
+			if r.fields != nil {
+				r.st["field_not_allowed"]++
+				kept = append(kept, line{text: ":"})
+				break
+			}
 			kept = append(kept, line{text: ":" + r.e.String(l[1:], r.st)})
+		case r.fields != nil && field == "event" && !eventNameRe.MatchString(value):
+			// Event types are short names (message, ping); anything else is
+			// data the allowlist didn't approve.
+			kept = append(kept, line{text: "event: " + r.e.mask("FIELD", value)})
+			r.st["field_not_allowed"]++
+		case r.fields != nil && field == "id":
+			// The id is opaque to the agent; only resumption uses it.
+			kept = append(kept, line{text: "id: " + r.e.mask("FIELD", value)})
 		default:
 			// event, id and unknown fields. A redacted id breaks resumption
 			// via Last-Event-ID for that event, which is the safe failure.

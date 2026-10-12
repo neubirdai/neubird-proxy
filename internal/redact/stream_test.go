@@ -134,7 +134,7 @@ func TestJSONStreamFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ := io.ReadAll(s)
-	want := `{"result":{"_time":"t1","_raw":"[REDACTED:FIELD]"}}` + "\n" + `{"result":{"_time":"t2","_raw":"[REDACTED:FIELD]"}}` + "\n"
+	want := `{"result":{"_time":"t1","[REDACTED:FIELD]":"[REDACTED:FIELD]"}}` + "\n" + `{"result":{"_time":"t2","[REDACTED:FIELD]":"[REDACTED:FIELD]"}}` + "\n"
 	if string(out) != want {
 		t.Fatalf("got %q", out)
 	}

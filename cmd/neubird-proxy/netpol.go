@@ -45,7 +45,10 @@ func cmdNetpol(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
-	dests := destinations(cfg)
+	dests, warns := destinations(cfg)
+	for _, w := range warns {
+		fmt.Fprintln(stderr, "warning:", w)
+	}
 
 	switch *format {
 	case "list":
@@ -70,12 +73,15 @@ func cmdNetpol(args []string, stdout, stderr io.Writer) int {
 type destination struct {
 	host, port string
 	ip         bool
+	pattern    bool // host is "*.domain"
 	conns      []string
 }
 
 // destinations lists each distinct upstream host and port, with the
-// connections that use it.
-func destinations(cfg *config.Config) []destination {
+// connections that use it, and the neubird_destinations hosts. "*" can't be
+// a host rule; it's returned as a warning.
+func destinations(cfg *config.Config) ([]destination, []string) {
+	var warns []string
 	byKey := map[string]*destination{}
 	for _, c := range cfg.Connections {
 		u := c.UpstreamURL
@@ -89,6 +95,33 @@ func destinations(cfg *config.Config) []destination {
 			byKey[k] = &destination{host: host, port: port, ip: net.ParseIP(host) != nil}
 		}
 		byKey[k].conns = append(byKey[k].conns, c.Name)
+	}
+	if d := cfg.NeubirdDestinations; d != nil {
+		ports := []string{"443"}
+		if cfg.AllowHTTPUpstreams {
+			ports = append(ports, "80")
+		}
+		for _, p := range d.Patterns {
+			host := p.Exact
+			switch {
+			case p.Any:
+				warns = append(warns, "neubird_destinations.hosts has \"*\", which no host rule can express: allow your systems' address ranges at the network instead")
+				continue
+			case p.Suffix != "":
+				host = "*" + p.Suffix
+			}
+			ps := ports
+			if p.Port != "" {
+				ps = []string{p.Port}
+			}
+			for _, port := range ps {
+				k := host + ":" + port
+				if byKey[k] == nil {
+					byKey[k] = &destination{host: host, port: port, ip: p.IP, pattern: p.Suffix != ""}
+				}
+				byKey[k].conns = append(byKey[k].conns, "neubird_destinations")
+			}
+		}
 	}
 	if cfg.Tunnel != nil {
 		for _, r := range cfg.Tunnel.Relays {
@@ -111,7 +144,7 @@ func destinations(cfg *config.Config) []destination {
 		}
 		return out[i].port < out[j].port
 	})
-	return out
+	return out, warns
 }
 
 func ciliumPolicy(dests []destination, ns, app, configPath string) string {
@@ -146,7 +179,7 @@ spec:
 	for _, d := range dests {
 		if !d.ip && !names[d.host] {
 			names[d.host] = true
-			fmt.Fprintf(&b, "              - matchName: %q\n", d.host)
+			fmt.Fprintf(&b, "              - %s: %q\n", fqdnSelector(d), d.host)
 		}
 	}
 	if len(names) == 0 {
@@ -157,11 +190,22 @@ spec:
 		if d.ip {
 			fmt.Fprintf(&b, "    - toCIDR: [%q]\n", d.host+"/32")
 		} else {
-			fmt.Fprintf(&b, "    - toFQDNs:\n        - matchName: %q\n", d.host)
+			fmt.Fprintf(&b, "    - toFQDNs:\n        - %s: %q\n", fqdnSelector(d), d.host)
 		}
 		fmt.Fprintf(&b, "      toPorts:\n        - ports:\n            - {port: %q, protocol: TCP}\n", d.port)
 	}
 	return b.String()
+}
+
+// fqdnSelector is the Cilium FQDN selector for d: a pattern for
+// "*.domain", else an exact name. Cilium's "*" stays within one label, so
+// the network allows a.domain but not a.b.domain, which the proxy would:
+// the narrower of the two applies.
+func fqdnSelector(d destination) string {
+	if d.pattern {
+		return "matchPattern"
+	}
+	return "matchName"
 }
 
 // kubernetesPolicy resolves each upstream now and allows its current
@@ -194,6 +238,11 @@ spec:
 `, configPath, time.Now().UTC().Format("2006-01-02 15:04 UTC"), ns, app)
 	for _, d := range dests {
 		addrs := []string{d.host}
+		if d.pattern {
+			warns = append(warns, fmt.Sprintf("%s: a pattern has no addresses to resolve; left out of the policy (use -format cilium, or allow the domain's address ranges)", d.host))
+			fmt.Fprintf(&b, "    # %s (%s): %s is a pattern, not resolvable\n", strings.Join(d.conns, ", "), d.port, d.host)
+			continue
+		}
 		if !d.ip {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			found, err := net.DefaultResolver.LookupHost(ctx, d.host)

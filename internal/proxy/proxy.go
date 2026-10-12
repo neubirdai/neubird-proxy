@@ -9,6 +9,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -32,7 +33,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/metrics"
@@ -41,10 +45,15 @@ import (
 )
 
 type Server struct {
-	cfg      *config.Config
-	engine   *redact.Engine
-	log      *slog.Logger
-	rp       *httputil.ReverseProxy
+	cfg    *config.Config
+	engine *redact.Engine
+	log    *slog.Logger
+	rp     *httputil.ReverseProxy
+	// rpDest serves open mode (neubird_destinations): same hooks, but a
+	// transport that won't dial loopback, link-local or unspecified
+	// addresses, since the host comes from the request.
+	rpDest   *httputil.ReverseProxy
+	dest     *config.NeubirdDestinations
 	byName   map[string]*config.Connection
 	byHost   map[string]*config.Connection
 	tokens   map[string][][32]byte // connection name -> accepted token hashes
@@ -57,6 +66,7 @@ type Server struct {
 	// (SetMemoryLimit); maxBuffered is the largest body that may be
 	// buffered: max_body_bytes, or less if that couldn't fit.
 	mem         *memBudget
+	reqMem      *memBudget // request bodies, see SetMemoryLimit
 	maxBuffered int64
 	Metrics     *Metrics
 }
@@ -83,12 +93,16 @@ func newMetrics() *Metrics {
 // New builds a Server. The transport is exposed for tests that need to
 // point at an httptest TLS server; nil means the configured default.
 func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport http.RoundTripper) (*Server, error) {
+	destTransport := transport
 	if transport == nil {
 		t, err := newTransport(cfg)
 		if err != nil {
 			return nil, err
 		}
 		transport = t
+		dt := t.Clone()
+		dt.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: destDialControl}).DialContext
+		destTransport = dt
 	}
 	s := &Server{
 		cfg:      cfg,
@@ -105,12 +119,21 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		Metrics:  newMetrics(),
 	}
 	s.maxBuffered = cfg.MaxBodyBytes
+	conns := make([]*config.Connection, 0, len(cfg.Connections)+1)
 	for i := range cfg.Connections {
 		c := &cfg.Connections[i]
 		s.byName[c.Name] = c
 		if c.Host != "" {
 			s.byHost[c.Host] = c
 		}
+		conns = append(conns, c)
+	}
+	if d := cfg.NeubirdDestinations; d != nil {
+		// Registered for tokens, limits and fields, never routable by name.
+		s.dest = d
+		conns = append(conns, d.Conn)
+	}
+	for _, c := range conns {
 		for _, t := range c.ClientTokens {
 			s.tokens[c.Name] = append(s.tokens[c.Name], sha256.Sum256([]byte(t)))
 		}
@@ -138,7 +161,80 @@ func New(cfg *config.Config, engine *redact.Engine, log *slog.Logger, transport 
 		Transport:      transport,
 		ErrorLog:       slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
+	if s.dest != nil {
+		rp := *s.rp
+		rp.Transport = destTransport
+		s.rpDest = &rp
+	}
 	return s, nil
+}
+
+// destDialControl guards open mode's dials; tests swap it to reach a fake
+// upstream on loopback.
+var destDialControl = refuseInternalAddresses
+
+// refuseInternalAddresses stops open mode from reaching the pod itself, the
+// node's or cloud's metadata service (169.254.169.254) and other link-local
+// or unspecified addresses, whatever the destination host resolved to. It
+// sees the address actually dialed, so a name that resolves there is caught
+// too. (Behind HTTPS_PROXY, that is the outbound proxy's address.)
+//
+// Also refused: cloud metadata and host-agent addresses outside link-local
+// (Azure WireServer, Alibaba Cloud, AWS IMDS over IPv6), and the pod's own
+// addresses, so a destination can't reach the proxy's admin port.
+func refuseInternalAddresses(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() || isMetadataOrSelf(ip) {
+		return fmt.Errorf("destination address %s is not allowed", host)
+	}
+	return nil
+}
+
+var metadataNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{
+		"168.63.129.16/32",   // Azure WireServer
+		"100.100.100.200/32", // Alibaba Cloud metadata
+		"fd00:ec2::254/128",  // AWS IMDS over IPv6
+	} {
+		_, n, _ := net.ParseCIDR(c)
+		out = append(out, n)
+	}
+	return out
+}()
+
+// ownAddrs are the pod's interface addresses, read once.
+var ownAddrs = sync.OnceValue(func() []net.IP {
+	var out []net.IP
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			out = append(out, n.IP)
+		}
+	}
+	return out
+})
+
+func isMetadataOrSelf(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	for _, n := range metadataNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	for _, own := range ownAddrs() {
+		if own.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func newTransport(cfg *config.Config) (*http.Transport, error) {
@@ -173,6 +269,13 @@ type reqState struct {
 	restRaw string // same, escaped as received
 	stats   redact.Stats
 	blocked string
+	// dest is the open-mode destination (scheme://host:port), and destErr
+	// why it can't be used; set only for /_neubird/dest requests.
+	dest    string
+	destErr string
+	// credentials is "neubird" when an open-mode request carried a
+	// NeuBird-held backend credential that was forwarded.
+	credentials string
 	// stream is the redacting reader for a streamed body (SSE or
 	// multi-document JSON); its error explains a cut stream.
 	stream interface{ Err() error }
@@ -185,6 +288,13 @@ func state(ctx context.Context) *reqState { return ctx.Value(stateKey{}).(*reqSt
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := &recorder{ResponseWriter: w}
+	// Runs last: what's still buffered is written under the deadline here,
+	// not by the server after the handler returns, where nothing bounds it.
+	defer func() {
+		if !rec.hijacked {
+			_ = rec.FlushError()
+		}
+	}()
 
 	select {
 	case s.inflight <- struct{}{}:
@@ -204,7 +314,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, ok := s.route(r)
+	if r.URL.Path == statusPath {
+		s.serveStatus(rec, r)
+		return
+	}
+
+	st, ok := s.routeDest(r)
+	if !ok {
+		st, ok = s.route(r)
+	}
+	if !ok && !s.anyTokenValid(r) {
+		// Without a token, an unknown name looks like any other refusal,
+		// so names can't be probed.
+		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
+		s.Metrics.Requests.Inc("_unknown", "401")
+		return
+	}
 	if !ok {
 		writeError(rec, http.StatusNotFound, "unknown_connection", "no connection matches this host or path")
 		s.Metrics.Requests.Inc("_unknown", "404")
@@ -253,6 +378,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
 		return
 	}
+	if st.destErr != "" {
+		// Checked after the token, so a caller without one learns nothing
+		// about which hosts are allowed.
+		st.blocked = "destination_not_allowed"
+		s.Metrics.Blocked.Inc(name, st.blocked)
+		writeError(rec, http.StatusForbidden, "destination_not_allowed", st.destErr)
+		return
+	}
 	if !st.conn.MethodSet[r.Method] {
 		st.blocked = "method_not_allowed"
 		s.Metrics.Blocked.Inc(name, st.blocked)
@@ -284,7 +417,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(rec, r.Body, s.cfg.MaxBodyBytes)
 	}
 	if len(st.conn.RequestDenyRes) > 0 || s.tools[name] != nil {
-		reason, err := s.checkRequest(st.conn, r)
+		reason, release, err := s.checkRequest(rec, st.conn, r)
+		defer release()
 		var mbe *http.MaxBytesError
 		switch {
 		case errors.As(err, &mbe):
@@ -301,7 +435,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.rp.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), stateKey{}, st)))
+	rp := s.rp
+	if st.dest != "" {
+		rp = s.rpDest
+	}
+	rp.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), stateKey{}, st)))
 }
 
 // hasDotSegment reports whether the decoded path, or the path decoded once
@@ -310,6 +448,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func hasDotSegment(p string) bool {
 	check := func(p string) bool {
 		for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+			// Servlet containers (Tomcat, Jetty, Spring) drop ;params from
+			// a segment before resolving it, so "..;x" is ".." to them.
+			seg, _, _ = strings.Cut(seg, ";")
 			if seg == "." || seg == ".." {
 				return true
 			}
@@ -319,7 +460,9 @@ func hasDotSegment(p string) bool {
 	if check(p) {
 		return true
 	}
-	if twice, err := url.PathUnescape(p); err == nil && twice != p {
+	// Leniently, as an upstream that decodes twice would: one bad escape
+	// mustn't hide a "%2e%2e" elsewhere.
+	if twice := unescape(p, false); twice != p {
 		return check(twice)
 	}
 	return false
@@ -348,6 +491,69 @@ func (s *Server) route(r *http.Request) (*reqState, bool) {
 		st.restRaw = strings.TrimPrefix(raw, prefix)
 	}
 	return st, true
+}
+
+// DestPathPrefix is where open-mode requests arrive:
+// /_neubird/dest/<path>, with the destination in DestinationHeader.
+const (
+	DestPathPrefix    = "/_neubird/dest"
+	DestinationHeader = "X-Neubird-Destination"
+)
+
+// routeDest handles an open-mode request (neubird_destinations): the
+// destination comes from DestinationHeader and must match the configured
+// host patterns. The returned state carries a per-request copy of the shared
+// policy with that upstream; a destination that can't be used is recorded in
+// destErr and refused once the token has been checked.
+func (s *Server) routeDest(r *http.Request) (*reqState, bool) {
+	if s.dest == nil {
+		return nil, false
+	}
+	p := r.URL.Path
+	if p != DestPathPrefix && !strings.HasPrefix(p, DestPathPrefix+"/") {
+		return nil, false
+	}
+	conn := *s.dest.Conn
+	st := &reqState{conn: &conn, prefix: DestPathPrefix, rest: strings.TrimPrefix(p, DestPathPrefix), stats: redact.Stats{}}
+	if raw := r.URL.EscapedPath(); strings.HasPrefix(raw, DestPathPrefix+"/") || raw == DestPathPrefix {
+		st.restRaw = strings.TrimPrefix(raw, DestPathPrefix)
+	}
+	u, reason := s.parseDestination(r.Header.Get(DestinationHeader))
+	if reason != "" {
+		st.destErr = reason
+		return st, true
+	}
+	conn.UpstreamURL = u
+	st.dest = u.Scheme + "://" + u.Host
+	return st, true
+}
+
+// parseDestination turns DestinationHeader into the upstream base URL, or
+// says why it can't be used.
+func (s *Server) parseDestination(v string) (*url.URL, string) {
+	if v == "" {
+		return nil, DestinationHeader + " is required"
+	}
+	u, err := url.Parse(strings.TrimSpace(v))
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return nil, "destination must be scheme://host[:port]"
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return nil, "destination must be scheme://host[:port], nothing more"
+	}
+	if u.Scheme == "http" && !s.cfg.AllowHTTPUpstreams {
+		return nil, "plain http destinations need allow_http_upstreams"
+	}
+	host, port := u.Hostname(), u.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[u.Scheme]
+	}
+	if !s.dest.MatchDestination(host, port) {
+		return nil, "destination host is not in neubird_destinations.hosts"
+	}
+	// The port was only filled in for matching; the upstream Host header
+	// keeps the destination as given.
+	return &url.URL{Scheme: u.Scheme, Host: strings.ToLower(u.Host)}, ""
 }
 
 func allowHeader(c *config.Connection) string {
@@ -380,71 +586,278 @@ func pathAllowed(c *config.Connection, rest string) bool {
 // and body, raw and URL-decoded, since Splunk takes its search as a form
 // field. The body is buffered (it is already capped at max_body_bytes) and
 // restored for the upstream.
-func (s *Server) checkRequest(c *config.Connection, r *http.Request) (string, error) {
+// The returned release frees the body's memory reservation; the caller
+// runs it when the request is done, since the body is kept for the
+// upstream.
+func (s *Server) checkRequest(w http.ResponseWriter, c *config.Connection, r *http.Request) (string, func(), error) {
+	release := func() {}
 	var body []byte
 	if r.Body != nil && r.Body != http.NoBody {
+		var held int64
+		if s.reqMem != nil {
+			// The body, and the decoded copies matched below.
+			size := s.cfg.MaxBodyBytes
+			if r.ContentLength >= 0 && r.ContentLength < size {
+				size = r.ContentLength
+			}
+			held = s.reqMem.clamp(size * requestBufferFactor)
+			if err := s.reqMem.acquire(r.Context(), held); err != nil {
+				return "", release, err
+			}
+			release = func() { s.reqMem.release(held) }
+		}
+		// The body holds its reservation while it arrives, so it gets the
+		// same time as a response body. (Not every transport supports
+		// read deadlines; the tunnel's HTTP/2 server does.)
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(bodyWorkTimeout))
 		var err error
 		body, err = io.ReadAll(r.Body)
+		_ = rc.SetReadDeadline(time.Time{})
 		r.Body.Close()
 		if err != nil {
-			return "", err
+			return "", release, err
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
+		if s.reqMem != nil {
+			// After the check only the body itself is kept.
+			defer func() {
+				keep := s.reqMem.clamp(int64(len(body)))
+				if keep < held {
+					s.reqMem.release(held - keep)
+					held = keep
+				}
+			}()
+		}
 	}
 	if tools := s.tools[c.Name]; tools != nil && r.Method == http.MethodPost {
 		if reason := checkMCPTools(body, tools); reason != "" {
-			return reason, nil
+			return reason, release, nil
 		}
 	}
 	candidates := []string{r.URL.RawQuery, string(body)}
 	for _, raw := range []string{r.URL.RawQuery, string(body)} {
-		if dec, err := url.QueryUnescape(raw); err == nil && dec != raw {
+		// Decoded leniently: one bad escape must not hide the rest from
+		// the patterns, since upstream decoders are lenient too.
+		if dec := lenientUnescape(raw); dec != raw {
+			candidates = append(candidates, dec)
+		}
+	}
+	// JSON string escapes (\u007c for |) are decoded by the upstream too.
+	if len(c.RequestDenyRes) > 0 {
+		dec, ok, err := jsonStrings(body)
+		if err != nil {
+			return "request body: " + err.Error(), release, nil
+		}
+		if ok {
 			candidates = append(candidates, dec)
 		}
 	}
 	for i, re := range c.RequestDenyRes {
 		for _, cand := range candidates {
 			if re.MatchString(cand) {
-				return fmt.Sprintf("request matches request_deny_patterns[%d]", i), nil
+				return fmt.Sprintf("request matches request_deny_patterns[%d]", i), release, nil
 			}
 		}
 	}
-	return "", nil
+	return "", release, nil
 }
+
+// requestBufferFactor is how many times its size a request body may take
+// while checked: the body and its decoded copies.
+const requestBufferFactor = 4
+
+// lenientUnescape decodes %XX escapes and + as a space, leaving any
+// malformed escape as it is, as most form decoders do.
+func lenientUnescape(s string) string { return unescape(s, true) }
+
+// unescape decodes valid %XX escapes, and + as a space if plus is set.
+func unescape(s string, plus bool) string {
+	if !strings.Contains(s, "%") && !(plus && strings.Contains(s, "+")) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '+' && plus:
+			b.WriteByte(' ')
+		case c == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]):
+			b.WriteByte(unhex(s[i+1])<<4 | unhex(s[i+2]))
+			i += 2
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case c <= '9':
+		return c - '0'
+	case c >= 'a':
+		return c - 'a' + 10
+	default:
+		return c - 'A' + 10
+	}
+}
+
+// jsonStrings returns every string (keys included) in a JSON body,
+// decoded, one per line: of every document of a multi-document body
+// (NDJSON, Elasticsearch _bulk), up to the first that doesn't parse. False
+// if the body has no escapes worth decoding.
+//
+// errTooDeep means the body nests deeper than redact.MaxJSONDepth, which
+// no real request does; the decoder's state would grow with it.
+func jsonStrings(body []byte) (string, bool, error) {
+	if !bytes.Contains(body, []byte(`\`)) {
+		return "", false, nil
+	}
+	var b strings.Builder
+	dec := json.NewDecoder(bytes.NewReader(body))
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			if t == '{' || t == '[' {
+				if depth++; depth > redact.MaxJSONDepth {
+					return "", false, errTooDeep
+				}
+			} else {
+				depth--
+			}
+		case string:
+			b.WriteString(t)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), true, nil
+}
+
+var errTooDeep = fmt.Errorf("JSON nested deeper than %d", redact.MaxJSONDepth)
 
 // checkMCPTools refuses a JSON-RPC message or batch that calls a tool not
 // in the allowlist. A body that is not JSON-RPC is refused too: on an MCP
 // connection it cannot be checked.
 func checkMCPTools(body []byte, tools map[string]bool) string {
-	type msg struct {
-		Method string `json:"method"`
-		Params struct {
-			Name string `json:"name"`
-		} `json:"params"`
-	}
-	var msgs []msg
 	trimmed := bytes.TrimSpace(body)
-	switch {
-	case len(trimmed) == 0:
+	if len(trimmed) == 0 {
 		return ""
-	case trimmed[0] == '[':
-		if err := json.Unmarshal(trimmed, &msgs); err != nil {
-			return "body is not JSON-RPC"
-		}
-	default:
-		var m msg
-		if err := json.Unmarshal(trimmed, &m); err != nil {
-			return "body is not JSON-RPC"
-		}
-		msgs = []msg{m}
 	}
-	for _, m := range msgs {
-		if m.Method == "tools/call" && !tools[m.Params.Name] {
-			return fmt.Sprintf("MCP tool %q is not in mcp_tools", m.Params.Name)
+	var raws []json.RawMessage
+	if trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &raws); err != nil {
+			return "body is not JSON-RPC"
+		}
+	} else {
+		raws = []json.RawMessage{trimmed}
+	}
+	for _, raw := range raws {
+		m, err := strictObject(raw)
+		if err != nil {
+			return "body is not JSON-RPC: " + err.Error()
+		}
+		var method string
+		if v, ok := m["method"]; ok && json.Unmarshal(v, &method) != nil {
+			return "body is not JSON-RPC"
+		}
+		if method != "tools/call" {
+			continue
+		}
+		params, err := strictObject(m["params"])
+		if err != nil {
+			return "tools/call params: " + err.Error()
+		}
+		var name string
+		if err := json.Unmarshal(params["name"], &name); err != nil {
+			return "tools/call without a tool name"
+		}
+		if !tools[name] {
+			return fmt.Sprintf("MCP tool %q is not in mcp_tools", name)
 		}
 	}
 	return ""
+}
+
+// foldKey maps every rune to the smallest in its Unicode simple-fold
+// orbit, so two keys fold equal exactly when strings.EqualFold says so.
+func foldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		min := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < min {
+				min = f
+			}
+		}
+		return min
+	}, s)
+}
+
+// strictObject decodes a JSON object whose keys are unambiguous: a key
+// that repeats, or differs from another only in case, is refused, since
+// parsers disagree on which one wins (Go's encoding/json matches field
+// names case-insensitively and keeps the last).
+func strictObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, errors.New("not an object")
+	}
+	out := map[string]json.RawMessage{}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := tok.(string)
+		// Folded as encoding/json compares (Unicode simple folding, so
+		// "ſ" matches "s" and the Kelvin sign "k").
+		f := foldKey(key)
+		if seen[f] {
+			return nil, fmt.Errorf("ambiguous key %q", key)
+		}
+		seen[f] = true
+		// A key that folds to one this check reads, in another spelling,
+		// would be read by a case-insensitive server instead.
+		for _, k := range []string{"method", "params", "name"} {
+			if key != k && strings.EqualFold(key, k) {
+				return nil, fmt.Errorf("key %q is a variant of %q", key, k)
+			}
+		}
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, err
+		}
+		out[key] = v
+	}
+	if _, err := dec.Token(); err != nil { // '}'
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("data after the object")
+	}
+	return out, nil
+}
+
+// anyTokenValid reports whether r carries a token that opens some
+// connection, or neubird_destinations.
+func (s *Server) anyTokenValid(r *http.Request) bool {
+	for _, c := range s.byName {
+		if s.authenticate(c, r) {
+			return true
+		}
+	}
+	return s.dest != nil && s.authenticate(s.dest.Conn, r)
 }
 
 func (s *Server) authenticate(c *config.Connection, r *http.Request) bool {
@@ -513,6 +926,14 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 		}
 	}
 	h.Set("X-Request-Id", st.id)
+	if c.NeuBirdCredentials {
+		for k := range c.CredentialHeaderSet {
+			if vs := out.Header.Values(config.UpstreamCredentialPrefix + k); len(vs) > 0 {
+				h[k] = vs
+				st.credentials = "neubird"
+			}
+		}
+	}
 	out.Header = h
 	// Accept-Encoding, Range and If-Range are not in the allowlist for
 	// redacting connections: bodies must arrive whole and uncompressed, and
@@ -582,10 +1003,21 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return &blockError{"unsupported_content_encoding"}
 	}
 
+	// An upstream may not take long over a body: while it's partly
+	// received, it holds buffers, budget and a slot.
+	work := newDeadlineBody(resp.Request.Context(), resp.Body, bodyWorkTimeout)
+	defer work.Busy(false) // streams take over below
+	resp.Body = work
+
 	kind := classify(h.Get("Content-Type"))
 	fields := s.fields[st.conn.Name]
 	if kind == kindSSE {
 		sse := redact.NewSSEReader(resp.Body, s.engine, st.stats, s.maxBuffered).WithFields(fields)
+		if s.mem != nil {
+			sse.WithBudget(ctxBudget{s.mem, work.ctx})
+		}
+		// A stream may idle between events, but not halfway through one.
+		sse.WithActivity(work.Busy)
 		st.stream = sse
 		resp.Body = &dropTrailers{ReadCloser: sse, resp: resp}
 		resp.ContentLength = -1
@@ -616,13 +1048,15 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		if n := resp.ContentLength; n >= 0 && n < size && !gzipped {
 			size = n
 		}
-		reserve := size * bufferFactor
+		reserve := s.mem.clamp(size * bufferFactor)
 		if err := s.mem.acquire(resp.Request.Context(), reserve); err != nil {
 			resp.Body.Close()
 			return err
 		}
 		defer s.mem.release(reserve)
 	}
+	// The upstream's time starts once the slot and memory are held.
+	work.Busy(true)
 
 	if kind == kindJSON {
 		// The first document is redacted here, before any header is sent,
@@ -656,6 +1090,12 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			resp.Body.Close()
 			return setBody(resp, js.Bytes())
 		default:
+			// Later documents are decoded after this returns: each within
+			// the budget, and the upstream may not stall halfway through.
+			if s.mem != nil {
+				js.WithBudget(ctxBudget{s.mem, work.ctx})
+			}
+			js.WithActivity(work.Busy)
 			st.stream = js
 			resp.Body = &dropTrailers{ReadCloser: js, resp: resp}
 			resp.ContentLength = -1
@@ -703,7 +1143,64 @@ func (d *dropTrailers) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// bodyWorkTimeout is how long the upstream gets to send a buffered body,
+// or one document or event of a stream, once it has started: while it's
+// partly received, it holds a buffer slot or memory. Between documents
+// and events a stream may idle as long as it likes.
+var bodyWorkTimeout = time.Minute
+
+// deadlineBody closes its body when a unit of work (Busy(true) to
+// Busy(false)) takes longer than the timeout, which ends the pending Read
+// with an error.
+//
+// Its context (ctx) ends then too, and when the body is closed: memory
+// waits use it, so a wait during a unit of work is bounded the same way.
+type deadlineBody struct {
+	io.ReadCloser
+	ctx     context.Context
+	cancel  context.CancelFunc
+	timeout time.Duration
+	timer   *time.Timer
+	mu      sync.Mutex
+	armed   bool
+}
+
+func newDeadlineBody(ctx context.Context, rc io.ReadCloser, timeout time.Duration) *deadlineBody {
+	b := &deadlineBody{ReadCloser: rc, timeout: timeout}
+	b.ctx, b.cancel = context.WithCancel(ctx)
+	b.timer = time.AfterFunc(time.Hour, func() {
+		b.cancel()
+		b.ReadCloser.Close()
+	})
+	b.timer.Stop()
+	return b
+}
+
+// Busy starts the deadline (if it isn't running) or stops it.
+func (b *deadlineBody) Busy(busy bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch {
+	case busy && !b.armed:
+		b.timer.Reset(b.timeout)
+		b.armed = true
+	case !busy && b.armed:
+		b.timer.Stop()
+		b.armed = false
+	}
+}
+
+func (b *deadlineBody) Close() error {
+	b.Busy(false)
+	b.cancel()
+	return b.ReadCloser.Close()
+}
+
 func setBody(resp *http.Response, body []byte) error {
+	// The upstream body has been read to its end, so the transport may
+	// have filled in trailers: drop them, they'd skip header redaction.
+	resp.Trailer = nil
+	resp.Header.Del("Trailer")
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
@@ -830,6 +1327,17 @@ func (s *Server) audit(r *http.Request, st *reqState, status, nbytes int, d time
 		attrs = append(attrs, "via", via)
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Client-controlled: bounded, and only address-like characters.
+		if len(xff) > 256 {
+			xff = xff[:256]
+		}
+		xff = strings.Map(func(c rune) rune {
+			if c == ',' || c == ' ' || c == '.' || c == ':' || c == '[' || c == ']' ||
+				'0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
+				return c
+			}
+			return '?'
+		}, xff)
 		attrs = append(attrs, "forwarded_for", xff)
 	}
 	// Parameter names, not values: enough to see what was asked for
@@ -848,6 +1356,12 @@ func (s *Server) audit(r *http.Request, st *reqState, status, nbytes int, d time
 	if st.blocked != "" {
 		attrs = append(attrs, "blocked", st.blocked)
 	}
+	if st.credentials != "" {
+		attrs = append(attrs, "credentials", st.credentials)
+	}
+	if st.dest != "" {
+		attrs = append(attrs, "destination", st.dest)
+	}
 	s.log.Info("request", attrs...)
 }
 
@@ -862,8 +1376,19 @@ func writeError(w http.ResponseWriter, code int, kind, reason string) {
 // http.ResponseController, which ReverseProxy uses to stream SSE.
 type recorder struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status   int
+	bytes    int
+	hijacked bool // a passthrough upgrade took the connection over
+}
+
+// Hijack hands the connection to ReverseProxy for an upgrade, and notes it:
+// nothing may be written or flushed through the writer afterwards.
+func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, rw, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err == nil {
+		r.hijacked = true
+	}
+	return c, rw, err
 }
 
 func (r *recorder) WriteHeader(code int) {
@@ -879,11 +1404,32 @@ func (r *recorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Each write and flush gets bodyWorkTimeout: a caller that stops reading
+// would otherwise keep the response (redacted, so outside any memory
+// reservation) in memory indefinitely. The deadline is cleared as soon as
+// the write returns: an HTTP/2 stream is reset when its deadline passes
+// even with no write pending, which would cut an event stream idling
+// between events.
+func (r *recorder) withWriteDeadline(write func() error) error {
+	rc := http.NewResponseController(r.ResponseWriter)
+	_ = rc.SetWriteDeadline(time.Now().Add(bodyWorkTimeout))
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
+	return write()
+}
+
+func (r *recorder) FlushError() error {
+	return r.withWriteDeadline(http.NewResponseController(r.ResponseWriter).Flush)
+}
+
 func (r *recorder) Write(b []byte) (int, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
-	n, err := r.ResponseWriter.Write(b)
+	var n int
+	err := r.withWriteDeadline(func() (err error) {
+		n, err = r.ResponseWriter.Write(b)
+		return err
+	})
 	r.bytes += n
 	return n, err
 }

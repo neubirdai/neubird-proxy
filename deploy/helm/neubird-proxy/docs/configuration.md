@@ -2,29 +2,34 @@
 
 The chart's `config` value is the proxy's configuration, minus what the
 chart sets itself: the `tunnel` section (from `tunnel.*`, including
-`join_token_env`), `listen: off` and `admin_listen: :9090`. This page covers what you
-set there. Check any configuration with the image before rolling it out
+`join_token_env`), `listen: off` and `admin_listen: :9090`. This page
+covers what you set there. Check any configuration with the image before rolling it out
 (see Checking a configuration).
 
 ## How requests are confined
 
-A request from NeuBird can only reach URLs under one of your connections,
-and only what that connection allows:
+NeuBird names the system each request is for: the request goes to
+`/_neubird/dest/<path>` with `X-Neubird-Destination: https://host[:port]`,
+the endpoint URL of NeuBird's connection for that system. The proxy forwards
+it only within what you set in `neubird_destinations`:
 
-1. **The destination never comes from the request.** Each connection has a
-   fixed `upstream` base URL. A request only names a connection (the first
-   path segment); an unknown name gets `404 unknown_connection` and nothing
-   is sent. Host headers and absolute URLs never change the destination.
-2. **A request can't leave its connection's base path.** `.`/`..` segments
-   (including encoded forms) are refused; upstream redirects are rewritten
-   back through the proxy.
-3. **`paths`, `methods` and `mcp_tools` narrow it further.** `paths` are RE2
-   patterns matched against the whole path after the connection name; other
-   paths get `403 path_not_allowed`. `methods` defaults to GET and HEAD.
+1. **Only hosts you allow.** The host must match `hosts`: `*.example.com`
+   (any name under that domain), `host.example.com` (exactly), either with an
+   optional `:port`, or `*` (any host name). IP addresses are reached only
+   when listed exactly; wildcards never match them. Without `hosts`, any
+   host name is allowed. A disallowed host gets `403 destination_not_allowed`,
+   and only after the token check, so a caller without the token learns
+   nothing about your hosts.
+2. **Never internal addresses.** Connections to loopback, link-local
+   (including the cloud metadata address `169.254.169.254`) and unspecified
+   addresses are refused, whatever a name resolves to.
+3. **Only allowed requests.** `methods` defaults to GET and HEAD.
+   `request_deny_patterns` refuse requests whose query or body matches.
+   `.`/`..` path segments (including encoded forms) are refused, and
+   redirects are rewritten back through the proxy.
 
-**Without `paths`, every URL under the upstream is reachable** with the
-allowed methods. List `paths` for production; the proxy warns at start when
-a connection has none.
+**Restrict egress at the network too** (see Egress below): `hosts` decides
+what the proxy will forward, the network what the pod can reach at all.
 
 ## Top-level fields
 
@@ -33,35 +38,39 @@ a connection has none.
 | `client_token_env` | | Env var with NeuBird's token (32+ characters), e.g. `NEUBIRD_PROXY_TOKEN` |
 | `client_token_previous_env` | | Also accepted during a token rotation; remove afterwards |
 | `upstream_ca_file` | system roots | Don't set it: use the chart's `upstreamCA` value, which mounts the bundle and sets this |
+| `allow_http_upstreams` | `false` | Allow `http://` systems; otherwise only `https://` |
 | `max_body_bytes` | 20 MiB | Largest request or response body; larger responses are refused, never passed through |
 | `max_concurrent_requests` | 256 | In-flight requests before `503` |
 | `max_concurrent_buffered` | 4 | Responses buffered for redaction at once |
-| `upstream_defaults.headers` | | Headers on every upstream request; values may use `${VAR}` |
 
-## Connections (`connections[]`)
+## Destinations (`neubird_destinations`)
 
 | Field | Default | Meaning |
 |---|---|---|
-| `name` | required | The connection's name, which NeuBird uses in its URL: `[a-z0-9][a-z0-9_-]*` |
-| `upstream` | required | `https://` base URL of your API; no query string |
-| `client_auth` | `bearer` | How NeuBird presents its token: `bearer`, `basic` (as password), or `header` |
-| `client_auth_header` | | Header name when `client_auth: header` |
-| `client_token_env` | top-level | A token for this connection only |
-| `methods` | `[GET, HEAD]` | Allowed HTTP methods |
-| `paths` | any | Allowed paths (RE2, whole-path match) |
-| `request_deny_patterns` | | RE2 patterns; a match anywhere in the query or body is refused (e.g. SPL commands that write or send) |
-| `mcp_tools` | | MCP tools a `tools/call` may name (MCP connections; needs `POST`) |
-| `headers` | | Headers added toward your API, e.g. `Authorization: Bearer ${SPLUNK_TOKEN}` or a gateway key |
-| `upstream_basic_auth` | | `{username_env, password_env}` for upstream Basic auth |
+| `hosts` | `["*"]` | Host patterns NeuBird may name: `*`, `*.domain` (two or more labels), `host`, or an exact IP; each may end in `:port` |
+| `methods` | `[GET, HEAD]` | Allowed HTTP methods, for every host |
+| `request_deny_patterns` | | RE2 patterns; a match anywhere in the query or body, raw or URL-decoded, is refused (e.g. SPL commands that write or send) |
+| `credential_headers` | `[Authorization]` | Headers NeuBird may set for the system, sent as `X-Neubird-Upstream-<Header>` and forwarded as `<Header>`; `Host`, `Cookie`, `X-Forwarded-*`, APIM trace headers and transport headers are refused |
 | `request_headers` | | Extra client headers to forward; credentials and cookies are always refused |
-| `rate_limit` | | `{requests_per_second, burst}`, per replica |
-| `response_fields` | | JSON field allowlist: every other field is masked whatever it contains |
-| `passthrough` | `false` | Skip redaction for this connection. Avoid |
+| `rate_limit` | | `{requests_per_second, burst}`, per replica, shared by every host |
+| `response_fields` | | JSON field allowlist for every host's responses: every other field is masked whatever it contains |
+| `client_auth` | `bearer` | How NeuBird presents the proxy token: `bearer`, `basic` (as password), or `header` |
+| `client_auth_header` | | Header name when `client_auth: header` |
+| `client_token_env` | top-level | A token for this section only |
 
-NeuBird's token is checked and removed; your credentials (`headers`,
-`upstream_basic_auth`) are added here and never leave the cluster. Every
-`${VAR}` and `*_env` must be set in your `env.existingSecret`, or the proxy
-refuses to start and names the missing one.
+## Credentials
+
+| Credential | Held by | NeuBird sees it |
+|---|---|---|
+| Your systems' credentials (API tokens, OAuth tokens, gateway keys) | NeuBird, in each of its connections | Yes: it sends them with each request, in `credential_headers` |
+| Proxy token (`client_token_env`) | Both: you generate it and enter it in NeuBird | Yes; the proxy checks it and removes it, it never reaches your systems |
+| Tunnel key | You; generated in the cluster | No; only its public fingerprint |
+| `REDACTION_HMAC_KEY` | You | No |
+
+NeuBird also knows your systems' hostnames: they're the URLs of its
+connections. Every `${VAR}` and `*_env` must be set in your
+`env.existingSecret`, or the proxy refuses to start and names the missing
+one. Credential values are never logged.
 
 ## Redaction (`redaction`)
 
@@ -84,8 +93,9 @@ unsupported type or encoding, partial) is refused with `502 redaction_blocked`,
 never passed through.
 
 **What rules don't catch:** free-text names, addresses, and hostnames
-without a custom rule. Use `response_fields` to let only approved fields
-through, and `custom` rules for your own identifiers and host names.
+without a custom rule. Use `neubird_destinations.response_fields` to let
+only approved fields through, and `custom` rules for your own identifiers
+and host names.
 
 ## Checking a configuration
 
@@ -96,12 +106,14 @@ Write `config.yaml` (your `config` value, without the chart's part), then:
 IMG=<your registry>/neubird-proxy@sha256:...
 docker run --rm --entrypoint /neubird-proxy -v $PWD:/w -w /w \
   -e NEUBIRD_PROXY_TOKEN=check-only-0123456789abcdef0123456 -e REDACTION_HMAC_KEY=x \
-  -e SPLUNK_TOKEN=x \
-  $IMG validate -config config.yaml           # connections, paths, risky settings
+  $IMG validate -config config.yaml           # hosts, methods, risky settings
 # Ignore "tls is not set": that's the request listener, which the chart turns off.
 
 docker run --rm --entrypoint /neubird-proxy -v $PWD:/w -w /w \
   $IMG -config config.yaml -redact sample.json # redact your own sample data, counts per rule
+
+docker run --rm --entrypoint /neubird-proxy -v $PWD:/w -w /w \
+  $IMG preview -config config.yaml sample.json # side by side; -html - for a report
 ```
 
 In the cluster, the running config:
@@ -110,11 +122,10 @@ In the cluster, the running config:
 kubectl -n <ns> exec deploy/neubird-proxy -- /neubird-proxy validate -config /etc/neubird-proxy/config.yaml
 ```
 
-## Egress by hostname
+## Egress
 
-A NetworkPolicy matches addresses, not hostnames. To allow exactly your
-connections' hosts and NeuBird's relay, generate a policy from the running
-configuration (it includes the tunnel section the chart adds):
+A NetworkPolicy matches addresses, not hostnames. Generate one from the
+running configuration (it includes the tunnel section the chart adds):
 
 ```sh
 kubectl -n <ns> exec deploy/neubird-proxy -- /neubird-proxy \
@@ -123,6 +134,11 @@ kubectl -n <ns> exec deploy/neubird-proxy -- /neubird-proxy \
 #  ... -format list         host:port lines for a firewall
 ```
 
-It selects the chart's pods by their `app: neubird-proxy` label. Apply it
-instead of the chart's `networkPolicy` (leave that disabled), and
-regenerate it when connections change.
+It covers the relay and every host in `hosts`. With Cilium, `*.domain`
+becomes an FQDN pattern, which matches one label only (`a.domain`, not
+`a.b.domain`): list deeper names separately. `-format kubernetes` can't
+resolve a pattern, and no format can express `*`: allow your systems'
+address ranges instead (the chart's `networkPolicy.upstreams`, or your
+firewall). The policy selects the chart's pods by their
+`app: neubird-proxy` label. Apply it instead of the chart's `networkPolicy`
+(leave that disabled), and regenerate it when `hosts` changes.
