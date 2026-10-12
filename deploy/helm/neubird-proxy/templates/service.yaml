@@ -1,0 +1,21 @@
+{{- if include "neubird-proxy.inbound" . }}
+{{- $svc := .Values.inbound.service }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "neubird-proxy.fullname" . }}
+  labels: {{- include "neubird-proxy.labels" . | nindent 4 }}
+  {{- with $svc.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $svc.type }}
+  selector: {{- include "neubird-proxy.selectorLabels" . | nindent 4 }}
+  # Only the proxy's port: the admin port (9090: health, metrics) stays
+  # unexposed.
+  ports:
+    - {name: proxy, port: {{ $svc.port }}, targetPort: proxy, protocol: TCP}
+  {{- if and (eq $svc.type "LoadBalancer") $svc.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges: {{- toYaml $svc.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+{{- end }}

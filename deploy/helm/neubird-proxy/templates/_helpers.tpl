@@ -68,12 +68,54 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- default (printf "%s-upstream-ca" (include "neubird-proxy.fullname" .)) .Values.upstreamCA.existingConfigMap -}}
 {{- end -}}
 
-{{/* The proxy's config.yaml: .Values.config plus the generated tunnel section. */}}
+{{/* "tunnel" or "inbound"; fails on anything else. */}}
+{{- define "neubird-proxy.mode" -}}
+{{- $m := .Values.mode | default "tunnel" -}}
+{{- if not (has $m (list "tunnel" "inbound")) -}}{{- fail (printf "mode: %q is not tunnel or inbound" $m) -}}{{- end -}}
+{{- $m -}}
+{{- end -}}
+
+{{- define "neubird-proxy.inbound" -}}
+{{- if eq (include "neubird-proxy.mode" .) "inbound" -}}true{{- end -}}
+{{- end -}}
+
+{{- define "neubird-proxy.clientCAConfigMap" -}}
+{{- default (printf "%s-client-ca" (include "neubird-proxy.fullname" .)) .Values.inbound.clientCA.existingConfigMap -}}
+{{- end -}}
+
+{{- define "neubird-proxy.hasClientCA" -}}
+{{- if or .Values.inbound.clientCA.cert .Values.inbound.clientCA.existingConfigMap -}}true{{- end -}}
+{{- end -}}
+
+{{/* The proxy's config.yaml: .Values.config plus what the mode sets: the
+tunnel section and listen: off, or listen: :8443 and tls. */}}
 {{- define "neubird-proxy.config" -}}
+{{- $c := .Values.config -}}
+{{- if hasKey $c "tunnel" -}}{{- fail "set the tunnel under `tunnel`, not config.tunnel" -}}{{- end -}}
+{{- $listen := ternary ":8443" "off" (eq (include "neubird-proxy.mode" .) "inbound") -}}
+{{- if and (hasKey $c "listen") (ne (toString $c.listen) $listen) -}}{{- fail (printf "config.listen: leave it out (the chart sets it to %s from `mode`)" $listen) -}}{{- end -}}
+{{- if hasKey $c "tls" -}}{{- fail "config.tls: set inbound.tls and inbound.clientCA instead" -}}{{- end -}}
+{{- if and (hasKey $c "admin_listen") (ne (toString $c.admin_listen) ":9090") -}}{{- fail "config.admin_listen: leave it out (the chart's probes use :9090)" -}}{{- end -}}
+{{- $cfg := merge (dict "admin_listen" ":9090") (deepCopy $c) -}}
+{{- if include "neubird-proxy.inbound" . -}}
+{{- $in := .Values.inbound -}}
+{{- if .Values.tunnel.relays -}}{{- fail "tunnel.relays: mode inbound has no tunnel; leave tunnel out (or use mode: tunnel)" -}}{{- end -}}
+{{- $_ := set $cfg "listen" $listen -}}
+{{- if $in.tls.existingSecret -}}
+{{- $tls := dict "cert_file" "/etc/neubird-proxy/tls/tls.crt" "key_file" "/etc/neubird-proxy/tls/tls.key" -}}
+{{- if include "neubird-proxy.hasClientCA" . -}}
+{{- $_ := set $tls "client_ca_file" "/etc/neubird-proxy/client-ca/ca.crt" -}}
+{{- end -}}
+{{- $_ := set $cfg "tls" $tls -}}
+{{- else if not $in.allowPlainHTTP -}}
+{{- fail "inbound.tls.existingSecret is required with mode inbound: a kubernetes.io/tls Secret (or inbound.allowPlainHTTP: true when TLS ends in front of the pod)" -}}
+{{- else if include "neubird-proxy.hasClientCA" . -}}
+{{- fail "inbound.clientCA needs inbound.tls.existingSecret: mutual TLS is part of the proxy's TLS" -}}
+{{- end -}}
+{{- else -}}
 {{- $t := .Values.tunnel -}}
 {{- if not $t.relays -}}{{- fail "tunnel.relays is required: your relay's address from NeuBird" -}}{{- end -}}
 {{- if not (and $t.tenant $t.proxy) -}}{{- fail "tunnel.tenant and tunnel.proxy are required" -}}{{- end -}}
-{{- if hasKey .Values.config "tunnel" -}}{{- fail "set the tunnel under `tunnel`, not config.tunnel" -}}{{- end -}}
 {{- $tunnel := dict
   "relays" $t.relays
   "tenant" $t.tenant
@@ -82,10 +124,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
   "ca_file" "/etc/neubird-proxy/ca/relay-ca.crt"
   "connections_per_relay" $t.connectionsPerRelay
   "join_token_env" ($t.joinTokenEnv | default "") -}}
-{{- $c := .Values.config -}}
-{{- if and (hasKey $c "listen") (ne (toString $c.listen) "off") -}}{{- fail "config.listen: this chart is tunnel-only; leave listen out (the chart sets it to off)" -}}{{- end -}}
-{{- if and (hasKey $c "admin_listen") (ne (toString $c.admin_listen) ":9090") -}}{{- fail "config.admin_listen: leave it out (the chart's probes use :9090)" -}}{{- end -}}
-{{- $cfg := merge (dict "tunnel" $tunnel "listen" "off" "admin_listen" ":9090") (deepCopy $c) -}}
+{{- $_ := set $cfg "tunnel" $tunnel -}}
+{{- $_ := set $cfg "listen" $listen -}}
+{{- end -}}
 {{- if or .Values.upstreamCA.cert .Values.upstreamCA.existingConfigMap -}}
 {{- if hasKey .Values.config "upstream_ca_file" -}}{{- fail "set upstreamCA instead of config.upstream_ca_file" -}}{{- end -}}
 {{- $_ := set $cfg "upstream_ca_file" "/etc/neubird-proxy/upstream-ca/ca.crt" -}}
