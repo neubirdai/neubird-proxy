@@ -64,7 +64,7 @@ Test the tunnel and each system from inside a pod (no request is sent):
 
    kubectl -n {{ $ns }} exec deploy/{{ $deploy }} -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml
 {{- $urls := list -}}
-{{- range (dig "neubird_destinations" "hosts" list (.Values.config | default dict)) }}{{ if not (contains "*" .) }}{{ $urls = append $urls (printf "https://%s" .) }}{{ end }}{{ end }}
+{{- range ((dig "neubird_destinations" "hosts" (list) (.Values.config | default dict)) | default (list)) }}{{ if not (contains "*" .) }}{{ $urls = append $urls (printf "https://%s" .) }}{{ end }}{{ end }}
 {{- with $urls }}
    kubectl -n {{ $ns }} exec deploy/{{ $deploy }} -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml \
      {{ join " " . }}
