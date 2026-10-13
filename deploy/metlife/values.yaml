@@ -12,8 +12,8 @@ replicaCount: 2
 
 mode: tunnel
 tunnel:
-  relays: ["metlifemirror-tunnel.cluster.neubird.ai:443"]
-  tenant: metlifemirror
+  relays: ["metlife-tunnel.cluster.neubird.ai:443"]
+  tenant: metlife
   proxy: <proxy name>             # the name the join token is for, e.g. aks-prod
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
@@ -67,7 +67,7 @@ config:
 
 networkPolicy:
   enabled: true
-  relayCIDRs: ["3.231.28.52/32", "32.196.200.125/32"]
+  relayCIDRs: ["<relay IP 1>/32", "<relay IP 2>/32", "<relay IP 3>/32"]   # from NeuBird
   relayPorts: [443]
   upstreams:
     - {cidr: <Splunk range>, ports: [8089]}
