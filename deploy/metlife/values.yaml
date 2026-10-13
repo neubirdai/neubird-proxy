@@ -12,7 +12,7 @@ replicaCount: 2
 
 mode: tunnel
 tunnel:
-  relays: ["metlife-tunnel.cluster.neubird.ai:443"]
+  relays: ["metlife-tunnel.neubird.ai:443"]
   tenant: metlife
   proxy: <proxy name>             # the name the join token is for, e.g. aks-prod
   joinTokenEnv: NEUBIRD_JOIN_TOKEN

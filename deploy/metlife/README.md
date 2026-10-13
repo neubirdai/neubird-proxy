@@ -16,7 +16,7 @@ There is no proxy token (`client_auth: none`): a request is accepted because it 
 
 | Item | Secret | Value |
 |---|---|---|
-| Relay address | no | `metlife-tunnel.cluster.neubird.ai:443` |
+| Relay address | no | `metlife-tunnel.neubird.ai:443` |
 | Relay IP addresses, for the egress firewall | no | Fixed addresses, one per zone (NeuBird sends them) |
 | Tenant | no | `metlife` |
 | Relay CA certificate, `relay-ca.crt` | no | "NeuBird relay CA for metlife" |
@@ -77,7 +77,7 @@ Notes:
 - **Image:** use the release NeuBird names (with `client_auth: none` and `host_methods`), by digest.
 - **Egress:** the proxy reaches the relay on 443 (the addresses above), Splunk, and ServiceNow.
   - ServiceNow is SaaS without fixed addresses, so a NetworkPolicy can't allow it by CIDR: send it, and the relay tunnel, through your egress proxy (`extraEnv` `HTTPS_PROXY`), and allow that proxy in `networkPolicy.upstreams`. `NO_PROXY` must cover the Splunk host.
-  - The egress proxy must allow CONNECT to `metlife-tunnel.cluster.neubird.ai:443` and must not inspect TLS on it: the tunnel is mutual TLS end to end.
+  - The egress proxy must allow CONNECT to `metlife-tunnel.neubird.ai:443` and must not inspect TLS on it: the tunnel is mutual TLS end to end.
   - Without an egress proxy, use an FQDN-aware egress policy (Azure Firewall, Cilium) for `<instance>.service-now.com`.
 - **Splunk's certificate:** it must name the host in `hosts` (Splunk's default certificate on 8089 names none and fails verification), and its CA goes in `upstreamCA`.
 - **ServiceNow credentials:** an API key travels in `x-sn-apikey`, OAuth or basic auth in `Authorization`; both are in `credential_headers`. Give the key a read-only role.
@@ -105,7 +105,7 @@ In tunnel mode the proxy accepts no connections and needs only four outbound des
 |---|---|---|---|
 | Inbound | nothing (optionally Prometheus) | 9090 | Health and metrics only; no Service, no load balancer |
 | Outbound | cluster DNS | 53 | Name resolution |
-| Outbound | relay `metlife-tunnel.cluster.neubird.ai` (the addresses NeuBird sends) | 443 | The tunnel |
+| Outbound | relay `metlife-tunnel.neubird.ai` (the addresses NeuBird sends) | 443 | The tunnel |
 | Outbound | Splunk | 8089 | Inside MetLife's network |
 | Outbound | `<instance>.service-now.com` | 443 | SaaS, no fixed addresses |
 
@@ -128,11 +128,11 @@ In tunnel mode the proxy accepts no connections and needs only four outbound des
     egress:
       - toEndpoints: [{matchLabels: {k8s-app: kube-dns, io.kubernetes.pod.namespace: kube-system}}]
         toPorts: [{ports: [{port: "53", protocol: ANY}], rules: {dns: [{matchPattern: "*"}]}}]
-      - toFQDNs: [{matchName: "<instance>.service-now.com"}, {matchName: "metlife-tunnel.cluster.neubird.ai"}]
+      - toFQDNs: [{matchName: "<instance>.service-now.com"}, {matchName: "metlife-tunnel.neubird.ai"}]
         toPorts: [{ports: [{port: "443", protocol: TCP}]}]
   ```
 
-**2. Azure network.** Route the node subnet's outbound traffic (a route for `0.0.0.0/0`) through Azure Firewall, with application rules for `metlife-tunnel.cluster.neubird.ai:443` and `<instance>.service-now.com:443` and a network rule for Splunk's range on 8089. No TLS inspection on the relay host (the tunnel is mutual TLS end to end); inspecting ServiceNow also breaks it unless the inspection CA is added to `upstreamCA`. No inbound rule, public IP or load balancer is needed. A dedicated node pool (taints and tolerations) keeps these rules from widening anything else.
+**2. Azure network.** Route the node subnet's outbound traffic (a route for `0.0.0.0/0`) through Azure Firewall, with application rules for `metlife-tunnel.neubird.ai:443` and `<instance>.service-now.com:443` and a network rule for Splunk's range on 8089. No TLS inspection on the relay host (the tunnel is mutual TLS end to end); inspecting ServiceNow also breaks it unless the inspection CA is added to `upstreamCA`. No inbound rule, public IP or load balancer is needed. A dedicated node pool (taints and tolerations) keeps these rules from widening anything else.
 
 **3. The proxy itself**, whatever the network allows:
 - It calls only the hosts in `neubird_destinations.hosts`, never an IP address not listed, and never a loopback, link-local (including the cloud metadata address 169.254.169.254) or unspecified address, whatever a name resolves to. Through an egress proxy the proxy connects to that proxy instead, which resolves the name: the hosts allowlist still applies, and the egress proxy's own allowlist should match it.
