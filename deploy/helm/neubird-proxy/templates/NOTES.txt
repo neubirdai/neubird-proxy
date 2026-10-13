@@ -28,32 +28,64 @@ Revoke access at any time by scaling this Deployment to 0, or by changing
 NEUBIRD_PROXY_TOKEN and restarting it (kubectl rollout restart): pods read
 the token at startup.
 {{- else -}}
-neubird-proxy {{ .Chart.AppVersion }}: tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, relays {{ join ", " .Values.tunnel.relays }}.
+{{- $ns := .Release.Namespace -}}
+{{- $deploy := include "neubird-proxy.fullname" . -}}
+{{- $proxyEnv := "" -}}
+{{- range .Values.extraEnv }}{{ if eq (upper .name) "HTTPS_PROXY" }}{{ $proxyEnv = .value }}{{ end }}{{ end -}}
+neubird-proxy: tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, relays {{ join ", " .Values.tunnel.relays }}.
+Image: {{ include "neubird-proxy.image" . }}
 
 The replicas turn Ready once their tunnels are up (don't use --wait the first
-time if NeuBird still has to record the key).
+time if NeuBird still has to record the key). Check the tunnels and enrollment:
 
+   kubectl -n {{ $ns }} logs -l app.kubernetes.io/instance={{ .Release.Name }} --tail=-1 --prefix \
+     | grep -E '"msg":"(starting|enrolled with the join token|key already enrolled|tunnel connected|tunnel connect failed|risky configuration)"'
 {{- if .Values.tunnel.joinTokenEnv }}
 
-With a join token ({{ .Values.tunnel.joinTokenEnv }} in Secret {{ .Values.env.existingSecret }}), the proxy
-enrolls its own key: nothing to send NeuBird. Check:
+With the join token ({{ .Values.tunnel.joinTokenEnv }} in Secret {{ .Values.env.existingSecret }}), the proxy
+enrolls its own key: nothing to send NeuBird. Once you see "enrolled with the
+join token" or "key already enrolled", remove it (it can't be used again):
 
-   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} | grep -E '"(enrolled with the join token|key already enrolled|tunnel connected|tunnel connect failed)"'
+   kubectl -n {{ $ns }} patch secret {{ .Values.env.existingSecret }} --type=json \
+     -p '[{"op":"remove","path":"/data/{{ .Values.tunnel.joinTokenEnv }}"}]'
 
-Once enrolled, you may remove {{ .Values.tunnel.joinTokenEnv }} from the Secret.
+If enrollment is refused (token expired or already used), ask NeuBird for a
+new token, or send them the key's fingerprint instead:
+{{- else }}
+
+Send NeuBird the key's fingerprint (not secret; the key never leaves this
+cluster); the tunnels come up once NeuBird records it:
 {{- end }}
 
-Without a join token: send NeuBird the key's fingerprint (not secret; the key
-never leaves this cluster), and the tunnels come up once NeuBird records it:
-
-   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "neubird-proxy.fullname" . }} -- \
+   kubectl -n {{ $ns }} exec deploy/{{ $deploy }} -- \
      /neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key
 
+Test the tunnel and each system from inside a pod (no request is sent):
+
+   kubectl -n {{ $ns }} exec deploy/{{ $deploy }} -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml
+{{- $urls := list -}}
+{{- range (dig "neubird_destinations" "hosts" list (.Values.config | default dict)) }}{{ if not (contains "*" .) }}{{ $urls = append $urls (printf "https://%s" .) }}{{ end }}{{ end }}
+{{- with $urls }}
+   kubectl -n {{ $ns }} exec deploy/{{ $deploy }} -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml \
+     {{ join " " . }}
+{{- end }}
+{{- if $proxyEnv }}
+
+Outbound traffic goes through {{ $proxyEnv }} (HTTPS_PROXY): it must allow
+CONNECT to {{ join ", " .Values.tunnel.relays }} without TLS inspection (the tunnel is
+mutual TLS end to end), and to your systems not in NO_PROXY.
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+
+networkPolicy is off: the pods can reach anything the cluster can. Turn it on
+with relayCIDRs and upstreams (networkPolicy in values.yaml).
+{{- end }}
 {{- if include "neubird-proxy.noToken" . }}
 
 Then, in NeuBird's UI, create each connection with access through the
 NeuBird proxy. client_auth is none: there is no proxy token to enter, since
-requests are accepted because they come down this proxy's own tunnels.
+requests are accepted because they come down this proxy's own tunnels (a
+"risky configuration" line in the log says so; it's expected).
 
 Revoke access at any time by scaling this Deployment to 0, or by asking
 NeuBird to revoke the tunnel key at the relay.
