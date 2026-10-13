@@ -1,0 +1,54 @@
+# neubird-proxy at MetLife: Helm values for the chart's inbound mode, behind
+# Azure API Management. Replace every <...>. See README.md.
+#
+#   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml
+image:
+  repository: <your-acr>.azurecr.io/neubird/neubird-proxy
+  digest: sha256:<from NeuBird's release notes>
+replicaCount: 2
+mode: inbound
+inbound:
+  tls:
+    existingSecret: neubird-proxy-tls
+  clientCA:
+    cert: |                       # the CA that signed APIM's client certificate
+      -----BEGIN CERTIFICATE-----
+      ...
+  service:
+    type: LoadBalancer
+    port: 443
+    annotations:
+      # APIM inside your VNet: an internal load balancer.
+      service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    # APIM outside your VNet: a public load balancer limited to APIM's addresses.
+    # loadBalancerSourceRanges: ["<APIM public IP>/32"]
+# MetLife's internal CA bundle: the proxy verifies every backend's certificate,
+# and each backend's certificate must name the host listed in hosts below.
+upstreamCA:
+  cert: |
+    -----BEGIN CERTIFICATE-----
+    ...
+env:
+  existingSecret: neubird-proxy-env
+config:
+  client_token_env: NEUBIRD_PROXY_TOKEN
+  max_body_bytes: 20971520
+  neubird_destinations:
+    hosts:                        # the only systems the proxy will call
+      - splunk.corp.example:8089
+      - elastic.corp.example:9200
+      - example.service-now.com
+    methods: [GET, HEAD, POST]
+    client_auth: header
+    client_auth_header: X-Neubird-Proxy-Token
+    request_deny_patterns:
+      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|dbxoutput|dbxquery|sendresults)\\b"
+    rate_limit: {requests_per_second: 10, burst: 30}
+  redaction:
+    mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
+networkPolicy:
+  enabled: true
+  inboundFrom: [{ipBlock: {cidr: <APIM subnet or IP>}}]
+  upstreams:
+    - {cidr: <Splunk range>, ports: [8089]}
+    - {cidr: <Elastic range>, ports: [9200]}

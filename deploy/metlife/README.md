@@ -4,6 +4,15 @@ This guide covers what MetLife sets up to run neubird-proxy: the proxy in MetLif
 
 The proxy needs no outbound connection to NeuBird. It must accept connections only from APIM.
 
+| File | What it is |
+|---|---|
+| [`values.yaml`](values.yaml) | Helm values for the chart's inbound mode |
+| [`splunk-policy.xml`](splunk-policy.xml) | APIM policy for the Splunk API |
+| [`elastic-policy.xml`](elastic-policy.xml) | APIM policy for the Elasticsearch API |
+| [`servicenow-policy.xml`](servicenow-policy.xml) | APIM policy for the ServiceNow API |
+
+Replace every `<...>` and the example hostnames (`*.corp.example`, `example.service-now.com`).
+
 ## Credentials
 
 | Credential | Held by | Used for |
@@ -33,61 +42,10 @@ Use `--from-literal` as shown, or strip the trailing newline from a file. The pr
 
 ### 2. Values
 
-```yaml
-image:
-  repository: <your-acr>.azurecr.io/neubird/neubird-proxy
-  digest: sha256:<from NeuBird's release notes>
-replicaCount: 2
-mode: inbound
-inbound:
-  tls:
-    existingSecret: neubird-proxy-tls
-  clientCA:
-    cert: |                       # the CA that signed APIM's client certificate
-      -----BEGIN CERTIFICATE-----
-      ...
-  service:
-    type: LoadBalancer
-    port: 443
-    annotations:
-      # APIM inside your VNet: an internal load balancer.
-      service.beta.kubernetes.io/azure-load-balancer-internal: "true"
-    # APIM outside your VNet: a public load balancer limited to APIM's addresses.
-    # loadBalancerSourceRanges: ["<APIM public IP>/32"]
-# MetLife's internal CA bundle: the proxy verifies every backend's certificate,
-# and each backend's certificate must name the host listed in hosts below.
-upstreamCA:
-  cert: |
-    -----BEGIN CERTIFICATE-----
-    ...
-env:
-  existingSecret: neubird-proxy-env
-config:
-  client_token_env: NEUBIRD_PROXY_TOKEN
-  max_body_bytes: 20971520
-  neubird_destinations:
-    hosts:                        # the only systems the proxy will call
-      - splunk.corp.example:8089
-      - elastic.corp.example:9200
-      - example.service-now.com
-    methods: [GET, HEAD, POST]
-    client_auth: header
-    client_auth_header: X-Neubird-Proxy-Token
-    request_deny_patterns:
-      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|dbxoutput|dbxquery|sendresults)\\b"
-    rate_limit: {requests_per_second: 10, burst: 30}
-  redaction:
-    mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
-networkPolicy:
-  enabled: true
-  inboundFrom: [{ipBlock: {cidr: <APIM subnet or IP>}}]
-  upstreams:
-    - {cidr: <Splunk range>, ports: [8089]}
-    - {cidr: <Elastic range>, ports: [9200]}
-```
+Fill in [`values.yaml`](values.yaml), then:
 
 ```sh
-helm install neubird-proxy ./neubird-proxy -n neubird -f metlife-values.yaml
+helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml
 ```
 
 Notes:
@@ -107,7 +65,7 @@ The `starting` line should show `"tls":true` and `"tunnel":false`. Review each `
 
 ## Configure APIM
 
-Create one API per system. Each API's backend is the proxy, and its **operations list only the read endpoints NeuBird needs**, not `/*`. APIM is the path allowlist; the proxy does not filter paths.
+Create one API per system, with its backend set to `https://<proxy host>/_neubird/dest` and the matching policy file. Its **operations list only the endpoints below**, not `/*`. APIM is the path allowlist; the proxy does not filter paths.
 
 ### Named values and certificate
 
@@ -119,71 +77,22 @@ Create one API per system. Each API's backend is the proxy, and its **operations
 | `elastic-api-key` | yes | An Elasticsearch API key (read-only role) |
 | Certificate `neubird-proxy-client` | — | APIM's client certificate (PFX), signed by the CA in `inbound.clientCA` |
 
-### Splunk API policy
+### Operations
 
-```xml
-<policies>
-  <inbound>
-    <base />
-    <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
-    <set-header name="Authorization" exists-action="delete" />
-    <!-- Splunk's REST API takes "Splunk <token>"; its MCP server takes "Bearer <token>". -->
-    <choose>
-      <when condition="@(context.Request.OriginalUrl.Path.Contains(&quot;/services/mcp&quot;))">
-        <set-header name="X-Neubird-Upstream-Authorization" exists-action="override">
-          <value>Bearer {{splunk-token}}</value>
-        </set-header>
-      </when>
-      <otherwise>
-        <set-header name="X-Neubird-Upstream-Authorization" exists-action="override">
-          <value>Splunk {{splunk-token}}</value>
-        </set-header>
-      </otherwise>
-    </choose>
-    <set-header name="X-Neubird-Destination" exists-action="override">
-      <value>https://splunk.corp.example:8089</value>
-    </set-header>
-    <set-header name="X-Neubird-Proxy-Token" exists-action="override">
-      <value>{{neubird-proxy-token}}</value>
-    </set-header>
-    <authentication-certificate certificate-id="neubird-proxy-client" />
-  </inbound>
-  <backend>
-    <!-- MCP responses stream (SSE): don't buffer them. -->
-    <forward-request buffer-response="false" timeout="300" />
-  </backend>
-  <outbound><base /></outbound>
-  <on-error><base /></on-error>
-</policies>
-```
+Exactly what NeuBird calls. Anything else, including `DELETE`, `PUT` and `_delete_by_query`, is answered 404 by APIM.
 
-- **Backend URL:** `https://<proxy host>/_neubird/dest`.
-- **Operations** (exactly what NeuBird calls):
+**Splunk** ([`splunk-policy.xml`](splunk-policy.xml): `Bearer` for MCP, `Splunk` for REST, unbuffered MCP streams)
 
-  | Method | URL template | Used for |
-  |---|---|---|
-  | POST | `/services/mcp` | MCP tools |
-  | POST | `/services/search/jobs` | Searches (oneshot) |
-  | GET | `/services/data/indexes` | Index list |
-  | GET | `/services/server/info` | Connection diagnostics |
+| Method | URL template | Used for |
+|---|---|---|
+| POST | `/services/mcp` | MCP tools |
+| POST | `/services/search/jobs` | Searches (oneshot) |
+| GET | `/services/data/indexes` | Index list |
+| GET | `/services/server/info` | Connection diagnostics |
 
-  The REST calls use `Splunk {{splunk-token}}`, so the token must be valid for Splunk's REST API as well as its MCP server, or use MCP only and drop the REST operations.
-- **ServiceNow:** the same policy, with `X-Neubird-Destination: https://example.service-now.com`, the credential `{{servicenow-credential}}` (no scheme switch), and operations such as `GET /api/now/table/{table}`.
+The REST calls use `Splunk {{splunk-token}}`, so the token must be valid for Splunk's REST API as well as its MCP server, or use MCP only and drop the REST operations.
 
-### Elastic API
-
-The same policy as Splunk, with no scheme switch, a 120-second timeout and buffered responses:
-
-```xml
-<set-header name="X-Neubird-Upstream-Authorization" exists-action="override">
-  <value>ApiKey {{elastic-api-key}}</value>
-</set-header>
-<set-header name="X-Neubird-Destination" exists-action="override">
-  <value>https://elastic.corp.example:9200</value>
-</set-header>
-```
-
-Operations (exactly what NeuBird calls):
+**Elasticsearch** ([`elastic-policy.xml`](elastic-policy.xml))
 
 | Method | URL templates |
 |---|---|
@@ -192,7 +101,7 @@ Operations (exactly what NeuBird calls):
 | HEAD | `/` |
 | POST | `/_search`, `/{index}/_search`, `/_msearch`, `/{index}/_msearch` |
 
-Anything else, including `DELETE`, `PUT` and `_delete_by_query`, is answered 404 by APIM.
+**ServiceNow** ([`servicenow-policy.xml`](servicenow-policy.xml)): the Table API reads NeuBird uses, e.g. `GET /api/now/table/{table}`.
 
 **Writes through MCP.** Read-only operations don't stop writes inside an MCP `POST`: a tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes or sends data, and that is the only guard on this path. Extend the patterns if your Splunk has other write commands.
 
