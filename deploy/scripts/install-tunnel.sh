@@ -10,11 +10,16 @@
 # chart, or a packaged .tgz), UPSTREAM_CA (a CA bundle for upstreamCA),
 # TIMEOUT (seconds to wait for the tunnels, 300). Nothing secret is printed.
 set -euo pipefail
-cd "$(dirname "$0")/../.."
 : "${KUBE_CONTEXT:?}" "${VALUES:?}" "${RELAY_CA:?}"
+# Paths are the caller's: make them absolute (and check them) up front.
+abs() { [ -e "$1" ] || { printf 'FAIL  %s: no such file\n' "$1" >&2; exit 1; }; (cd "$(dirname "$1")" && printf '%s/%s' "$(pwd)" "$(basename "$1")"); }
+VALUES=$(abs "$VALUES"); RELAY_CA=$(abs "$RELAY_CA")
+[ -n "${UPSTREAM_CA:-}" ] && UPSTREAM_CA=$(abs "$UPSTREAM_CA")
+[ -n "${JOIN_TOKEN_FILE:-}" ] && JOIN_TOKEN_FILE=$(abs "$JOIN_TOKEN_FILE")
 NAMESPACE=${NAMESPACE:-neubird}
 RELEASE=${RELEASE:-neubird-proxy}
-CHART=${CHART:-deploy/helm/neubird-proxy}
+CHART=${CHART:-$(cd "$(dirname "$0")/../helm/neubird-proxy" && pwd)}
+[ -d "$CHART" ] || [ -f "$CHART" ] || CHART=$(abs "$CHART")
 TIMEOUT=${TIMEOUT:-300}
 SECRET=$(python3 -c "import yaml,sys; print((yaml.safe_load(open(sys.argv[1])).get('env') or {}).get('existingSecret') or 'neubird-proxy-env')" "$VALUES")
 k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
@@ -64,12 +69,14 @@ if grep -q 'mask: hmac' <<<"$config"; then
 fi
 
 step "helm upgrade --install $RELEASE"
+gen_before=""; [ -n "$existed" ] && gen_before=$(k get "deploy/$existed" -o jsonpath='{.metadata.generation}')
 helm --kube-context "$KUBE_CONTEXT" upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" "${args[@]}" >/dev/null
 ok "installed"
 dep=$(find_dep); [ -n "$dep" ] || die "no Deployment for release $RELEASE"
 # Pods read the Secret only at start, and a Secret change alone doesn't roll
-# them: restart an existing install so it picks up the new join token.
-if [ -n "${token_added:-}" ] && [ -n "$existed" ]; then
+# them. If the upgrade didn't roll them either (same generation), restart, so
+# they read the new join token; never both, which would roll twice.
+if [ -n "${token_added:-}" ] && [ -n "$existed" ] && [ "$(k get "deploy/$dep" -o jsonpath='{.metadata.generation}')" = "$gen_before" ]; then
   k rollout restart "deploy/$dep" >/dev/null; ok "restarted deploy/$dep to read the join token"
 fi
 
@@ -78,14 +85,18 @@ step "enrollment and tunnels (up to ${TIMEOUT}s)"
 # stop at once. A refused tunnel can be transient (a relay replica that hasn't
 # seen a just-enrolled key yet), so it fails only if no tunnel connects within
 # a minute of the first refusal.
-end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""
+end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""; ready=""
 while [ $SECONDS -lt $end ]; do
   logs=$(k logs -l "app.kubernetes.io/instance=$RELEASE" --tail=-1 2>/dev/null || true)
   grep -qE '"msg":"(enrolled with the join token|key already enrolled)"' <<<"$logs" && enrolled=1
-  r=$(grep -oE 'enrollment: relay refused[^"]*' <<<"$logs" | tail -1 || true)
+  # "relay refused: <reason>" is the relay's answer; "relay refused the
+  # enrollment (...)" is a connection error the proxy retries.
+  r=$(grep -oE 'enrollment: relay refused: [^"]*' <<<"$logs" | tail -1 || true)
   [ -n "$r" ] && [ -z "$enrolled" ] && die "$r (ask NeuBird for a new join token)"
   connected=$(grep -c '"msg":"tunnel connected"' <<<"$logs" || true)
-  [ "$connected" -gt 0 ] && k rollout status "deploy/$dep" --timeout=5s >/dev/null 2>&1 && break
+  # Ready means the rollout finished: in tunnel mode a pod is ready only with
+  # a tunnel up, so old pods' log lines can't stand in for it.
+  if k rollout status "deploy/$dep" --timeout=5s >/dev/null 2>&1; then ready=1; break; fi
   t=$(grep -oE 'relay refused the tunnel[^"]*' <<<"$logs" | tail -1 || true)
   if [ -n "$t" ] && [ "$connected" -eq 0 ]; then
     refused_at=${refused_at:-$SECONDS}
@@ -93,7 +104,7 @@ while [ $SECONDS -lt $end ]; do
   fi
   sleep 5
 done
-[ "$connected" -gt 0 ] || die "no tunnel connected; last errors: $(grep -oE '"msg":"tunnel connect failed"[^}]*' <<<"$logs" | tail -1)"
+[ -n "$ready" ] || die "deploy/$dep not ready after ${TIMEOUT}s; last errors: $(grep -oE '"msg":"tunnel connect failed"[^}]*' <<<"$logs" | tail -1)"
 ok "${enrolled:+key enrolled; }$connected tunnel connection(s); pods ready"
 
 step "test the tunnel and each system"
