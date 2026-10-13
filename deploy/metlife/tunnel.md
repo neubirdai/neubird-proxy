@@ -93,6 +93,35 @@ On this path the Splunk token is held by NeuBird, in the connection, and sent wi
 
 **Writes through MCP.** A tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes, sends data or reaches other systems (including `| rest`), and nothing else on this path does: there is no APIM to restrict paths. Give the Splunk token a read-only role, and extend the patterns if your Splunk has other write commands.
 
+## Splunk directly or through APIM
+
+The tunnel works either way; what differs is the proxy's upstream. This guide calls Splunk directly. metlifemirror's stand-in proxy (namespace `metlifemirror-proxy` on NeuBird's prod_cluster) goes through MetLife's APIM instead, because it runs outside MetLife's network.
+
+| | Through APIM (metlifemirror stand-in) | Directly (this guide) |
+|---|---|---|
+| Proxy's upstream | `https://int.apis.metlife.com/external/poc/splunk` | `https://splunk.metlife.com:8089` |
+| Network | Reachable from the internet | Only inside MetLife's network: the proxy must run there |
+| Splunk credential | APIM adds it | Sent with each request: a token with a read-only role |
+| APIM subscription key | Sent with each request | None |
+| Splunk's certificate | Public (the gateway's) | Possibly MetLife's internal CA: add it as `upstreamCA` |
+| Paths and methods | APIM's published operations, then the proxy | The proxy only |
+| Writes inside searches | `request_deny_patterns` | `request_deny_patterns`: the only guard |
+| Gateway or WAF refusals | Possible (fast 403s before Splunk sees the search) | None |
+
+Unchanged either way: the relay, the tunnel, NeuBird's connection URL (`http://neubird-relay.metlifemirror.svc.cluster.local:8080/...`) and the proxy token.
+
+To move the stand-in from APIM to Splunk directly:
+1. Point its upstream at `https://splunk.metlife.com:8089`.
+2. Replace the APIM subscription key with a read-only Splunk token, sent as `Authorization: Splunk <token>`, and remove the key from the Secret.
+3. Add MetLife's CA bundle if Splunk's certificate comes from it.
+4. Give the proxy a route to `splunk.metlife.com:8089`. From NeuBird's prod_cluster there is none today; that needs a private link into MetLife, or the proxy moved into MetLife's network (the rest of this guide).
+
+Check reachability from a proxy pod before switching (DNS, TCP and TLS only; no request is sent):
+
+```sh
+kubectl -n <namespace> exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml https://splunk.metlife.com:8089
+```
+
 ## Cutting NeuBird off
 
 Any of these, at any time:
