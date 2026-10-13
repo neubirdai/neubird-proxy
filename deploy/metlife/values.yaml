@@ -72,3 +72,6 @@ networkPolicy:
   upstreams:
     - {cidr: <Splunk range>, ports: [8089]}
     - {cidr: <egress proxy>/32, ports: [3128]}   # ServiceNow and the relay, via HTTPS_PROXY
+  # Prometheus may scrape :9090; empty blocks all inbound traffic.
+  metricsFrom: []
+  #  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
