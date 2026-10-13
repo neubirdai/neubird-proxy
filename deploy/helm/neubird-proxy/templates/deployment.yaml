@@ -71,7 +71,12 @@ spec:
             httpGet: {path: /healthz, port: admin}
             periodSeconds: 10
           resources: {{- toYaml .Values.resources | nindent 12 }}
+          # The user repeats the pod's: admission policies (OPA Gatekeeper,
+          # Kyverno) may check each container's own securityContext.
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}

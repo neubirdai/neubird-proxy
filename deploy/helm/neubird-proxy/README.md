@@ -149,6 +149,9 @@ Secrets in the namespace can read it either way.
 
 - Runs as non-root (65532), read-only root filesystem, no capabilities,
   `RuntimeDefault` seccomp: fits Pod Security `restricted`.
+- Every container's own `securityContext` sets `runAsUser: 65532` and
+  `allowPrivilegeEscalation: false`, not just the pod's, for admission
+  policies (OPA Gatekeeper, Kyverno) that check each container.
 - No service-account token, no RBAC, no CRDs, no cluster-scoped objects.
 - Only outbound connections in mode `tunnel`; in mode `inbound`, only port
   8443 is exposed. The admin port (9090: health, metrics) has no Service;

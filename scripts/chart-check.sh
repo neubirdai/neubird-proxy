@@ -101,6 +101,48 @@ if helm template p /chart "${iargs[@]}" --set inbound.tls.existingSecret= --set 
 fi
 echo "ok    mode inbound refuses missing or conflicting values"
 
+# Admission policies such as OPA Gatekeeper's check each container's own
+# securityContext, not the pod's: a non-root runAsUser and no privilege
+# escalation, in every container of both modes.
+python3 - "$W/out.yaml" "$W/in.yaml" <<'PY3' || fail "a container's securityContext fails per-container admission"
+import re, sys
+def indent(s): return len(s) - len(s.lstrip())
+def block(lines, i):
+    """The lines nested under lines[i]."""
+    out = []
+    for s in lines[i + 1:]:
+        if s.strip() and indent(s) <= indent(lines[i]):
+            break
+        out.append(s)
+    return out
+checked = 0
+for path in sys.argv[1:]:
+    lines = open(path).read().splitlines()
+    for i, line in enumerate(lines):
+        if not re.fullmatch(r" *(initContainers|containers):", line):
+            continue
+        body = [s for s in block(lines, i) if s.strip()]
+        dash, items = indent(body[0]), []
+        for s in body:
+            if indent(s) == dash and s.lstrip().startswith("- "):
+                items.append([" " * (dash + 2) + s.lstrip()[2:]])
+            else:
+                items[-1].append(s)
+        for item in items:
+            name = re.search(r"name: (\S+)", "\n".join(item)).group(1)
+            sc = [k for k, s in enumerate(item) if s.strip() == "securityContext:" and indent(s) == dash + 2]
+            fields = "\n".join(block(item, sc[0])) if sc else ""
+            user = re.search(r"^ *runAsUser: (\d+)$", fields, re.M)
+            if not user or user.group(1) == "0":
+                sys.exit(f"{path}: container {name}: no non-root runAsUser in its securityContext")
+            if not re.search(r"^ *allowPrivilegeEscalation: false$", fields, re.M):
+                sys.exit(f"{path}: container {name}: no allowPrivilegeEscalation: false in its securityContext")
+            checked += 1
+if not checked:
+    sys.exit("no containers found in the rendered chart")
+PY3
+echo "ok    every container sets a non-root runAsUser and allowPrivilegeEscalation: false"
+
 # What ships to customers: the packaged chart must not name NeuBird's
 # internal registries, tenants, clusters or repositories.
 helm package /chart -d /w >/dev/null || fail "helm package"
