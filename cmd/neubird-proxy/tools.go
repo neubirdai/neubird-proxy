@@ -183,6 +183,7 @@ func clientRequest(c *config.Connection, method, path string, body []byte, conte
 		token = c.ClientTokens[0]
 	}
 	switch c.ClientAuth {
+	case config.AuthNone:
 	case config.AuthBasic:
 		req.SetBasicAuth("neubird", token)
 	case config.AuthHeader:

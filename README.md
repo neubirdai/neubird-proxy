@@ -34,7 +34,10 @@ connection). In order; the first check that fails ends the request.
    so a path can't be normalized upstream into a different API.
 3. **Token.** The proxy token, in the form `client_auth` sets (a Bearer
    token, a Basic password, or a named header). Tokens shorter than 32
-   characters are refused at startup.
+   characters are refused at startup. A tunnel-only proxy (`listen: "off"`)
+   may set `client_auth: none` instead: every request then arrives over the
+   mutually authenticated tunnel the proxy opened to its relay, and no token
+   is checked. A proxy with an inbound listener always needs a token.
 4. **Destination.** The host must match `neubird_destinations.hosts`, or the
    request gets `403 destination_not_allowed`. This is checked after the
    token, so a caller without it learns nothing about the hosts.
@@ -132,7 +135,8 @@ With the fingerprint:
 3. Put the key and relay CA in a Secret mounted at the paths above.
 
 Either way, generate the proxy token with `neubird-proxy token` and give it
-to NeuBird through your usual secure channel.
+to NeuBird through your usual secure channel, unless the proxy is
+tunnel-only with `client_auth: none`, which needs no token.
 
 Nothing expires: the proxy re-mints its certificate on every connect.
 To rotate the key, run `keygen` again, send NeuBird the new fingerprint,
@@ -242,7 +246,8 @@ How the proxy handles the systems' credentials:
 `GET /_neubird/status` with `Authorization: Bearer <proxy token>` tells
 NeuBird how to send requests: how the token is sent (`client_auth`) and
 which credential headers the proxy forwards. Nothing about hosts or
-secrets. Any other token gets a 401.
+secrets. Any other token gets a 401. With `client_auth: none` it answers
+without a token and reports `"client_auth": "none"`, so NeuBird sends none.
 
 ## Redaction
 
@@ -394,7 +399,7 @@ refuses to start. Unknown YAML fields are errors.
 | `neubird_destinations.request_headers` | none | Client headers to forward in addition to the defaults (Accept, Content-Type, User-Agent, conditional and MCP headers). Credentials, cookies and APIM trace headers are refused |
 | `neubird_destinations.rate_limit` | none | `{requests_per_second, burst}` per pod, shared by every host |
 | `neubird_destinations.response_fields` | none | JSON field allowlist for every host's responses; see Redaction |
-| `neubird_destinations.client_auth` | `bearer` | How the proxy token is sent: `bearer`, `basic` (as the password) or `header` |
+| `neubird_destinations.client_auth` | `bearer` | How the proxy token is sent: `bearer`, `basic` (as the password) or `header`; or `none` on a tunnel-only proxy (`listen: "off"`): no token, and `client_token_env` isn't needed |
 | `neubird_destinations.client_auth_header` | none | Header name when `client_auth: header` |
 | `neubird_destinations.client_token_env` | top-level | A token for this section instead of the top-level one |
 | `tunnel.relays` | none | Relay `host:port` addresses; setting `tunnel` enables the outbound tunnel |

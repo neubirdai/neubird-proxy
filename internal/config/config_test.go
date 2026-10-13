@@ -260,3 +260,41 @@ func TestNeubirdDestinations(t *testing.T) {
 		}
 	}
 }
+
+// client_auth: none is for a tunnel-only proxy only, and then needs no token
+// in the environment (even with client_token_env set, as the chart does).
+func TestClientAuthNone(t *testing.T) {
+	tunnel := "listen: \"off\"\ntunnel: {relays: ['r:443'], tenant: a, proxy: p, key_file: k, ca_file: ca}\n"
+	noEnv := env(map[string]string{})
+	for name, y := range map[string]string{
+		"destinations":            tunnel + "neubird_destinations: {client_auth: none}\n",
+		"connection":              tunnel + "connections: [{name: a, upstream: 'https://x', client_auth: none}]\n",
+		"unused client_token_env": tunnel + "client_token_env: NEUBIRD_PROXY_TOKEN\nneubird_destinations: {client_auth: none}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := Parse([]byte(y), noEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, conn := range c.Connections {
+				if conn.ClientAuth != AuthNone || len(conn.ClientTokens) != 0 {
+					t.Fatalf("%+v", conn)
+				}
+			}
+		})
+	}
+	for name, tc := range map[string]struct{ yaml, want string }{
+		"inbound listener":         {"neubird_destinations: {client_auth: none}\n", "only for a tunnel-only proxy"},
+		"inbound + tunnel":         {"tunnel: {relays: ['r:443'], tenant: a, proxy: p, key_file: k, ca_file: ca}\nneubird_destinations: {client_auth: none}\n", "only for a tunnel-only proxy"},
+		"with token env":           {tunnel + "neubird_destinations: {client_auth: none, client_token_env: T}\n", "takes no client_token_env"},
+		"with header":              {tunnel + "neubird_destinations: {client_auth: none, client_auth_header: X-T}\n", "takes no client_token_env or client_auth_header"},
+		"other conn needs a token": {tunnel + "neubird_destinations: {client_auth: none}\nconnections: [{name: a, upstream: 'https://x'}]\n", "no client token"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.yaml), noEnv)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}

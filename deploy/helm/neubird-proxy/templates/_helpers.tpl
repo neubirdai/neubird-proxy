@@ -79,6 +79,12 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- if eq (include "neubird-proxy.mode" .) "inbound" -}}true{{- end -}}
 {{- end -}}
 
+{{/* "true" when NeuBird's requests take no proxy token
+(neubird_destinations.client_auth: none, mode tunnel only). */}}
+{{- define "neubird-proxy.noToken" -}}
+{{- if eq (toString (dig "neubird_destinations" "client_auth" "" (.Values.config | default dict))) "none" -}}true{{- end -}}
+{{- end -}}
+
 {{- define "neubird-proxy.clientCAConfigMap" -}}
 {{- default (printf "%s-client-ca" (include "neubird-proxy.fullname" .)) .Values.inbound.clientCA.existingConfigMap -}}
 {{- end -}}
@@ -100,6 +106,7 @@ tunnel section and listen: off, or listen: :8443 and tls. */}}
 {{- if include "neubird-proxy.inbound" . -}}
 {{- $in := .Values.inbound -}}
 {{- if .Values.tunnel.relays -}}{{- fail "tunnel.relays: mode inbound has no tunnel; leave tunnel out (or use mode: tunnel)" -}}{{- end -}}
+{{- if include "neubird-proxy.noToken" . -}}{{- fail "neubird_destinations.client_auth: none is for mode tunnel only; an inbound listener needs a proxy token" -}}{{- end -}}
 {{- $_ := set $cfg "listen" $listen -}}
 {{- if $in.tls.existingSecret -}}
 {{- $tls := dict "cert_file" "/etc/neubird-proxy/tls/tls.crt" "key_file" "/etc/neubird-proxy/tls/tls.key" -}}

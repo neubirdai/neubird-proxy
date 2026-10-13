@@ -55,7 +55,7 @@ what the proxy will forward, the network what the pod can reach at all.
 | `request_headers` | | Extra client headers to forward; credentials and cookies are always refused |
 | `rate_limit` | | `{requests_per_second, burst}`, per replica, shared by every host |
 | `response_fields` | | JSON field allowlist for every host's responses: every other field is masked whatever it contains |
-| `client_auth` | `bearer` | How NeuBird presents the proxy token: `bearer`, `basic` (as password), or `header` |
+| `client_auth` | `bearer` | How NeuBird presents the proxy token: `bearer`, `basic` (as password), or `header`; or `none` in mode `tunnel` (no inbound listener): no proxy token, since every request comes down the proxy's own mutually authenticated tunnel |
 | `client_auth_header` | | Header name when `client_auth: header` |
 | `client_token_env` | top-level | A token for this section only |
 
@@ -64,7 +64,7 @@ what the proxy will forward, the network what the pod can reach at all.
 | Credential | Held by | NeuBird sees it |
 |---|---|---|
 | Your systems' credentials (API tokens, OAuth tokens, gateway keys) | NeuBird, in each of its connections | Yes: it sends them with each request, in `credential_headers` |
-| Proxy token (`client_token_env`) | Both: you generate it and enter it in NeuBird | Yes; the proxy checks it and removes it, it never reaches your systems |
+| Proxy token (`client_token_env`) | Both: you generate it and enter it in NeuBird; none with `client_auth: none` | Yes; the proxy checks it and removes it, it never reaches your systems |
 | Tunnel key | You; generated in the cluster | No; only its public fingerprint |
 | `REDACTION_HMAC_KEY` | You | No |
 

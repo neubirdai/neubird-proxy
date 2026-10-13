@@ -49,6 +49,10 @@ const (
 	AuthBearer = "bearer" // Authorization: Bearer <token>
 	AuthBasic  = "basic"  // Authorization: Basic <any user>:<token>
 	AuthHeader = "header" // <client_auth_header>: <token>
+	// AuthNone takes no proxy token: only for a tunnel-only proxy
+	// (listen: off), where every request arrives over a tunnel the proxy
+	// opened itself to its NeuBird relay, with mutual TLS.
+	AuthNone = "none"
 )
 
 // UpstreamCredentialPrefix marks a request header carrying a NeuBird-held
@@ -439,12 +443,22 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		}
 		return v
 	}
+	// The top-level tokens are read only if a connection uses them, so a
+	// proxy whose connections all take client_auth: none needs no token in
+	// its environment.
 	var defaultTokens []string
-	if c.ClientTokenEnv != "" {
-		defaultTokens = append(defaultTokens, token("client_token_env", c.ClientTokenEnv))
-	}
-	if c.ClientTokenPreviousEnv != "" {
-		defaultTokens = append(defaultTokens, token("client_token_previous_env", c.ClientTokenPreviousEnv))
+	defaultsRead := false
+	readDefaultTokens := func() []string {
+		if !defaultsRead {
+			defaultsRead = true
+			if c.ClientTokenEnv != "" {
+				defaultTokens = append(defaultTokens, token("client_token_env", c.ClientTokenEnv))
+			}
+			if c.ClientTokenPreviousEnv != "" {
+				defaultTokens = append(defaultTokens, token("client_token_previous_env", c.ClientTokenPreviousEnv))
+			}
+		}
+		return defaultTokens
 	}
 
 	if t := c.Tunnel; t != nil {
@@ -555,15 +569,6 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			}
 		}
 
-		switch {
-		case conn.ClientTokenEnv != "":
-			conn.ClientTokens = []string{token(where+": client_token_env", conn.ClientTokenEnv)}
-		case len(defaultTokens) > 0:
-			conn.ClientTokens = defaultTokens
-		default:
-			fail("%s: no client token; set client_token_env here or at the top level", where)
-		}
-
 		u, err := url.Parse(conn.Upstream)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 			fail("%s: upstream must be an absolute http(s) URL", where)
@@ -580,7 +585,25 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		if conn.ClientAuth == "" {
 			conn.ClientAuth = AuthBearer
 		}
+		if conn.ClientAuth == AuthNone {
+			switch {
+			case c.Listen != ListenOff || c.Tunnel == nil:
+				fail("%s: client_auth: none is only for a tunnel-only proxy (listen: off with a tunnel section); an inbound listener always needs a token", where)
+			case conn.ClientTokenEnv != "" || conn.ClientAuthHeader != "":
+				fail("%s: client_auth: none takes no client_token_env or client_auth_header", where)
+			}
+		} else {
+			switch {
+			case conn.ClientTokenEnv != "":
+				conn.ClientTokens = []string{token(where+": client_token_env", conn.ClientTokenEnv)}
+			case len(readDefaultTokens()) > 0:
+				conn.ClientTokens = defaultTokens
+			default:
+				fail("%s: no client token; set client_token_env here or at the top level (or client_auth: none on a tunnel-only proxy)", where)
+			}
+		}
 		switch conn.ClientAuth {
+		case AuthNone:
 		case AuthBearer, AuthBasic:
 			if conn.ClientAuthHeader != "" {
 				fail("%s: client_auth_header only applies to client_auth: header", where)
@@ -598,7 +621,7 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 				fail("%s: client_auth_header %s can't carry the proxy token", where, ch)
 			}
 		default:
-			fail("%s: client_auth must be bearer, basic or header", where)
+			fail("%s: client_auth must be bearer, basic, header or none", where)
 		}
 
 		conn.ResolvedHeaders = map[string]string{}

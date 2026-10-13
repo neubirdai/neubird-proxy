@@ -164,7 +164,8 @@ Secrets in the namespace can read it either way.
 - **Cut NeuBird off**: scale to 0 (tunnels close at once), or change
   `NEUBIRD_PROXY_TOKEN` and `kubectl rollout restart` the Deployment: the
   token is read at startup, so running pods accept the old one until they
-  restart.
+  restart. With `client_auth: none` (mode `tunnel` only) there is no token:
+  scale to 0, or ask NeuBird to revoke the tunnel key at the relay.
 - **Rotate the key**: create a new key Secret, send NeuBird its fingerprint,
   switch `tunnelKey.existingSecret` once NeuBird confirms.
 - **Upgrade**: load the new image, set `image.digest`, `helm upgrade`. The key is kept.

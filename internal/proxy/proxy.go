@@ -1027,6 +1027,10 @@ func (s *Server) anyTokenValid(r *http.Request) bool {
 func (s *Server) authenticate(c *config.Connection, r *http.Request) bool {
 	var presented string
 	switch c.ClientAuth {
+	case config.AuthNone:
+		// Tunnel-only (config enforces it): the request came down a
+		// mutually authenticated tunnel the proxy opened to its relay.
+		return true
 	case config.AuthBearer:
 		scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " ")
 		if !ok || !strings.EqualFold(scheme, "Bearer") {

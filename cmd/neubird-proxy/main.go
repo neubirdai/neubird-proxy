@@ -266,6 +266,14 @@ func warnings(cfg *config.Config) []string {
 	if cfg.ClientTokenPreviousEnv != "" {
 		out = append(out, "client_token_previous_env is set: two tokens are accepted until rotation is finished")
 	}
+	if d := cfg.NeubirdDestinations; d != nil && d.Conn != nil && d.Conn.ClientAuth == config.AuthNone {
+		out = append(out, "neubird_destinations: client_auth: none: requests from the NeuBird relay need no proxy token; cut NeuBird off by scaling to 0 or by NeuBird revoking the tunnel key")
+	}
+	for _, c := range cfg.Connections {
+		if c.ClientAuth == config.AuthNone {
+			out = append(out, fmt.Sprintf("connection %s: client_auth: none: requests from the NeuBird relay need no proxy token", c.Name))
+		}
+	}
 	if d := cfg.NeubirdDestinations; d != nil {
 		out = append(out, fmt.Sprintf("neubird_destinations: NeuBird chooses the destination host within %s and supplies the credentials", strings.Join(d.Hosts, ", ")))
 		for _, v := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {

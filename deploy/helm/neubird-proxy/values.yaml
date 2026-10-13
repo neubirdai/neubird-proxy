@@ -75,8 +75,10 @@ tunnelKey:
   existingSecret: ""      # a Secret with key tunnel.key
 
 # A Secret you create, loaded as environment: NEUBIRD_PROXY_TOKEN (NeuBird's
-# token, which you also enter in NeuBird's connection), REDACTION_HMAC_KEY
-# if config.redaction uses hmac, and every ${VAR} your connections use.
+# token, which you also enter in NeuBird's connection; not needed in mode
+# tunnel with config.neubird_destinations.client_auth: none),
+# REDACTION_HMAC_KEY if config.redaction uses hmac, and every ${VAR} your
+# connections use.
 env:
   existingSecret: ""
 
@@ -89,6 +91,7 @@ config:
   client_token_env: NEUBIRD_PROXY_TOKEN
   # neubird_destinations:
   #   hosts: ["*.corp.example.com"]   # optional; omitted means any host name
+  #   client_auth: none               # mode tunnel only: no proxy token
   # redaction:
   #   mask: hmac
   #   hmac_key_env: REDACTION_HMAC_KEY

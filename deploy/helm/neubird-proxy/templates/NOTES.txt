@@ -49,12 +49,23 @@ never leaves this cluster), and the tunnels come up once NeuBird records it:
    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "neubird-proxy.fullname" . }} -- \
      /neubird-proxy fingerprint /etc/neubird-proxy/tunnel/tunnel.key
 
+{{- if include "neubird-proxy.noToken" . }}
+
+Then, in NeuBird's UI, create each connection with access through the
+NeuBird proxy. client_auth is none: there is no proxy token to enter, since
+requests are accepted because they come down this proxy's own tunnels.
+
+Revoke access at any time by scaling this Deployment to 0, or by asking
+NeuBird to revoke the tunnel key at the relay.
+{{- else }}
+
 Then, in NeuBird's UI, create each connection with the URL NeuBird gives you,
 and the auth token = NEUBIRD_PROXY_TOKEN in Secret {{ .Values.env.existingSecret }}.
 
 Revoke access at any time by scaling this Deployment to 0, or by changing
 NEUBIRD_PROXY_TOKEN and restarting it (kubectl rollout restart): pods read
 the token at startup.
+{{- end }}
 {{- if and .Values.tunnelKey.generate (not .Values.tunnelKey.existingSecret) }}
 
 The tunnel key is in Secret {{ include "neubird-proxy.keySecret" . }} (kept on uninstall).
