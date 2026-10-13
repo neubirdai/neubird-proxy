@@ -103,6 +103,11 @@ tunnel section and listen: off, or listen: :8443 and tls. */}}
 {{- if hasKey $c "tls" -}}{{- fail "config.tls: set inbound.tls and inbound.clientCA instead" -}}{{- end -}}
 {{- if and (hasKey $c "admin_listen") (ne (toString $c.admin_listen) ":9090") -}}{{- fail "config.admin_listen: leave it out (the chart's probes use :9090)" -}}{{- end -}}
 {{- $cfg := merge (dict "admin_listen" ":9090") (deepCopy $c) -}}
+{{- /* No proxy token anywhere (client_auth: none, no named connections):
+leave out the default client_token_env, which nothing would read. */ -}}
+{{- if and (include "neubird-proxy.noToken" .) (not $c.connections) -}}
+{{- $_ := unset $cfg "client_token_env" -}}
+{{- end -}}
 {{- if include "neubird-proxy.inbound" . -}}
 {{- $in := .Values.inbound -}}
 {{- if .Values.tunnel.relays -}}{{- fail "tunnel.relays: mode inbound has no tunnel; leave tunnel out (or use mode: tunnel)" -}}{{- end -}}

@@ -232,12 +232,43 @@ type NeubirdDestinations struct {
 	RateLimit           *RateLimit `yaml:"rate_limit"`
 	ResponseFields      []string   `yaml:"response_fields"`
 	CredentialHeaders   []string   `yaml:"credential_headers"`
+	// HostMethods narrows methods for some hosts: the first rule whose hosts
+	// match the destination replaces methods for it (a subset of methods),
+	// e.g. read-only ServiceNow next to a Splunk that needs POST.
+	HostMethods []HostMethods `yaml:"host_methods"`
 
 	// Conn is the shared policy as a connection, resolved like any other;
 	// the proxy sets its upstream per request. Not routable by name.
 	Conn *Connection `yaml:"-"`
 	// Patterns are the parsed Hosts.
 	Patterns []HostPattern `yaml:"-"`
+}
+
+// HostMethods is one neubird_destinations.host_methods rule.
+type HostMethods struct {
+	Hosts   []string `yaml:"hosts"`
+	Methods []string `yaml:"methods"`
+
+	Patterns  []HostPattern   `yaml:"-"`
+	MethodSet map[string]bool `yaml:"-"`
+}
+
+// MethodsFor is the method set for a destination: the first host_methods
+// rule matching host:port, else the shared methods.
+func (d *NeubirdDestinations) MethodsFor(host, port string) map[string]bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	isIP := net.ParseIP(host) != nil
+	if isIP {
+		host = net.ParseIP(host).String()
+	}
+	for _, r := range d.HostMethods {
+		for _, p := range r.Patterns {
+			if p.Match(host, port, isIP) {
+				return r.MethodSet
+			}
+		}
+	}
+	return d.Conn.MethodSet
 }
 
 // DestinationsConnName labels open-mode requests in metrics and audit lines.
@@ -735,6 +766,36 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		}
 		if rl := conn.RateLimit; rl != nil && (rl.RequestsPerSecond <= 0 || rl.Burst <= 0) {
 			fail("%s: rate_limit needs positive requests_per_second and burst", where)
+		}
+	}
+
+	if d := c.NeubirdDestinations; d != nil {
+		for i := range d.HostMethods {
+			r := &d.HostMethods[i]
+			where := fmt.Sprintf("neubird_destinations.host_methods[%d]", i)
+			if len(r.Hosts) == 0 || len(r.Methods) == 0 {
+				fail("%s: hosts and methods are required", where)
+				continue
+			}
+			r.Patterns = nil
+			for j, h := range r.Hosts {
+				p, err := parseHostPattern(h)
+				if err != nil {
+					fail("%s.hosts[%d]: %v", where, j, err)
+					continue
+				}
+				r.Patterns = append(r.Patterns, p)
+			}
+			r.MethodSet = map[string]bool{}
+			for _, m := range r.Methods {
+				m = strings.ToUpper(m)
+				if !d.Conn.MethodSet[m] {
+					// Only narrowing: a rule can't allow what methods doesn't.
+					fail("%s: method %q is not in neubird_destinations.methods", where, m)
+					continue
+				}
+				r.MethodSet[m] = true
+			}
 		}
 	}
 

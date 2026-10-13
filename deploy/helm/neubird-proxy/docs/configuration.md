@@ -50,6 +50,7 @@ what the proxy will forward, the network what the pod can reach at all.
 |---|---|---|
 | `hosts` | `["*"]` | Host patterns NeuBird may name: `*`, `*.domain` (two or more labels), `host`, or an exact IP; each may end in `:port` |
 | `methods` | `[GET, HEAD]` | Allowed HTTP methods, for every host |
+| `host_methods` | | Narrower methods for some hosts: a list of `{hosts, methods}`; the first rule whose `hosts` match the destination replaces `methods` for it, and may only list methods `methods` allows (e.g. ServiceNow read-only next to a Splunk that needs POST) |
 | `request_deny_patterns` | | RE2 patterns; a match anywhere in the query or body, raw or URL-decoded, is refused (e.g. SPL commands that write or send) |
 | `credential_headers` | `[Authorization]` | Headers NeuBird may set for the system, sent as `X-Neubird-Upstream-<Header>` and forwarded as `<Header>`; `Host`, `Cookie`, `X-Forwarded-*`, APIM trace headers and transport headers are refused |
 | `request_headers` | | Extra client headers to forward; credentials and cookies are always refused |
