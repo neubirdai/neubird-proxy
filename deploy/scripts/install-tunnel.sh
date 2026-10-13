@@ -32,6 +32,16 @@ for d in yaml.safe_load_all(sys.stdin):
     if d and d.get('kind')=='ConfigMap' and 'config.yaml' in (d.get('data') or {}): print(d['data']['config.yaml'])")
 grep -q '^listen: "off"' <<<"$config" || die "not a tunnel-only proxy (mode: tunnel)"
 ok "tunnel mode; relays $(python3 -c "import sys,yaml; print(', '.join(yaml.safe_load(sys.stdin)['tunnel']['relays']))" <<<"$config")"
+# The variable the proxy reads its join token from (tunnel.joinTokenEnv).
+TOKEN_ENV=$(python3 -c "import sys,yaml; print(yaml.safe_load(sys.stdin)['tunnel'].get('join_token_env') or '')" <<<"$config")
+if [ -n "${JOIN_TOKEN_FILE:-}" ] && [ -z "$TOKEN_ENV" ]; then
+  die "the values have no tunnel.joinTokenEnv, so the proxy would ignore the join token: set tunnel.joinTokenEnv: NEUBIRD_JOIN_TOKEN"
+fi
+
+# The chart names the Deployment <release>-neubird-proxy unless the release
+# name already contains neubird-proxy: find it by label, not by name.
+find_dep() { k get deploy -l "app.kubernetes.io/instance=$RELEASE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true; }
+existed=$(find_dep)
 
 step "namespace and Secret $SECRET"
 kubectl --context "$KUBE_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl --context "$KUBE_CONTEXT" create namespace "$NAMESPACE" >/dev/null
@@ -44,7 +54,7 @@ put() { # put KEY FILE: add one key, keeping the others. The value goes in a
 }
 if [ -n "${JOIN_TOKEN_FILE:-}" ]; then
   grep -qE '^nbjt_[A-Za-z0-9_-]{43}$' "$JOIN_TOKEN_FILE" || die "$JOIN_TOKEN_FILE doesn't hold a join token"
-  put NEUBIRD_JOIN_TOKEN "$JOIN_TOKEN_FILE"; ok "join token added"
+  put "$TOKEN_ENV" "$JOIN_TOKEN_FILE"; ok "join token added as $TOKEN_ENV"; token_added=1
 fi
 if grep -q 'mask: hmac' <<<"$config"; then
   have=$(k get secret "$SECRET" -o jsonpath='{.data.REDACTION_HMAC_KEY}')
@@ -56,6 +66,12 @@ fi
 step "helm upgrade --install $RELEASE"
 helm --kube-context "$KUBE_CONTEXT" upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" "${args[@]}" >/dev/null
 ok "installed"
+dep=$(find_dep); [ -n "$dep" ] || die "no Deployment for release $RELEASE"
+# Pods read the Secret only at start, and a Secret change alone doesn't roll
+# them: restart an existing install so it picks up the new join token.
+if [ -n "${token_added:-}" ] && [ -n "$existed" ]; then
+  k rollout restart "deploy/$dep" >/dev/null; ok "restarted deploy/$dep to read the join token"
+fi
 
 step "enrollment and tunnels (up to ${TIMEOUT}s)"
 # Enrollment refusals (token expired, used, for another proxy) are final:
@@ -69,7 +85,7 @@ while [ $SECONDS -lt $end ]; do
   r=$(grep -oE 'enrollment: relay refused[^"]*' <<<"$logs" | tail -1 || true)
   [ -n "$r" ] && [ -z "$enrolled" ] && die "$r (ask NeuBird for a new join token)"
   connected=$(grep -c '"msg":"tunnel connected"' <<<"$logs" || true)
-  [ "$connected" -gt 0 ] && k rollout status "deploy/$RELEASE" --timeout=5s >/dev/null 2>&1 && break
+  [ "$connected" -gt 0 ] && k rollout status "deploy/$dep" --timeout=5s >/dev/null 2>&1 && break
   t=$(grep -oE 'relay refused the tunnel[^"]*' <<<"$logs" | tail -1 || true)
   if [ -n "$t" ] && [ "$connected" -eq 0 ]; then
     refused_at=${refused_at:-$SECONDS}
@@ -81,7 +97,6 @@ done
 ok "${enrolled:+key enrolled; }$connected tunnel connection(s); pods ready"
 
 step "test the tunnel and each system"
-dep=$(k get deploy -l "app.kubernetes.io/instance=$RELEASE" -o jsonpath='{.items[0].metadata.name}')
 k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml 2>&1 | grep -v 'Unknown stream id' || die "tunnel test failed"
 urls=$(python3 -c "
 import sys,yaml
@@ -92,9 +107,9 @@ if [ -n "$urls" ]; then
   k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml $urls 2>&1 | grep -v 'Unknown stream id' || die "a system failed its test"
 fi
 
-if [ -n "$enrolled" ] && [ -n "$(k get secret "$SECRET" -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}')" ]; then
+if [ -n "$enrolled" ] && [ -n "$TOKEN_ENV" ] && [ -n "$(k get secret "$SECRET" -o jsonpath="{.data.$TOKEN_ENV}")" ]; then
   step "remove the spent join token"
-  k patch secret "$SECRET" --type=json -p '[{"op":"remove","path":"/data/NEUBIRD_JOIN_TOKEN"}]' >/dev/null
-  ok "NEUBIRD_JOIN_TOKEN removed from $SECRET"
+  k patch secret "$SECRET" --type=json -p "[{\"op\":\"remove\",\"path\":\"/data/$TOKEN_ENV\"}]" >/dev/null
+  ok "$TOKEN_ENV removed from $SECRET"
 fi
 printf '\nDone. Tell NeuBird the proxy is up; they record the key and set up the connections.\n'
