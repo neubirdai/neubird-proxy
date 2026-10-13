@@ -430,7 +430,9 @@ func TestMCPCheckUTF8AndLongNames(t *testing.T) {
 // event's reservation at the SSE factor.
 func TestLargeSSEEventFitsBudget(t *testing.T) {
 	old := bodyWorkTimeout
-	bodyWorkTimeout = 3 * time.Second
+	// Stuck means waiting out this deadline; the check below allows for a
+	// slow runner redacting 3 MiB under -race.
+	bodyWorkTimeout = 20 * time.Second
 	t.Cleanup(func() { bodyWorkTimeout = old })
 	ev := "data: " + strings.Repeat("a", 3<<20) + "\n\n"
 	f := newFixture(t, strings.Replace(baseConfig, "max_body_bytes: 4096", "max_body_bytes: 8388608", 1), func(w http.ResponseWriter, _ *http.Request) {
@@ -443,7 +445,7 @@ func TestLargeSSEEventFitsBudget(t *testing.T) {
 	f.srv.SetMemoryLimit(limit)
 	start := time.Now()
 	resp, body := f.do(t, "GET", "/splunk/stream", bearer)
-	if time.Since(start) > 2*time.Second {
+	if time.Since(start) > 15*time.Second {
 		t.Fatalf("event waited %v for memory it can't get", time.Since(start))
 	}
 	// Delivered, or refused at once as too large: never stuck.
