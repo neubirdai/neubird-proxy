@@ -632,7 +632,7 @@ independently of the proxy's own checks:
 | Control | What it enforces |
 |---|---|
 | Own namespace, Pod Security `restricted` | The customer labels the namespace; the chart's pods meet `restricted`, so the cluster rejects any pod there that runs as root, escalates privileges, keeps Linux capabilities, mounts host paths or skips seccomp |
-| Pod security context | Non-root user 65532, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp |
+| Pod security context | Non-root user 65532, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp. The user and `allowPrivilegeEscalation: false` are set on each container too, for admission policies (OPA Gatekeeper) that check every container's own `securityContext` |
 | Service account | A dedicated one with no Role bindings, and its token isn't mounted: the proxy can't talk to the Kubernetes API |
 | No inbound port | Tunnel-only: the proxy dials out to the relay; nothing connects in |
 | NetworkPolicy (`networkPolicy.enabled`) | In: only the admin port, from `metricsFrom`. Out: DNS, the relay's addresses on 443, and the systems' listed ranges. Or a hostname policy from `neubird-proxy netpol` (below) |
