@@ -92,6 +92,10 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "neubird_destinations", strings.Join(d.Hosts, ","), d.Conn.ClientAuth,
 			allowHeaderOf(d.Conn.MethodSet), "any", tools, fields, "NeuBird credentials")
+		for _, r := range d.HostMethods {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "  host_methods", strings.Join(r.Hosts, ","), d.Conn.ClientAuth,
+				allowHeaderOf(r.MethodSet), "any", tools, fields, "NeuBird credentials")
+		}
 	}
 	tw.Flush()
 	fmt.Fprintf(stdout, "\nredaction: mask=%s, rules: %s\n", cfg.Redaction.Mask, strings.Join(engine.RuleNames(), ", "))

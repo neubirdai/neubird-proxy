@@ -531,6 +531,13 @@ func (s *Server) routeDest(r *http.Request) (*reqState, bool) {
 	}
 	conn.UpstreamURL = u
 	st.dest = u.Scheme + "://" + u.Host
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[u.Scheme]
+	}
+	if ms := s.dest.MethodsFor(u.Hostname(), port); ms != nil {
+		conn.MethodSet = ms
+	}
 	return st, true
 }
 

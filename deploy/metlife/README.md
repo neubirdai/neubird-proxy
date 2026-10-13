@@ -1,7 +1,7 @@
 # neubird-proxy at MetLife: through the tunnel
 
 ```
-NeuBird ─▶ relay ⇄ tunnel (dialed out by the proxy, :443, mutual TLS) ⇄ neubird-proxy (AKS) ─▶ Splunk
+NeuBird ─▶ relay ⇄ tunnel (dialed out by the proxy, :443, mutual TLS) ⇄ neubird-proxy (AKS) ─▶ Splunk, ServiceNow
 ```
 
 The proxy runs in MetLife's AKS and opens outbound tunnels to NeuBird's relay for MetLife; NeuBird's requests come back down those tunnels. Nothing connects in to MetLife: no load balancer, no inbound firewall rule. The proxy checks every request and redacts every response before it leaves MetLife.
@@ -75,8 +75,15 @@ helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
 
 Notes:
 - **`tunnel.proxy`** must be the name the join token is for.
-- **Egress:** the cluster must reach the relay on 443 (the addresses above) and Splunk. `networkPolicy.relayCIDRs` and `upstreams` allow exactly those, plus the egress proxy if `extraEnv` sets one.
-- **Memory limit:** keep the chart's default of 512 Mi or higher; responses are buffered up to `max_body_bytes`.
+- **Image:** use the release NeuBird names (with `client_auth: none` and `host_methods`), by digest.
+- **Egress:** the proxy reaches the relay on 443 (the addresses above), Splunk, and ServiceNow.
+  - ServiceNow is SaaS without fixed addresses, so a NetworkPolicy can't allow it by CIDR: send it, and the relay tunnel, through your egress proxy (`extraEnv` `HTTPS_PROXY`), and allow that proxy in `networkPolicy.upstreams`. `NO_PROXY` must cover the Splunk host.
+  - The egress proxy must allow CONNECT to `metlifemirror-tunnel.cluster.neubird.ai:443` and must not inspect TLS on it: the tunnel is mutual TLS end to end.
+  - Without an egress proxy, use an FQDN-aware egress policy (Azure Firewall, Cilium) for `<instance>.service-now.com`.
+- **Splunk's certificate:** it must name the host in `hosts` (Splunk's default certificate on 8089 names none and fails verification), and its CA goes in `upstreamCA`.
+- **ServiceNow credentials:** an API key travels in `x-sn-apikey`, OAuth or basic auth in `Authorization`; both are in `credential_headers`. Give the key a read-only role.
+- **Methods:** POST is allowed for Splunk (MCP and searches); `host_methods` keeps ServiceNow to GET and HEAD, so nothing can create records there. PUT, PATCH and DELETE are refused everywhere.
+- **Memory limit:** 640 Mi (as in the values) buffers responses up to the 20 MiB `max_body_bytes`; at 512 Mi the proxy refuses responses over about 19 MiB (15 MiB with `mask: hmac`) and says so at startup.
 
 ### 3. Check it
 
@@ -85,16 +92,22 @@ kubectl -n neubird rollout status deploy/neubird-proxy
 kubectl -n neubird logs -l app=neubird-proxy --tail=-1 --prefix \
   | grep -E '"msg":"(starting|enrolled with the join token|key already enrolled|tunnel connected|tunnel connect failed|risky configuration)"'
 kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml
-kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml https://splunk.corp.example:8089
+kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml \
+  https://splunk.corp.example:8089 https://<instance>.service-now.com
 ```
 
-The pods turn ready only once a tunnel is up. The `starting` line should show `"tunnel":true`. A `risky configuration` warning for `client_auth: none` is expected. Once the proxy has enrolled, delete `NEUBIRD_JOIN_TOKEN` from the Secret; it can't be used again anyway.
+The pods turn ready only once a tunnel is up. The `starting` line should show `"tunnel":true`. A `risky configuration` warning for `client_auth: none` is expected. Once the proxy has enrolled, delete `NEUBIRD_JOIN_TOKEN` from the Secret (`kubectl -n neubird patch secret neubird-proxy-env --type=json -p '[{"op":"remove","path":"/data/NEUBIRD_JOIN_TOKEN"}]'`); it can't be used again anyway.
 
 ## Connect NeuBird
 
-In NeuBird, add Splunk as a connection, with its URL (for example `https://splunk.corp.example:8089/services/mcp`) and its token, then choose access through the NeuBird proxy. The relay is fixed for MetLife's NeuBird deployment, and there is no proxy token to enter.
+In NeuBird, add each system as a connection and choose access through the NeuBird proxy. The relay is fixed for MetLife's NeuBird deployment, and there is no proxy token to enter.
 
-On this path the Splunk token is held by NeuBird, in the connection, and sent with each request; the proxy forwards it only to hosts in `neubird_destinations.hosts`.
+| System | URL | Credential |
+|---|---|---|
+| Splunk | `https://splunk.corp.example:8089/services/mcp` | Splunk token (read-only role) |
+| ServiceNow | `https://<instance>.service-now.com` | API access key (read-only role) |
+
+On this path the credentials are held by NeuBird, in the connections, and sent with each request; the proxy forwards each only to its own system, which must be in `neubird_destinations.hosts`.
 
 **Writes through MCP.** A tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes, sends data or reaches other systems (including `| rest`), and nothing else on this path does: there is no APIM to restrict paths. Give the Splunk token a read-only role, and extend the patterns if your Splunk has other write commands.
 
