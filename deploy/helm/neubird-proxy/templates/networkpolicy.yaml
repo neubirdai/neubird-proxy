@@ -35,7 +35,10 @@ spec:
         {{- range $np.relayCIDRs }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
-      ports: [{port: 443, protocol: TCP}]
+      ports:
+        {{- range ($np.relayPorts | default (list 443)) }}
+        - {port: {{ . }}, protocol: TCP}
+        {{- end }}
     {{- end }}
     {{- range $np.upstreams }}
     - to: [{ipBlock: {cidr: {{ .cidr }}}}]

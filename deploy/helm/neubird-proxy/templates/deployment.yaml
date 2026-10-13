@@ -56,6 +56,9 @@ spec:
           args: [-config, /etc/neubird-proxy/config.yaml]
           envFrom:
             - secretRef: {name: {{ .Values.env.existingSecret }}}
+          {{- with .Values.extraEnv }}
+          env: {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             {{- if $inbound }}
             - {name: proxy, containerPort: 8443}

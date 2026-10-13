@@ -80,6 +80,15 @@ tunnelKey:
 env:
   existingSecret: ""
 
+# Extra, non-secret environment for the proxy container (EnvVar list). For an
+# outbound HTTP proxy between the proxy and the internet:
+#   - {name: HTTPS_PROXY, value: "http://egress-proxy.corp.example:3128"}
+#   - {name: NO_PROXY, value: ".corp.example,10.0.0.0/8"}
+# The tunnel to the relay and any system not in NO_PROXY then go through it
+# (a plain HTTP proxy is fine; one that inspects TLS breaks the tunnel's mTLS).
+# Allow the egress proxy in networkPolicy.upstreams too.
+extraEnv: []
+
 # The proxy's configuration (docs/configuration.md): the hosts NeuBird may
 # reach (neubird_destinations), redaction, limits. The chart sets the rest:
 # admin_listen: :9090, and either the tunnel section (from `tunnel` above)
@@ -102,11 +111,13 @@ podDisruptionBudget:
   minAvailable: 1
 
 # Off by default. When on: inbound only metricsFrom on 9090, and (mode
-# inbound) inboundFrom on 8443; outbound only DNS, the relays (relayCIDRs,
-# port 443, mode tunnel) and your systems (upstreams).
+# inbound) inboundFrom on 8443; outbound only DNS, the relays (relayCIDRs on
+# relayPorts, mode tunnel) and your systems (upstreams, which must also cover
+# an outbound HTTP proxy if extraEnv sets one).
 networkPolicy:
   enabled: false
   relayCIDRs: []           # mode tunnel: NeuBird's relay addresses, e.g. ["203.0.113.10/32"]
+  relayPorts: [443]        # mode tunnel: the relays' port(s)
   inboundFrom: []          # mode inbound: NetworkPolicyPeers allowed to reach 8443, e.g. [{ipBlock: {cidr: 10.30.0.0/24}}]
   upstreams: []            # [{cidr: 10.20.0.0/16, ports: [443]}]
   metricsFrom: []          # NetworkPolicyPeers allowed to scrape :9090
