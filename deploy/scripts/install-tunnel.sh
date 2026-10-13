@@ -12,13 +12,13 @@
 set -euo pipefail
 : "${KUBE_CONTEXT:?}" "${VALUES:?}" "${RELAY_CA:?}"
 # Paths are the caller's: make them absolute (and check them) up front.
-abs() { [ -e "$1" ] || { printf 'FAIL  %s: no such file\n' "$1" >&2; exit 1; }; (cd "$(dirname "$1")" && printf '%s/%s' "$(pwd)" "$(basename "$1")"); }
+abs() { [ -e "$1" ] || { printf 'FAIL  %s: no such file\n' "$1" >&2; exit 1; }; (CDPATH='' cd -P -- "$(dirname -- "$1")" >/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename -- "$1")"); }
 VALUES=$(abs "$VALUES"); RELAY_CA=$(abs "$RELAY_CA")
 [ -n "${UPSTREAM_CA:-}" ] && UPSTREAM_CA=$(abs "$UPSTREAM_CA")
 [ -n "${JOIN_TOKEN_FILE:-}" ] && JOIN_TOKEN_FILE=$(abs "$JOIN_TOKEN_FILE")
 NAMESPACE=${NAMESPACE:-neubird}
 RELEASE=${RELEASE:-neubird-proxy}
-CHART=${CHART:-$(cd "$(dirname "$0")/../helm/neubird-proxy" && pwd)}
+CHART=${CHART:-$(CDPATH='' cd -P -- "$(dirname -- "$0")/../helm/neubird-proxy" >/dev/null && pwd -P)}
 [ -d "$CHART" ] || [ -f "$CHART" ] || CHART=$(abs "$CHART")
 TIMEOUT=${TIMEOUT:-300}
 SECRET=$(python3 -c "import yaml,sys; print((yaml.safe_load(open(sys.argv[1])).get('env') or {}).get('existingSecret') or 'neubird-proxy-env')" "$VALUES")
@@ -69,14 +69,16 @@ if grep -q 'mask: hmac' <<<"$config"; then
 fi
 
 step "helm upgrade --install $RELEASE"
-gen_before=""; [ -n "$existed" ] && gen_before=$(k get "deploy/$existed" -o jsonpath='{.metadata.generation}')
+# The pod template before the upgrade: if the upgrade leaves it unchanged, no
+# pod restarts (a replicaCount change bumps the generation but restarts none).
+tmpl_before=""; [ -n "$existed" ] && tmpl_before=$(k get "deploy/$existed" -o jsonpath='{.spec.template}')
 helm --kube-context "$KUBE_CONTEXT" upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" "${args[@]}" >/dev/null
 ok "installed"
 dep=$(find_dep); [ -n "$dep" ] || die "no Deployment for release $RELEASE"
 # Pods read the Secret only at start, and a Secret change alone doesn't roll
-# them. If the upgrade didn't roll them either (same generation), restart, so
-# they read the new join token; never both, which would roll twice.
-if [ -n "${token_added:-}" ] && [ -n "$existed" ] && [ "$(k get "deploy/$dep" -o jsonpath='{.metadata.generation}')" = "$gen_before" ]; then
+# them. If the upgrade didn't roll them either (same pod template), restart,
+# so they read the new join token; never both, which would roll twice.
+if [ -n "${token_added:-}" ] && [ -n "$existed" ] && [ "$(k get "deploy/$dep" -o jsonpath='{.spec.template}')" = "$tmpl_before" ]; then
   k rollout restart "deploy/$dep" >/dev/null; ok "restarted deploy/$dep to read the join token"
 fi
 
@@ -104,18 +106,25 @@ while [ $SECONDS -lt $end ]; do
   fi
   sleep 5
 done
+# The pods may have enrolled while rollout status waited: read the log again.
+logs=$(k logs -l "app.kubernetes.io/instance=$RELEASE" --tail=-1 2>/dev/null || true)
+grep -qE '"msg":"(enrolled with the join token|key already enrolled)"' <<<"$logs" && enrolled=1
+connected=$(grep -c '"msg":"tunnel connected"' <<<"$logs" || true)
 [ -n "$ready" ] || die "deploy/$dep not ready after ${TIMEOUT}s; last errors: $(grep -oE '"msg":"tunnel connect failed"[^}]*' <<<"$logs" | tail -1)"
 ok "${enrolled:+key enrolled; }$connected tunnel connection(s); pods ready"
 
 step "test the tunnel and each system"
-k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml 2>&1 | grep -v 'Unknown stream id' || die "tunnel test failed"
+# Judge by the test's exit status; the filter only drops kubectl's websocket noise.
+ptest() { local out rc=0; out=$(k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml "$@" 2>&1) || rc=$?
+  grep -v 'Unknown stream id' <<<"$out" || true; return $rc; }
+ptest || die "tunnel test failed"
 urls=$(python3 -c "
 import sys,yaml
 c=yaml.safe_load(sys.stdin); h=(c.get('neubird_destinations') or {}).get('hosts') or []
 print(' '.join('https://'+x for x in h if '*' not in x))" <<<"$config")
 if [ -n "$urls" ]; then
   # shellcheck disable=SC2086
-  k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml $urls 2>&1 | grep -v 'Unknown stream id' || die "a system failed its test"
+  ptest $urls || die "a system failed its test"
 fi
 
 if [ -n "$enrolled" ] && [ -n "$TOKEN_ENV" ] && [ -n "$(k get secret "$SECRET" -o jsonpath="{.data.$TOKEN_ENV}")" ]; then
