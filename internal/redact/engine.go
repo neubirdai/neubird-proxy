@@ -438,16 +438,16 @@ func (e *Engine) isAllowed(m string) bool {
 // dense with matches grows more with them.
 func (e *Engine) BufferFactor() int64 {
 	if e.hmacKey != nil {
-		return 24
+		return 26
 	}
-	return 18
+	return 20
 }
 
 func (e *Engine) SSEFactor() int64 {
 	if e.hmacKey != nil {
-		return 27
+		return 29
 	}
-	return 20
+	return 22
 }
 
 func (e *Engine) mask(label, value string) string {

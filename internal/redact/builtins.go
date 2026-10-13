@@ -129,10 +129,9 @@ var builtins = map[string]builtin{
 			{re: regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?key|credentials?)["']?\s*[:=]\s*["']?(?P<v>[^\s"'&;,<>]{3,})`),
 				needles: []string{"passw", "pwd", "secret", "key", "token", "credential"}, scope: scopeNeedles, before: 16, after: 32,
 				// As written, an HTML entity (&amp; &#59;) is part of the
-				// value: its & and ; would end it otherwise. The lengths
-				// cover every entity normalize decodes (up to 9 bytes
-				// between & and ;).
-				raw: true, rawRe: regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?key|credentials?)["']?\s*[:=]\s*["']?(?P<v>(?:[^\s"'&;,<>]|&(?:#[0-9]{1,8}|#[xX][0-9a-fA-F]{1,7}|[a-zA-Z]{2,9});)(?:[^\s"'&;,<>]|&(?:#[0-9]{1,8}|#[xX][0-9a-fA-F]{1,7}|[a-zA-Z]{2,9});){2,})`)},
+				// value: its & and ; would end it otherwise. Any number
+				// of leading zeros, as browsers decode them.
+				raw: true, rawRe: regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?key|credentials?)["']?\s*[:=]\s*["']?(?P<v>(?:[^\s"'&;,<>]|&(?:#0*[0-9]{1,7}|#[xX]0*[0-9a-fA-F]{1,6}|[a-zA-Z]{2,9});)(?:[^\s"'&;,<>]|&(?:#0*[0-9]{1,7}|#[xX]0*[0-9a-fA-F]{1,6}|[a-zA-Z]{2,9});){2,})`)},
 		},
 		key: regexp.MustCompile(`(?i)(?:password|passwd|secret|api_?key|apikey|access_?token|auth_?token|refresh_?token|private_?key|client_?secret|credential)`),
 	},

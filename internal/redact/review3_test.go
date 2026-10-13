@@ -316,3 +316,13 @@ func TestDenseTouchingMatchesChunked(t *testing.T) {
 		}
 	}
 }
+
+// Entities with any number of leading zeros stay part of the value.
+func TestZeroPaddedEntities(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	for _, in := range []string{"password=abc&#0000000059;defZQXV", "password=abc&#x0000003b;defZQXV"} {
+		if out := e.String(in, Stats{}); strings.Contains(out, "ZQXV") {
+			t.Errorf("%q -> %q", in, out)
+		}
+	}
+}

@@ -602,15 +602,15 @@ counted:
 - At startup the proxy reads its container's memory limit, sets the Go
   runtime's to 90% of it (unless `GOMEMLIMIT` is set), and lets buffered
   bodies take three quarters of it together.
-- Each buffered body reserves 18× its size (24× with `mask: hmac`, whose
+- Each buffered body reserves 20× its size (26× with `mask: hmac`, whose
   masks are longer) (its `Content-Length`, or
   `max_body_bytes` if it has none) and waits if there isn't room. Small API
   and MCP responses run side by side; large ones take turns.
 - If one body of `max_body_bytes` couldn't fit even alone, bodies are capped
   lower to fit, and larger ones fail closed with `body_too_large`. The
-  startup log says so. With the 512 MiB limit the cap is about 21 MiB, above
-  the 20 MiB default (16 MiB with `mask: hmac`); at 256 MiB it would be
-  about 10.7 MiB (8 MiB).
+  startup log says so. With the 512 MiB limit the cap is about 19.2 MiB,
+  just under the 20 MiB default (14.8 MiB with `mask: hmac`); at 256 MiB it
+  would be about 9.6 MiB (7.4 MiB).
 - A body over the cap is refused as soon as the proxy has read past the
   cap, not after decoding it.
 - `max_concurrent_buffered` (default 4) still limits how many are buffered at
