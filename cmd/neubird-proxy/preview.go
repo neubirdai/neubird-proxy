@@ -429,7 +429,8 @@ func segments(s string) []segment {
 }
 
 func writeReport(path string, res *previewResult) error {
-	f, err := os.Create(path)
+	// The report holds the unredacted responses: readable by the owner only.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

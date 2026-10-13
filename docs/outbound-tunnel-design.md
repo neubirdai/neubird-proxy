@@ -128,7 +128,7 @@ from ace, is possible later if the network check isn't considered enough.
 ## Proxy changes
 
 A new optional `tunnel` section. With it set, the inbound listener can be
-turned off (`listen: ""`).
+turned off (`listen: "off"`).
 
 ```yaml
 tunnel:
@@ -144,11 +144,14 @@ tunnel:
   production) to the relay hostname. The load balancer spreads them across
   relay replicas, and the replicas forward requests between themselves, so
   losing a replica or a pod leaves the other tunnels working.
-- **Reconnects** with exponential backoff and jitter. HTTP/2 PINGs every
-  15 s detect dead connections and keep idle firewalls from dropping them.
+- **Reconnects** with exponential backoff and jitter. HTTP/2 PINGs after 5 s
+  without traffic detect dead connections and keep idle firewalls from dropping them.
 - **Same handler:** tunnel requests run through the existing `ServeHTTP`.
-  The proxy token is still required, so a stolen key alone gets nothing, and every allowlist, limit and redaction rule applies
-  unchanged.
+  The proxy token is still required on every request, and every allowlist,
+  limit and redaction rule applies unchanged. The tunnel key is still a
+  secret: the proxy is the server end, so a stolen key can open a tunnel
+  as this proxy and receive requests, with the proxy token and the
+  systems' credentials in them.
 - **Metrics:** tunnels up per relay and reconnects. The audit line gains
   `via: tunnel`.
 - **Tools:**
@@ -232,8 +235,8 @@ pins host keys, with nothing to sign:
 Nothing expires on MetLife's side, so there's no renewal: MetLife rotates
 the key when its policy says, by sending a new fingerprint; NeuBird then
 retires the old one, and open tunnels move over with no failed requests. A
-stolen key works only for that one proxy until it's revoked, and only with
-the proxy token.
+stolen key works only for that one proxy until it's revoked, but for that
+proxy it receives a share of NeuBird's requests, credentials included.
 
 **Each customer has their own relay CA,** which signs only that customer's
 relay certificate and is what their proxies pin, so a proxy knows it reached
@@ -247,8 +250,10 @@ is NeuBird's alone.
 
 - **Nothing inbound at MetLife.** Egress goes to the relay hostnames on 443
   only, and `netpol` generates that rule.
-- **Two factors per request:** the tunnel certificate (which proxy) and the
-  proxy token (which client). Neither alone is enough.
+- **Two checks per request:** the tunnel certificate (which proxy) and the
+  proxy token (which client). The proxy token alone reaches nothing; the
+  tunnel key alone receives requests rather than sending them, so it must be
+  guarded like a credential.
 - **The relay never sees unredacted data.** Redaction happens in MetLife's
   cluster before the tunnel, so a compromised relay sees exactly what NeuBird
   already receives today. It's still a high-value target, because it can
@@ -263,7 +268,7 @@ is NeuBird's alone.
 | Risk | Mitigation |
 |---|---|
 | **MetLife inspects outbound TLS** (a corporate proxy re-signing traffic). That breaks mutual TLS outright | Ask early. The relay hostnames need a TLS-inspection bypass. If outbound traffic must go through an HTTP proxy, the tunnel needs `HTTPS_PROXY` support via CONNECT (in scope, small) |
-| **Firewalls drop long-lived idle connections** | 15 s PINGs, immediate reconnect, several tunnels per pod |
+| **Firewalls drop long-lived idle connections** | PINGs after 5 s idle, immediate reconnect, several tunnels per pod |
 | **The relay becomes a single point of failure** for every tenant | Replicas, alerts on tenants without a tunnel, and a runbook |
 | **Approving a new NeuBird-hosted component** may need MetLife review | The relay never sees unredacted data, and the design matches the vendor-connector pattern they already approved (to confirm) |
 | **One more network hop** | Measured in a load test; expected to be milliseconds, well under Splunk query times |

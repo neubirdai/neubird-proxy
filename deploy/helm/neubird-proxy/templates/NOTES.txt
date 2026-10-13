@@ -18,10 +18,15 @@ networkPolicy is off: anything in the cluster can reach port 8443. Turn it on
 with networkPolicy.inboundFrom set to your gateway.
 {{- end }}
 
-The TLS certificate is read at startup: after renewing Secret
-{{ .Values.inbound.tls.existingSecret | default "(none)" }}, run kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "neubird-proxy.fullname" . }}.
+{{- if .Values.inbound.tls.existingSecret }}
 
-Revoke access at any time by changing NEUBIRD_PROXY_TOKEN, or by scaling this Deployment to 0.
+The proxy re-reads Secret {{ .Values.inbound.tls.existingSecret }} and the client CA every minute: renewing
+them needs no restart. Expiry: neubird_proxy_tls_cert_expiry_days on :9090/metrics.
+{{- end }}
+
+Revoke access at any time by scaling this Deployment to 0, or by changing
+NEUBIRD_PROXY_TOKEN and restarting it (kubectl rollout restart): pods read
+the token at startup.
 {{- else -}}
 neubird-proxy {{ .Chart.AppVersion }}: tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, relays {{ join ", " .Values.tunnel.relays }}.
 
@@ -47,7 +52,9 @@ never leaves this cluster), and the tunnels come up once NeuBird records it:
 Then, in NeuBird's UI, create each connection with the URL NeuBird gives you,
 and the auth token = NEUBIRD_PROXY_TOKEN in Secret {{ .Values.env.existingSecret }}.
 
-Revoke access at any time by changing NEUBIRD_PROXY_TOKEN, or by scaling this Deployment to 0.
+Revoke access at any time by scaling this Deployment to 0, or by changing
+NEUBIRD_PROXY_TOKEN and restarting it (kubectl rollout restart): pods read
+the token at startup.
 {{- if and .Values.tunnelKey.generate (not .Values.tunnelKey.existingSecret) }}
 
 The tunnel key is in Secret {{ include "neubird-proxy.keySecret" . }} (kept on uninstall).

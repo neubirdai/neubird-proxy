@@ -30,13 +30,16 @@ type valueRule struct {
 	before    int
 	after     int
 	re        *regexp.Regexp
-	group     int            // submatch to mask; 0 is the whole match
-	anchored  *regexp.Regexp // re matching a whole string; for validated whole-match rules
+	find      func(s string, n int) [][]int // replaces re's FindAllStringSubmatchIndex when set
+	raw       bool                          // also matched on the undecoded text
+	rawRe     *regexp.Regexp                // re for the undecoded text, if not re
+	group     int                           // submatch to mask; 0 is the whole match
+	anchored  *regexp.Regexp                // re matching a whole string; for validated whole-match rules
 	validate  func(string) bool
 }
 
 func newValueRule(name string, p pattern) valueRule {
-	r := valueRule{name: name, label: strings.ToUpper(name), re: p.re, validate: p.validate, needles: p.needles, minDigits: p.minDigits, scope: p.scope, before: p.before, after: p.after}
+	r := valueRule{name: name, label: strings.ToUpper(name), re: p.re, find: p.find, raw: p.raw, rawRe: p.rawRe, validate: p.validate, needles: p.needles, minDigits: p.minDigits, scope: p.scope, before: p.before, after: p.after}
 	re, validate := p.re, p.validate
 	if g := re.SubexpIndex("v"); g > 0 {
 		r.group = g
@@ -195,6 +198,11 @@ func (e *Engine) String(orig string, st Stats) string {
 	var clusters [][2]int
 	clustersDone := false
 	var spans []span
+	// own[i] is where rule i's spans are in spans, for the raw pass.
+	var own [][2]int
+	if off != nil {
+		own = make([][2]int, len(e.rules))
+	}
 	for i, r := range e.rules {
 		if nDigits < r.minDigits {
 			continue
@@ -227,6 +235,7 @@ func (e *Engine) String(orig string, st Stats) string {
 		default:
 			regions = [][2]int{{0, len(s)}}
 		}
+		lo := len(spans)
 		forEachMatch(r, s, regions, func(loc []int) {
 			a, z := loc[2*r.group], loc[2*r.group+1]
 			if a < 0 || a == z {
@@ -247,6 +256,12 @@ func (e *Engine) String(orig string, st Stats) string {
 			}
 			spans = append(spans, span{int32(a), int32(z), int32(i)})
 		})
+		if own != nil {
+			own[i] = [2]int{lo, len(spans)}
+		}
+	}
+	if off != nil {
+		spans = e.rawMatches(orig, off, spans, own)
 	}
 	if len(spans) == 0 {
 		return orig
@@ -285,6 +300,60 @@ func (e *Engine) String(orig string, st Stats) string {
 	}
 	b.WriteString(orig[pos:])
 	return b.String()
+}
+
+// rawMatches runs the raw rules over orig, the text as written, and adds
+// their matches as spans of the normalized text that cover them, unless a
+// span of the same rule from the normalized pass already does. own holds
+// where each rule's normalized spans are in spans (in order: matches come
+// left to right and don't overlap).
+func (e *Engine) rawMatches(orig string, off []int32, spans []span, own [][2]int) []span {
+	var lower string
+	folds := hasFoldRunes(orig)
+	for i, r := range e.rules {
+		if !r.raw {
+			continue
+		}
+		if r.rawRe != nil {
+			r.re, r.group = r.rawRe, r.rawRe.SubexpIndex("v")
+		}
+		prev := spans[own[i][0]:own[i][1]]
+		j := 0
+		if len(r.needles) > 0 && !folds {
+			if lower == "" {
+				lower = asciiLower(orig)
+			}
+			if !containsAny(lower, r.needles) {
+				continue
+			}
+		}
+		regions := [][2]int{{0, len(orig)}}
+		if r.scope == scopeNeedles && !folds {
+			regions = needleWindows(orig, lower, r.needles, r.before, r.after)
+		}
+		forEachMatch(r, orig, regions, func(loc []int) {
+			a, z := loc[2*r.group], loc[2*r.group+1]
+			if a < 0 || a == z {
+				return
+			}
+			if m := orig[a:z]; (r.validate != nil && !r.validate(m)) || e.isAllowed(m) {
+				return
+			}
+			// The normalized span starts with the first byte produced at
+			// or before a and ends with the first produced at or after z.
+			from := off[sort.Search(len(off), func(k int) bool { return int(off[k]) > a })-1]
+			na := sort.Search(len(off), func(k int) bool { return off[k] >= from })
+			nz := sort.Search(len(off), func(k int) bool { return int(off[k]) >= z })
+			for j < len(prev) && int(prev[j].end) < nz {
+				j++
+			}
+			if j < len(prev) && int(prev[j].start) <= na {
+				return // the normalized pass has it
+			}
+			spans = append(spans, span{int32(na), int32(nz), int32(i)})
+		})
+	}
+	return spans
 }
 
 // subMatches retries a match that failed validation, over runs of its
@@ -340,9 +409,12 @@ func (e *Engine) Text(body []byte, st Stats) []byte {
 }
 
 // blockedKey returns the key rule that masks the value under key, if any.
+// The key is matched as written and normalized, so ｐａｓｓｗｏｒｄ or a soft
+// hyphen inside "password" is still the password key.
 func (e *Engine) blockedKey(key string) *keyRule {
+	norm, _ := normalize(key)
 	for i := range e.keyRules {
-		if e.keyRules[i].re.MatchString(key) {
+		if e.keyRules[i].re.MatchString(key) || (norm != key && e.keyRules[i].re.MatchString(norm)) {
 			return &e.keyRules[i]
 		}
 	}
@@ -366,16 +438,16 @@ func (e *Engine) isAllowed(m string) bool {
 // dense with matches grows more with them.
 func (e *Engine) BufferFactor() int64 {
 	if e.hmacKey != nil {
-		return 24
+		return 26
 	}
-	return 18
+	return 20
 }
 
 func (e *Engine) SSEFactor() int64 {
 	if e.hmacKey != nil {
-		return 27
+		return 29
 	}
-	return 20
+	return 22
 }
 
 func (e *Engine) mask(label, value string) string {
@@ -414,6 +486,15 @@ func containsAny(s string, needles []string) bool {
 // at once, for text dense with matches, would cost several times its size.
 const matchChunk = 1024
 
+// findAll returns up to n matches of r in s (all of them for n < 0), as
+// regexp's FindAllStringSubmatchIndex does.
+func (r valueRule) findAll(s string, n int) [][]int {
+	if r.find != nil {
+		return r.find(s, n)
+	}
+	return r.re.FindAllStringSubmatchIndex(s, n)
+}
+
 // forEachMatch calls f with every match of r within the regions of s, a
 // chunk at a time. Each search starts one byte before where it may match,
 // so \b sees the byte before; a match starting on that byte is skipped.
@@ -432,7 +513,7 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 		for start <= z {
 			ca := max(0, start-1)
 			n := matchChunk
-			locs := r.re.FindAllStringSubmatchIndex(s[ca:cz], n)
+			locs := r.findAll(s[ca:cz], n)
 			for _, loc := range locs {
 				for k := range loc {
 					if loc[k] >= 0 {
@@ -445,7 +526,7 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 				// rule): finish the region from its start in one search,
 				// reporting only what follows the resume point.
 				ra := max(0, reg[0]-1)
-				locs = r.re.FindAllStringSubmatchIndex(s[ra:cz], -1)
+				locs = r.findAll(s[ra:cz], -1)
 				for _, loc := range locs {
 					for k := range loc {
 						if loc[k] >= 0 {
@@ -468,17 +549,12 @@ func forEachMatch(r valueRule, s string, regions [][2]int, f func(loc []int)) {
 					}
 				}
 				if cut == 0 {
-					// No gap: every match touches the next. Finish the
-					// region in one search.
-					locs = r.re.FindAllStringSubmatchIndex(s[ca:cz], -1)
-					for _, loc := range locs {
-						for k := range loc {
-							if loc[k] >= 0 {
-								loc[k] += ca
-							}
-						}
-					}
-					cut = len(locs)
+					// No gap: every match touches the next. Resume at the
+					// last match anyway, so a region dense with matches is
+					// still found a chunk at a time; if the previous
+					// match's last byte changes what is found there, the
+					// expect check below finishes the region in one search.
+					cut = len(locs) - 1
 				}
 			}
 			for _, loc := range locs[:cut] {
@@ -549,6 +625,11 @@ func isSpace(c byte) bool {
 func needleWindows(s, lower string, needles []string, before, after int) [][2]int {
 	var ws [][2]int
 	for _, n := range needles {
+		// Occurrences come in order, so the unwidened bounds only grow.
+		// Widening stops where the previous window's did once it reaches
+		// the previous unwidened bound: text without whitespace would
+		// otherwise be rescanned for every occurrence.
+		prevA, prevZ, wa, wz := -1, -1, 0, 0
 		for from := 0; ; {
 			k := strings.Index(lower[from:], n)
 			if k < 0 {
@@ -569,12 +650,21 @@ func needleWindows(s, lower string, needles []string, before, after int) [][2]in
 					c++
 				}
 			}
+			ua, uz := a, z
 			for a > 0 && !isSpace(s[a-1]) {
+				if a <= prevA {
+					a = wa
+					break
+				}
 				a--
+			}
+			if z <= wz && prevZ >= 0 && z >= prevZ {
+				z = wz
 			}
 			for z < len(s) && !isSpace(s[z]) {
 				z++
 			}
+			prevA, prevZ, wa, wz = ua, uz, a, z
 			ws = append(ws, [2]int{a, z})
 			if len(ws) > maxWindows(s) {
 				return [][2]int{{0, len(s)}}

@@ -83,8 +83,15 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, c.Upstream, c.ClientAuth, methods, paths, tools, fields, mode)
 	}
 	if d := cfg.NeubirdDestinations; d != nil {
+		tools, fields := "-", "all"
+		if len(d.Conn.MCPTools) > 0 {
+			tools = fmt.Sprint(len(d.Conn.MCPTools))
+		}
+		if len(d.Conn.ResponseFields) > 0 {
+			fields = fmt.Sprintf("%d allowed", len(d.Conn.ResponseFields))
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "neubird_destinations", strings.Join(d.Hosts, ","), d.Conn.ClientAuth,
-			allowHeaderOf(d.Conn.MethodSet), "any", "-", "all", "NeuBird credentials")
+			allowHeaderOf(d.Conn.MethodSet), "any", tools, fields, "NeuBird credentials")
 	}
 	tw.Flush()
 	fmt.Fprintf(stdout, "\nredaction: mask=%s, rules: %s\n", cfg.Redaction.Mask, strings.Join(engine.RuleNames(), ", "))

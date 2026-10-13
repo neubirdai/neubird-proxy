@@ -660,7 +660,14 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		for _, h := range append(append([]string{}, DefaultRequestHeaders...), conn.RequestHeaders...) {
 			ch := http.CanonicalHeaderKey(h)
 			switch ch {
-			case "Authorization", "Proxy-Authorization", "Cookie", "Ocp-Apim-Subscription-Key", "Ocp-Apim-Trace", "Apim-Debug-Authorization":
+			case "Authorization", "Ocp-Apim-Subscription-Key":
+				fail("%s: request_headers: %s cannot be forwarded", where, ch)
+			}
+			// Framing, hop-by-hop, compression and range headers would let
+			// a body arrive in a form redaction can't read whole. Only a
+			// passthrough connection, which reads nothing, may upgrade.
+			upgrade := conn.Passthrough && (ch == "Upgrade" || ch == "Connection")
+			if (credentialHeaderDenied[ch] || strings.HasPrefix(ch, "X-Forwarded-")) && !upgrade {
 				fail("%s: request_headers: %s cannot be forwarded", where, ch)
 			}
 			if strings.HasPrefix(ch, UpstreamCredentialPrefix) {
@@ -726,6 +733,12 @@ func (r *Redaction) resolve(env func(field, name string) string, fail func(strin
 			r.HMACKeyEnv = DefaultHMACKeyEnv
 		}
 		r.HMACKey = []byte(env("redaction.hmac_key_env", r.HMACKeyEnv))
+		// The masks are 64 bits of HMAC: with a short key, one known value
+		// and its mask give the key away, and then low-entropy values
+		// (SSNs, phone numbers) can be recovered from their masks.
+		if n := len(r.HMACKey); n > 0 && n < MinTokenLength {
+			fail("redaction.hmac_key_env: the key in %s is %d characters; at least %d are required", r.HMACKeyEnv, n, MinTokenLength)
+		}
 	default:
 		fail("redaction.mask must be label or hmac")
 	}

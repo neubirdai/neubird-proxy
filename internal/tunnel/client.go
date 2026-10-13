@@ -37,6 +37,8 @@ const (
 	// accepts and drops at once still gets backed off.
 	stableAfter = 10 * time.Second
 	dialTimeout = 15 * time.Second
+	// maxHeaderBytes caps one request's header list over a tunnel.
+	maxHeaderBytes = 64 << 10
 	// With TLS 1.3 the client's handshake completes before the relay has
 	// checked the client certificate; a refusal arrives as an alert on the
 	// first read. The relay starts HTTP/2 at once, so a tunnel only counts
@@ -73,9 +75,10 @@ type Client struct {
 	// proxyFor returns the outbound HTTP proxy for a relay, or nil.
 	proxyFor func(*url.URL) (*url.URL, error)
 
-	// enrolled is, per relay, whether this process has enrolled its key
-	// there (or found it known), when a join token is configured.
-	enrolled map[string]*atomic.Bool
+	// enrolled is, per relay, the fingerprint of the key this process has
+	// enrolled there (or found known), when a join token is configured. A
+	// key reloaded from a new file is enrolled again.
+	enrolled map[string]*atomic.Pointer[string]
 
 	wg      sync.WaitGroup
 	closing chan struct{} // closed by Shutdown: stop reconnecting
@@ -88,7 +91,9 @@ type Client struct {
 func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logger, reg *metrics.Registry) *Client {
 	c := &Client{
 		cfg: cfg, id: id, handler: handler, log: log,
-		hs: &http.Server{},
+		// The relay is authenticated, but a header list per stream is
+		// still capped well below the 1 MiB default.
+		hs: &http.Server{MaxHeaderBytes: maxHeaderBytes},
 		h2: &http2.Server{
 			ReadIdleTimeout:      pingAfter,
 			PingTimeout:          pingTimeout,
@@ -100,10 +105,10 @@ func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logge
 		dial:     (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		proxyFor: httpproxy.FromEnvironment().ProxyFunc(),
 		closing:  make(chan struct{}),
-		enrolled: map[string]*atomic.Bool{},
+		enrolled: map[string]*atomic.Pointer[string]{},
 	}
 	for _, r := range cfg.Relays {
-		c.enrolled[r] = &atomic.Bool{}
+		c.enrolled[r] = &atomic.Pointer[string]{}
 	}
 	// Registers the http2 server with hs, so hs.Shutdown sends GOAWAY on
 	// every tunnel and lets in-flight requests finish.
@@ -157,7 +162,7 @@ func (c *Client) keep(ctx context.Context, relay string) {
 	backoff := backoffMin
 	for ctx.Err() == nil && !c.isClosing() {
 		start := time.Now()
-		conn, err := c.connect(ctx, relay)
+		conn, err := c.connect(ctx, relay, true)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -324,20 +329,22 @@ func (a *acceptedConn) readErr() error {
 
 // connect dials the relay (through the outbound proxy if one is set), runs
 // mutual TLS, checks the negotiated protocol and waits for the relay to
-// accept the client certificate.
-func (c *Client) connect(ctx context.Context, relay string) (*acceptedConn, error) {
+// accept the client certificate. With enroll, a configured join token
+// enrolls the key first.
+func (c *Client) connect(ctx context.Context, relay string, enroll bool) (*acceptedConn, error) {
 	id, err := c.identity()
 	if err != nil {
 		c.connects.Inc(relay, "identity_error")
 		return nil, fmt.Errorf("tunnel certificate: %w", err)
 	}
-	if c.cfg.JoinToken != "" && !c.enrolled[relay].Load() {
+	if done := c.enrolled[relay].Load(); enroll && c.cfg.JoinToken != "" && (done == nil || *done != id.Fingerprint) {
 		outcome, err := c.enroll(ctx, relay, id)
 		if err != nil {
 			c.connects.Inc(relay, "enroll_error")
 			return nil, fmt.Errorf("enrollment: %w", err)
 		}
-		if c.enrolled[relay].CompareAndSwap(false, true) {
+		fp := id.Fingerprint
+		if c.enrolled[relay].CompareAndSwap(done, &fp) {
 			msg := "enrolled with the join token"
 			if outcome == "known" {
 				msg = "key already enrolled"
@@ -433,9 +440,10 @@ func (c *Client) enroll(ctx context.Context, relay string, id *Identity) (string
 
 // Check connects to one relay, completes the mutual-TLS handshake and
 // waits for the relay to accept the certificate, then closes the
-// connection. For `neubird-proxy test`.
+// connection. For `neubird-proxy test`. It never spends the join token: a
+// diagnostic run with another copy of the key would enroll that copy.
 func (c *Client) Check(ctx context.Context, relay string) (tls.ConnectionState, error) {
-	conn, err := c.connect(ctx, relay)
+	conn, err := c.connect(ctx, relay, false)
 	if err != nil {
 		return tls.ConnectionState{}, err
 	}

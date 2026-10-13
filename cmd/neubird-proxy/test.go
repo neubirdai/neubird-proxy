@@ -527,6 +527,9 @@ func (t *tester) tunnel() bool {
 		cancel()
 		if err != nil {
 			t.line("FAIL", "relay", "%s:%s: %v", host, port, err)
+			if tc.JoinToken != "" {
+				t.line("info", "relay", "test doesn't spend the join token; if this key isn't enrolled yet, the proxy enrolls it when it starts")
+			}
 			continue
 		}
 		cert := state.PeerCertificates[0]

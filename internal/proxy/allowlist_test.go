@@ -132,14 +132,14 @@ func TestMutualTLS(t *testing.T) {
 	writePEM(t, filepath.Join(dir, "tls.crt"), "CERTIFICATE", srvCert.Raw)
 	writeKey(t, filepath.Join(dir, "tls.key"), srvKey)
 
-	tcfg, err := ServerTLSConfig(&config.TLS{
+	st, err := NewServerTLS(&config.TLS{
 		CertFile: filepath.Join(dir, "tls.crt"), KeyFile: filepath.Join(dir, "tls.key"), ClientCAFile: filepath.Join(dir, "ca.crt"),
-	})
+	}, discardLog(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") }))
-	srv.TLS = tcfg
+	srv.TLS = st.Config()
 	srv.StartTLS()
 	defer srv.Close()
 

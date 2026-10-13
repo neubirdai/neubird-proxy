@@ -146,18 +146,21 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	})
 	admin.Handle("GET /metrics", srv.Metrics.Registry.Handler())
 
-	var serverTLS *tls.Config
+	var serverTLS *proxy.ServerTLS
+	var listenerTLS *tls.Config
 	if cfg.TLS != nil {
-		if serverTLS, err = proxy.ServerTLSConfig(cfg.TLS); err != nil {
+		if serverTLS, err = proxy.NewServerTLS(cfg.TLS, log, srv.Metrics.Registry); err != nil {
 			return err
 		}
+		listenerTLS = serverTLS.Config()
 	}
 	proxySrv := &http.Server{
-		TLSConfig:         serverTLS,
+		TLSConfig:         listenerTLS,
 		Addr:              cfg.Listen,
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 		// No WriteTimeout: MCP SSE streams and Splunk exports are long-lived.
 	}
 	adminSrv := &http.Server{Addr: cfg.AdminListen, Handler: admin, ReadHeaderTimeout: 5 * time.Second}
@@ -181,6 +184,9 @@ func run(configPath string, check bool, log *slog.Logger) error {
 	// complete.
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
+	if serverTLS != nil {
+		go serverTLS.Run(runCtx)
+	}
 	if cfg.Tunnel != nil {
 		id, err := tunnel.Load(cfg.Tunnel)
 		if err != nil {
