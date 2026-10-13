@@ -1,7 +1,6 @@
 package redact
 
 import (
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -134,30 +133,62 @@ var namedEntities = map[string]rune{
 // entity decodes an HTML entity at the start of s, returning the rune and
 // the number of bytes consumed, or 0 if s does not start with one.
 func entity(s string) (rune, int) {
-	// An entity is at most 11 bytes: looking further for ';' would scan to
-	// the end of the text for every '&'.
+	if len(s) > 2 && s[1] == '#' {
+		return numericEntity(s)
+	}
+	// A named entity is at most 11 bytes: looking further for ';' would scan
+	// to the end of the text for every '&'.
 	end := strings.IndexByte(s[:min(len(s), 11)], ';')
 	if end < 2 || end > 10 {
 		return 0, 0
 	}
 	name := s[1:end]
-	if name[0] == '#' {
-		var v uint64
-		var err error
-		if len(name) > 1 && (name[1] == 'x' || name[1] == 'X') {
-			v, err = strconv.ParseUint(name[2:], 16, 32)
-		} else {
-			v, err = strconv.ParseUint(name[1:], 10, 32)
-		}
-		if err != nil || v == 0 || v > utf8.MaxRune {
-			return 0, 0
-		}
-		return rune(v), end + 1
-	}
 	if r, ok := namedEntities[name]; ok {
 		return r, end + 1
 	}
 	return 0, 0
+}
+
+// numericEntity decodes &#N; or &#xH; at the start of s. Browsers accept any
+// number of leading zeros (&#0000000064; is '@'), so they are skipped
+// without a length limit; only the significant digits are bounded (7
+// decimal, 6 hex: past U+10FFFF either way). The scan stops at the first
+// byte that can't continue the reference, so it stays linear in the text.
+func numericEntity(s string) (rune, int) {
+	i, base := 2, uint64(10)
+	if i < len(s) && (s[i] == 'x' || s[i] == 'X') {
+		i, base = 3, 16
+	}
+	start := i
+	for i < len(s) && s[i] == '0' {
+		i++
+	}
+	maxDigits := 7
+	if base == 16 {
+		maxDigits = 6
+	}
+	var v uint64
+	digits := 0
+digits:
+	for i < len(s) && digits <= maxDigits {
+		c := s[i]
+		var d uint64
+		switch {
+		case c >= '0' && c <= '9':
+			d = uint64(c - '0')
+		case base == 16 && isHex(c):
+			d = uint64(unhex(c))
+		default:
+			break digits
+		}
+		v = v*base + d
+		digits++
+		i++
+	}
+	if i == start || digits > maxDigits || i >= len(s) || s[i] != ';' || v == 0 || v > utf8.MaxRune {
+		return 0, 0
+	}
+	return rune(v), i + 1
 }
 
 func isHex(c byte) bool {

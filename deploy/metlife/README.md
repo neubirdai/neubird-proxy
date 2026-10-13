@@ -103,7 +103,7 @@ The REST calls use `Splunk {{splunk-token}}`, so the token must be valid for Spl
 
 **ServiceNow** ([`servicenow-policy.xml`](servicenow-policy.xml)): the Table API reads NeuBird uses, e.g. `GET /api/now/table/{table}`.
 
-**Writes through MCP.** Read-only operations don't stop writes inside an MCP `POST`: a tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes or sends data, and that is the only guard on this path. Extend the patterns if your Splunk has other write commands.
+**Writes through MCP.** Read-only operations don't stop writes inside an MCP `POST`: a tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes, sends data or reaches other systems (including `| rest`), and that is the only guard on this path. Extend the patterns if your Splunk has other write commands.
 
 Also on the APIM side (security plan items 9 and 10):
 - put the APIs in a product that contains only them;

@@ -41,8 +41,10 @@ config:
     methods: [GET, HEAD, POST]
     client_auth: header
     client_auth_header: X-Neubird-Proxy-Token
+    # SPL commands that write, send, delete or reach other systems
+    # (rest calls Splunk's own REST API from inside a search).
     request_deny_patterns:
-      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|dbxoutput|dbxquery|sendresults)\\b"
+      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
     rate_limit: {requests_per_second: 10, burst: 30}
   redaction:
     mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret

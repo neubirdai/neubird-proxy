@@ -317,6 +317,57 @@ func TestDenseTouchingMatchesChunked(t *testing.T) {
 	}
 }
 
+// Zero-padded numeric entities decode for every rule, not only the raw
+// secret pass: browsers accept any number of leading zeros.
+func TestZeroPaddedEntitiesDecode(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	zeros := strings.Repeat("0", 40)
+	for _, in := range []string{
+		"jane&#0000000064;example.com",
+		"jane&#x0000000040;example.com",
+		"jane&#X" + zeros + "40;example.com",
+		"ssn 123&#000000045;45&#0000045;6789",
+		"card 4111&#x00000002d;1111&#x2d;1111&#x2d;1111",
+	} {
+		if out := e.String(in, Stats{}); strings.Contains(out, "example.com") || strings.Contains(out, "6789") || strings.Contains(out, "1111") {
+			t.Errorf("%q -> %q", in, out)
+		}
+	}
+	for in, want := range map[string]struct {
+		r rune
+		n int
+	}{
+		"&#0000000064;x": {'@', 13},
+		"&#x00040;":      {'@', 9},
+		"&#64;":          {'@', 5},
+		"&#0;":           {0, 0},         // NUL is not a character reference
+		"&#00000000;":    {0, 0},         // all zeros
+		"&#000064":       {0, 0},         // no ';'
+		"&#;":            {0, 0},         // no digits
+		"&#x;":           {0, 0},         // no hex digits
+		"&#1114112;":     {0, 0},         // past U+10FFFF
+		"&#00012345678;": {0, 0},         // too many significant digits
+		"&#x0110000;":    {0, 0},         // past U+10FFFF
+		"&#x10FFFF;":     {0x10FFFF, 10}, // the last code point
+	} {
+		r, n := entity(in)
+		if r != want.r || n != want.n {
+			t.Errorf("entity(%q) = %q,%d, want %q,%d", in, r, n, want.r, want.n)
+		}
+	}
+}
+
+// A long run of zeros after &# is scanned once, not once per '&'.
+func TestZeroPaddedEntityLinear(t *testing.T) {
+	e := engine(t, config.Redaction{})
+	in := strings.Repeat("&#"+strings.Repeat("0", 1000), 2000) // 2 MB, no ';'
+	start := time.Now()
+	e.String(in, Stats{})
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("2 MB of zero runs took %v", d)
+	}
+}
+
 // Entities with any number of leading zeros stay part of the value.
 func TestZeroPaddedEntities(t *testing.T) {
 	e := engine(t, config.Redaction{})
