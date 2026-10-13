@@ -134,6 +134,8 @@ startup.
 | `tunnelKey.generate` | default `true` | Key generated in a Secret at install, kept on upgrade and uninstall |
 | `tunnelKey.existingSecret` | | Bring your own key (`neubird-proxy keygen`), key `tunnel.key` |
 | `networkPolicy.enabled` | default `false` | Inbound only `metricsFrom` on 9090 (and mode `inbound`: `inboundFrom` on 8443, required); outbound only DNS, `relayCIDRs`:443 (mode `tunnel`), and your systems' ranges (`upstreams`) |
+| `networkPolicy.relayPorts` | default `[443]` | Mode `tunnel`: the relays' port(s) the policy allows |
+| `extraEnv` | | Extra non-secret environment (EnvVar list), e.g. `HTTPS_PROXY`/`NO_PROXY` for an outbound HTTP proxy; allow that proxy in `networkPolicy.upstreams` |
 | `replicaCount` | default `2` | NeuBird monitors `replicaCount × tunnel.connectionsPerRelay` tunnels |
 | `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `imagePullSecrets` | | As usual |
 
@@ -164,7 +166,8 @@ Secrets in the namespace can read it either way.
 - **Cut NeuBird off**: scale to 0 (tunnels close at once), or change
   `NEUBIRD_PROXY_TOKEN` and `kubectl rollout restart` the Deployment: the
   token is read at startup, so running pods accept the old one until they
-  restart.
+  restart. With `client_auth: none` (mode `tunnel` only) there is no token:
+  scale to 0, or ask NeuBird to revoke the tunnel key at the relay.
 - **Rotate the key**: create a new key Secret, send NeuBird its fingerprint,
   switch `tunnelKey.existingSecret` once NeuBird confirms.
 - **Upgrade**: load the new image, set `image.digest`, `helm upgrade`. The key is kept.

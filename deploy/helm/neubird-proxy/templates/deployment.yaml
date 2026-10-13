@@ -1,4 +1,4 @@
-{{- if not .Values.env.existingSecret }}{{ fail "env.existingSecret is required: a Secret with NEUBIRD_PROXY_TOKEN and your connections' credentials" }}{{ end }}
+{{- if not .Values.env.existingSecret }}{{ fail "env.existingSecret is required: a Secret with NEUBIRD_PROXY_TOKEN (unless client_auth: none) and your connections' credentials" }}{{ end }}
 {{- $inbound := include "neubird-proxy.inbound" . }}
 apiVersion: apps/v1
 kind: Deployment
@@ -56,6 +56,9 @@ spec:
           args: [-config, /etc/neubird-proxy/config.yaml]
           envFrom:
             - secretRef: {name: {{ .Values.env.existingSecret }}}
+          {{- with .Values.extraEnv }}
+          env: {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             {{- if $inbound }}
             - {name: proxy, containerPort: 8443}

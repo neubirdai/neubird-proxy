@@ -1,46 +1,46 @@
-# neubird-proxy at MetLife: Helm values for the chart's inbound mode, behind
-# Azure API Management. Replace every <...>. See README.md.
+# neubird-proxy at MetLife: Helm values for the chart's tunnel mode. The proxy
+# dials out to NeuBird's relay; nothing connects in. No proxy token
+# (client_auth: none). Replace every <...>. See README.md.
 #
-#   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml
+#   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
+#     --set-file relayCA.cert=relay-ca.crt
+
 image:
-  repository: <your-acr>.azurecr.io/neubird/neubird-proxy
+  repository: <your registry>/neubird/neubird-proxy
   digest: sha256:<from NeuBird's release notes>
 replicaCount: 2
-mode: inbound
-inbound:
-  tls:
-    existingSecret: neubird-proxy-tls
-  clientCA:
-    cert: |                       # the CA that signed APIM's client certificate
-      -----BEGIN CERTIFICATE-----
-      ...
-  service:
-    type: LoadBalancer
-    port: 443
-    annotations:
-      # APIM inside your VNet: an internal load balancer.
-      service.beta.kubernetes.io/azure-load-balancer-internal: "true"
-    # APIM outside your VNet: a public load balancer limited to APIM's addresses.
-    # loadBalancerSourceRanges: ["<APIM public IP>/32"]
-# MetLife's internal CA bundle: the proxy verifies every backend's certificate,
-# and each backend's certificate must name the host listed in hosts below.
+
+mode: tunnel
+tunnel:
+  relays: ["metlifemirror-tunnel.cluster.neubird.ai:443"]
+  tenant: metlifemirror
+  proxy: <proxy name>             # the name the join token is for, e.g. aks-prod
+  joinTokenEnv: NEUBIRD_JOIN_TOKEN
+
+# MetLife's internal CA bundle, if Splunk's certificate comes from it.
 upstreamCA:
   cert: |
     -----BEGIN CERTIFICATE-----
     ...
+
 env:
-  existingSecret: neubird-proxy-env
+  existingSecret: neubird-proxy-env   # NEUBIRD_JOIN_TOKEN (and REDACTION_HMAC_KEY for mask: hmac)
+
+# Outbound HTTP proxy, if internet traffic must use one (a forwarding proxy;
+# one that inspects TLS breaks the tunnel). Allow it in networkPolicy.upstreams.
+extraEnv: []
+#  - {name: HTTPS_PROXY, value: "http://<egress-proxy>:3128"}
+#  - {name: NO_PROXY, value: ".metlife.com"}
+
 config:
-  client_token_env: NEUBIRD_PROXY_TOKEN
   max_body_bytes: 20971520
   neubird_destinations:
+    # No proxy token: requests are accepted because they come down this
+    # proxy's own tunnels. Cut NeuBird off by scaling to 0.
+    client_auth: none
     hosts:                        # the only systems the proxy will call
       - splunk.corp.example:8089
-      - elastic.corp.example:9200
-      - example.service-now.com
     methods: [GET, HEAD, POST]
-    client_auth: header
-    client_auth_header: X-Neubird-Proxy-Token
     # SPL commands that write, send, delete or reach other systems
     # (rest calls Splunk's own REST API from inside a search).
     request_deny_patterns:
@@ -48,9 +48,11 @@ config:
     rate_limit: {requests_per_second: 10, burst: 30}
   redaction:
     mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
+
 networkPolicy:
   enabled: true
-  inboundFrom: [{ipBlock: {cidr: <APIM subnet or IP>}}]
+  relayCIDRs: ["3.231.28.52/32", "32.196.200.125/32"]
+  relayPorts: [443]
   upstreams:
     - {cidr: <Splunk range>, ports: [8089]}
-    - {cidr: <Elastic range>, ports: [9200]}
+    # - {cidr: <egress proxy>/32, ports: [3128]}

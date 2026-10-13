@@ -387,13 +387,18 @@ access through the NeuBird proxy and enter:
 kubectl -n $NS get secret neubird-proxy -o jsonpath='{.data.NEUBIRD_PROXY_TOKEN}' | base64 -d
 ```
 
+With `client_auth: none` under `neubird_destinations` (mode `tunnel` only),
+there is no proxy token to enter: requests are accepted because they come
+down the tunnel your proxy opened.
+
 NeuBird sends each request through the relay and the tunnel, naming the
 system's host, and the proxy forwards it only if the host is in `hosts`.
 Adding, changing or removing a system later happens in NeuBird; the proxy
 needs a change only when a new system's host isn't covered by `hosts`.
 
 To cut NeuBird off at any time: change the token in the Secret and restart
-the pods, or scale the Deployment to 0.
+the pods, or scale the Deployment to 0. With `client_auth: none`, scale to 0,
+or ask NeuBird to revoke the tunnel key at the relay.
 
 ## 8. Watch it work
 

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/neubirdai/neubird-proxy/internal/config"
 )
 
 // statusPath is answered by the proxy itself. Connection names start with
@@ -30,7 +32,8 @@ type DestinationsStatus struct {
 }
 
 // serveStatus answers GET /_neubird/status for a bearer token that opens open
-// mode. Any other token gets a 401, the same as a wrong token on a
+// mode, or for anyone when open mode takes client_auth: none (a tunnel-only
+// proxy). Any other token gets a 401, the same as a wrong token on a
 // connection.
 func (s *Server) serveStatus(w *recorder, r *http.Request) {
 	defer func() {
@@ -42,20 +45,26 @@ func (s *Server) serveStatus(w *recorder, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "status is GET only")
 		return
 	}
-	scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	tok = strings.TrimSpace(tok)
-	if !ok || !strings.EqualFold(scheme, "Bearer") || tok == "" || s.dest == nil {
+	if s.dest == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
 		return
 	}
-	sum := sha256.Sum256([]byte(tok))
-	match := 0
-	for _, t := range s.tokens[s.dest.Conn.Name] {
-		match |= subtle.ConstantTimeCompare(sum[:], t[:])
-	}
-	if match != 1 {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
-		return
+	if s.dest.Conn.ClientAuth != config.AuthNone {
+		scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		tok = strings.TrimSpace(tok)
+		if !ok || !strings.EqualFold(scheme, "Bearer") || tok == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
+			return
+		}
+		sum := sha256.Sum256([]byte(tok))
+		match := 0
+		for _, t := range s.tokens[s.dest.Conn.Name] {
+			match |= subtle.ConstantTimeCompare(sum[:], t[:])
+		}
+		if match != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid proxy token")
+			return
+		}
 	}
 	c := s.dest.Conn
 	d := &DestinationsStatus{ClientAuth: c.ClientAuth, ClientAuthHeader: c.ClientAuthHeader}
