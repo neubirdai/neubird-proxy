@@ -1641,26 +1641,3 @@ func newRequestID() string {
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
-
-// ServerTLSConfig builds the listener's TLS config: TLS 1.2 or later, and
-// with tls.client_ca_file, a required client certificate from that CA.
-func ServerTLSConfig(t *config.TLS) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("tls: %w", err)
-	}
-	c := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
-	if t.ClientCAFile != "" {
-		pem, err := os.ReadFile(t.ClientCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("tls.client_ca_file: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("tls.client_ca_file: no certificates found in %s", t.ClientCAFile)
-		}
-		c.ClientCAs = pool
-		c.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-	return c, nil
-}

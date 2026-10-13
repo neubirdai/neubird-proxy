@@ -379,7 +379,7 @@ refuses to start. Unknown YAML fields are errors.
 |---|---|---|
 | `listen` | `:8443` | Inbound listener; `off` for tunnel only (what the Helm chart sets) |
 | `admin_listen` | `:9090` | Health and metrics listener |
-| `tls.cert_file`, `tls.key_file`, `tls.client_ca_file` | none | TLS, and optionally client certificates, on the inbound listener |
+| `tls.cert_file`, `tls.key_file`, `tls.client_ca_file` | none | TLS, and optionally client certificates, on the inbound listener. Re-read every minute: a renewed certificate or CA takes effect without a restart, and files that stop loading keep the previous ones |
 | `upstream_ca_file` | system roots | Extra PEM CA bundle to trust for the systems |
 | `allow_http_upstreams` | `false` | Allow `http://` destinations; otherwise only `https://` |
 | `client_token_env` | none | Env var with the proxy token, 32+ characters |
@@ -549,8 +549,9 @@ the relay's log, the audit line and the system), otherwise a new one.
   Upstream errors log their cause, never the URL.
 - **Metrics:** `neubird_proxy_requests_total{connection,code}`,
   `neubird_proxy_redactions_total{connection,rule}`,
-  `neubird_proxy_blocked_total{connection,reason}`, and
-  `neubird_proxy_response_bytes_total{connection}`, where `connection` is
+  `neubird_proxy_blocked_total{connection,reason}`,
+  `neubird_proxy_response_bytes_total{connection}`, and, with `tls`,
+  `neubird_proxy_tls_cert_expiry_days`, where `connection` is
   `_destinations` for requests to the systems (labels never carry hosts, so
   NeuBird can't grow them).
 - **Runtime:** stateless, no disk. Runs as two replicas with a read-only root
