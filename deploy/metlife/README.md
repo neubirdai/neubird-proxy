@@ -77,7 +77,7 @@ config:
       - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|dbxoutput|dbxquery|sendresults)\\b"
     rate_limit: {requests_per_second: 10, burst: 30}
   redaction:
-    mask: label                   # or hmac, with REDACTION_HMAC_KEY in the Secret
+    mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
 networkPolicy:
   enabled: true
   inboundFrom: [{ipBlock: {cidr: <APIM subnet or IP>}}]

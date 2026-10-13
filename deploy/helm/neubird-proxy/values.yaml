@@ -22,8 +22,8 @@ mode: tunnel
 # mode: inbound only.
 inbound:
   # TLS on the listener: a kubernetes.io/tls Secret (tls.crt, tls.key).
-  # Required unless allowPlainHTTP. The proxy reads it at startup, so restart
-  # the pods after renewing it (kubectl rollout restart).
+  # Required unless allowPlainHTTP. The proxy re-reads it (and clientCA)
+  # every minute, so a renewal needs no restart.
   tls:
     existingSecret: ""
   # Mutual TLS: only clients presenting a certificate this CA signed (your

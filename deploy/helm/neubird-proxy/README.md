@@ -87,7 +87,8 @@ There's no tunnel, relay CA or tunnel key; `tunnel`, `relayCA` and
    ```sh
    kubectl -n neubird create secret tls neubird-proxy-tls --cert=tls.crt --key=tls.key
    ```
-   The proxy reads it at startup: after renewing it, run `kubectl rollout restart`.
+   The proxy re-reads it every minute, so renewing it (by hand or with
+   cert-manager) needs no restart.
 2. Install with:
    ```yaml
    mode: inbound

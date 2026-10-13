@@ -18,8 +18,11 @@ networkPolicy is off: anything in the cluster can reach port 8443. Turn it on
 with networkPolicy.inboundFrom set to your gateway.
 {{- end }}
 
-The TLS certificate is read at startup: after renewing Secret
-{{ .Values.inbound.tls.existingSecret | default "(none)" }}, run kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "neubird-proxy.fullname" . }}.
+{{- if .Values.inbound.tls.existingSecret }}
+
+The proxy re-reads Secret {{ .Values.inbound.tls.existingSecret }} and the client CA every minute: renewing
+them needs no restart. Expiry: neubird_proxy_tls_cert_expiry_days on :9090/metrics.
+{{- end }}
 
 Revoke access at any time by scaling this Deployment to 0, or by changing
 NEUBIRD_PROXY_TOKEN and restarting it (kubectl rollout restart): pods read
