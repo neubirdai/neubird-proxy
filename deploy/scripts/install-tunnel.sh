@@ -36,8 +36,11 @@ ok "tunnel mode; relays $(python3 -c "import sys,yaml; print(', '.join(yaml.safe
 step "namespace and Secret $SECRET"
 kubectl --context "$KUBE_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl --context "$KUBE_CONTEXT" create namespace "$NAMESPACE" >/dev/null
 k get secret "$SECRET" >/dev/null 2>&1 || k create secret generic "$SECRET" >/dev/null
-put() { # put KEY FILE: add one key, keeping the others
-  k patch secret "$SECRET" --type=merge -p "{\"data\":{\"$1\":\"$(base64 < "$2" | tr -d '\n')\"}}" >/dev/null
+put() { # put KEY FILE: add one key, keeping the others. The value goes in a
+  # private patch file, never on a command line (where ps could see it).
+  local p; p=$(mktemp); chmod 600 "$p"
+  printf '{"data":{"%s":"%s"}}' "$1" "$(base64 < "$2" | tr -d '\n')" > "$p"
+  k patch secret "$SECRET" --type=merge --patch-file "$p" >/dev/null; rm -f "$p"
 }
 if [ -n "${JOIN_TOKEN_FILE:-}" ]; then
   grep -qE '^nbjt_[A-Za-z0-9_-]{43}$' "$JOIN_TOKEN_FILE" || die "$JOIN_TOKEN_FILE doesn't hold a join token"
@@ -55,13 +58,23 @@ helm --kube-context "$KUBE_CONTEXT" upgrade --install "$RELEASE" "$CHART" -n "$N
 ok "installed"
 
 step "enrollment and tunnels (up to ${TIMEOUT}s)"
-end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0
+# Enrollment refusals (token expired, used, for another proxy) are final:
+# stop at once. A refused tunnel can be transient (a relay replica that hasn't
+# seen a just-enrolled key yet), so it fails only if no tunnel connects within
+# a minute of the first refusal.
+end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""
 while [ $SECONDS -lt $end ]; do
   logs=$(k logs -l "app.kubernetes.io/instance=$RELEASE" --tail=-1 2>/dev/null || true)
   grep -qE '"msg":"(enrolled with the join token|key already enrolled)"' <<<"$logs" && enrolled=1
-  if r=$(grep -oE 'relay refused: [^"]+' <<<"$logs" | tail -1) && [ -n "$r" ] && [ -z "$enrolled" ]; then die "$r"; fi
+  r=$(grep -oE 'enrollment: relay refused[^"]*' <<<"$logs" | tail -1 || true)
+  [ -n "$r" ] && [ -z "$enrolled" ] && die "$r (ask NeuBird for a new join token)"
   connected=$(grep -c '"msg":"tunnel connected"' <<<"$logs" || true)
   [ "$connected" -gt 0 ] && k rollout status "deploy/$RELEASE" --timeout=5s >/dev/null 2>&1 && break
+  t=$(grep -oE 'relay refused the tunnel[^"]*' <<<"$logs" | tail -1 || true)
+  if [ -n "$t" ] && [ "$connected" -eq 0 ]; then
+    refused_at=${refused_at:-$SECONDS}
+    [ $((SECONDS - refused_at)) -ge 60 ] && die "$t"
+  fi
   sleep 5
 done
 [ "$connected" -gt 0 ] || die "no tunnel connected; last errors: $(grep -oE '"msg":"tunnel connect failed"[^}]*' <<<"$logs" | tail -1)"
