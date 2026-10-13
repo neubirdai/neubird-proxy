@@ -134,6 +134,8 @@ startup.
 | `tunnelKey.generate` | default `true` | Key generated in a Secret at install, kept on upgrade and uninstall |
 | `tunnelKey.existingSecret` | | Bring your own key (`neubird-proxy keygen`), key `tunnel.key` |
 | `networkPolicy.enabled` | default `false` | Inbound only `metricsFrom` on 9090 (and mode `inbound`: `inboundFrom` on 8443, required); outbound only DNS, `relayCIDRs`:443 (mode `tunnel`), and your systems' ranges (`upstreams`) |
+| `networkPolicy.relayPorts` | default `[443]` | Mode `tunnel`: the relays' port(s) the policy allows |
+| `extraEnv` | | Extra non-secret environment (EnvVar list), e.g. `HTTPS_PROXY`/`NO_PROXY` for an outbound HTTP proxy; allow that proxy in `networkPolicy.upstreams` |
 | `replicaCount` | default `2` | NeuBird monitors `replicaCount × tunnel.connectionsPerRelay` tunnels |
 | `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `imagePullSecrets` | | As usual |
 

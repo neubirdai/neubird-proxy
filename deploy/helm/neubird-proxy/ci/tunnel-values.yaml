@@ -9,6 +9,9 @@ tunnel:
   proxy: aks-prod
 env:
   existingSecret: neubird-proxy-env
+extraEnv:
+  - {name: HTTPS_PROXY, value: "http://egress.example.com:3128"}
+  - {name: NO_PROXY, value: ".example.com"}
 config:
   client_token_env: NEUBIRD_PROXY_TOKEN
   neubird_destinations:

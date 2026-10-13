@@ -70,6 +70,10 @@
         "existingSecret": {"type": "string"}
       }
     },
+    "extraEnv": {
+      "type": "array",
+      "items": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+    },
     "env": {
       "type": "object",
       "properties": {"existingSecret": {"type": "string"}}
@@ -80,6 +84,7 @@
       "properties": {
         "enabled": {"type": "boolean"},
         "relayCIDRs": {"type": "array", "items": {"type": "string"}},
+        "relayPorts": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
         "inboundFrom": {"type": "array", "items": {"type": "object"}},
         "upstreams": {
           "type": "array",

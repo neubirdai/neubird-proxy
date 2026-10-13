@@ -1,56 +1,79 @@
-# neubird-proxy at MetLife: Helm values for the chart's inbound mode, behind
-# Azure API Management. Replace every <...>. See README.md.
+# neubird-proxy at MetLife: Helm values for tunnel mode. The proxy dials out to
+# MetLife's NeuBird relay and calls MetLife's APIM, which fronts Splunk.
+# Replace every <...>. See README.md.
 #
-#   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml
+#   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
+#     --set-file relayCA.cert=relay-ca.crt --set-file upstreamCA.cert=metlife-ca.pem
+
 image:
   repository: <your-acr>.azurecr.io/neubird/neubird-proxy
   digest: sha256:<from NeuBird's release notes>
 replicaCount: 2
-mode: inbound
-inbound:
-  tls:
-    existingSecret: neubird-proxy-tls
-  clientCA:
-    cert: |                       # the CA that signed APIM's client certificate
-      -----BEGIN CERTIFICATE-----
-      ...
-  service:
-    type: LoadBalancer
-    port: 443
-    annotations:
-      # APIM inside your VNet: an internal load balancer.
-      service.beta.kubernetes.io/azure-load-balancer-internal: "true"
-    # APIM outside your VNet: a public load balancer limited to APIM's addresses.
-    # loadBalancerSourceRanges: ["<APIM public IP>/32"]
-# MetLife's internal CA bundle: the proxy verifies every backend's certificate,
-# and each backend's certificate must name the host listed in hosts below.
-upstreamCA:
-  cert: |
-    -----BEGIN CERTIFICATE-----
-    ...
+
+mode: tunnel
+tunnel:
+  relays: ["<tenant>.tunnel.neubird.ai:443"]   # from NeuBird
+  tenant: <tenant>                             # from NeuBird
+  proxy: aks-prod                              # your name for this deployment
+  connectionsPerRelay: 2
+  joinTokenEnv: NEUBIRD_JOIN_TOKEN             # enrolls the key on first connect
+
+# relayCA (NeuBird's, public) and upstreamCA (the CA that signs
+# int.apis.metlife.com) are passed with --set-file, as above.
+
+# Generated in a Secret at install and kept. With helm template / GitOps, make
+# the key with `neubird-proxy keygen` and set existingSecret instead.
+tunnelKey:
+  generate: true
+
+# Secret neubird-proxy-env: NEUBIRD_PROXY_TOKEN, APIM_SUBSCRIPTION_KEY,
+# REDACTION_HMAC_KEY (32+ characters) and NEUBIRD_JOIN_TOKEN.
 env:
   existingSecret: neubird-proxy-env
+
+# Outbound HTTP proxy, if internet traffic must use one. Allow it in
+# networkPolicy.upstreams below.
+extraEnv: []
+#  - {name: HTTPS_PROXY, value: "http://<egress-proxy>:3128"}
+#  - {name: NO_PROXY, value: ".metlife.com"}
+
 config:
   client_token_env: NEUBIRD_PROXY_TOKEN
   max_body_bytes: 20971520
-  neubird_destinations:
-    hosts:                        # the only systems the proxy will call
-      - splunk.corp.example:8089
-      - elastic.corp.example:9200
-      - example.service-now.com
-    methods: [GET, HEAD, POST]
-    client_auth: header
-    client_auth_header: X-Neubird-Proxy-Token
-    # SPL commands that write, send, delete or reach other systems
-    # (rest calls Splunk's own REST API from inside a search).
-    request_deny_patterns:
-      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
-    rate_limit: {requests_per_second: 10, burst: 30}
+  connections:
+    # Splunk behind MetLife's APIM. The proxy adds the subscription key;
+    # NeuBird never holds it.
+    - name: splunk
+      upstream: https://int.apis.metlife.com/<splunk api path>
+      client_auth: bearer
+      methods: [GET, POST]
+      paths:
+        - /services/search/jobs
+        - /services/search/jobs/[A-Za-z0-9._-]+(/(results|control))?
+        - /services/data/indexes
+        - /services/server/info
+        - /services/mcp
+      headers:
+        Ocp-Apim-Subscription-Key: ${APIM_SUBSCRIPTION_KEY}
+      # SPL commands that write, send, delete or reach other systems.
+      request_deny_patterns:
+        - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
+      rate_limit: {requests_per_second: 5, burst: 20}
   redaction:
-    mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
+    custom:
+      - name: member_id
+        regex: "\\bMET[0-9]{9}\\b"
+    mask: hmac
+    hmac_key_env: REDACTION_HMAC_KEY
+
 networkPolicy:
   enabled: true
-  inboundFrom: [{ipBlock: {cidr: <APIM subnet or IP>}}]
+  relayCIDRs: ["<relay IP>/32"]            # from NeuBird
+  relayPorts: [443]
   upstreams:
-    - {cidr: <Splunk range>, ports: [8089]}
-    - {cidr: <Elastic range>, ports: [9200]}
+    - {cidr: <APIM range>, ports: [443]}
+    # - {cidr: <egress proxy>/32, ports: [3128]}
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 512Mi}
