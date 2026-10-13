@@ -17,8 +17,9 @@ tunnel:
   proxy: <proxy name>             # the name the join token is for, e.g. aks-prod
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
-# MetLife's internal CA bundle, if Splunk's certificate comes from it. It is
-# added to the public CAs, so ServiceNow's certificate still verifies.
+# MetLife's internal CA bundle, if Splunk's certificate comes from it (delete
+# the block otherwise: the placeholder isn't a certificate). It is added to
+# the public CAs, so ServiceNow's certificate still verifies.
 upstreamCA:
   cert: |
     -----BEGIN CERTIFICATE-----
@@ -35,11 +36,12 @@ resources:
 
 # Outbound HTTP proxy for internet traffic: the relay tunnel and ServiceNow
 # (SaaS, no fixed addresses for networkPolicy). A forwarding proxy; one that
-# inspects TLS breaks the tunnel. NO_PROXY must cover Splunk (direct).
-# Allow the egress proxy in networkPolicy.upstreams.
-extraEnv: []
-#  - {name: HTTPS_PROXY, value: "http://<egress-proxy>:3128"}
-#  - {name: NO_PROXY, value: ".metlife.com"}
+# inspects TLS breaks the tunnel. NO_PROXY keeps Splunk direct. The egress
+# proxy is in networkPolicy.upstreams below; without one, set extraEnv: [] and
+# allow ServiceNow and the relay another way (see README, Locking down).
+extraEnv:
+  - {name: HTTPS_PROXY, value: "http://<egress proxy>:3128"}
+  - {name: NO_PROXY, value: "<splunk host>"}
 
 config:
   max_body_bytes: 20971520
@@ -48,7 +50,7 @@ config:
     # proxy's own tunnels. Cut NeuBird off by scaling to 0.
     client_auth: none
     hosts:                        # the only systems the proxy will call
-      - splunk.corp.example:8089  # its certificate must name this host
+      - <splunk host>:8089        # its certificate must name this host
       - <instance>.service-now.com
     # Headers NeuBird's credentials travel in: Authorization (Splunk token,
     # ServiceNow OAuth/basic) and x-sn-apikey (ServiceNow API key).
