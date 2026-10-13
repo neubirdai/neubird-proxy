@@ -1,0 +1,42 @@
+# neubird-proxy at MetLife: Helm values for the chart's tunnel mode (no
+# APIM). The proxy dials out to NeuBird's relay; nothing connects in.
+# Replace every <...>. See tunnel.md.
+#
+#   helm install neubird-proxy ./neubird-proxy -n neubird -f values-tunnel.yaml \
+#     --set-file relayCA.cert=relay-ca.crt
+image:
+  repository: <your registry>/neubird/neubird-proxy
+  digest: sha256:<from NeuBird's release notes>
+replicaCount: 2
+mode: tunnel
+tunnel:
+  relays: ["metlifemirror-tunnel.cluster.neubird.ai:443"]
+  tenant: metlifemirror
+  proxy: <proxy name>             # the name the join token is for, e.g. aks-prod
+  joinTokenEnv: NEUBIRD_JOIN_TOKEN
+# MetLife's internal CA bundle, if Splunk's certificate comes from it.
+upstreamCA:
+  cert: |
+    -----BEGIN CERTIFICATE-----
+    ...
+env:
+  existingSecret: neubird-proxy-env   # NEUBIRD_PROXY_TOKEN, NEUBIRD_JOIN_TOKEN
+config:
+  client_token_env: NEUBIRD_PROXY_TOKEN
+  max_body_bytes: 20971520
+  neubird_destinations:
+    hosts:                        # the only systems the proxy will call
+      - splunk.corp.example:8089
+    methods: [GET, HEAD, POST]
+    # SPL commands that write, send, delete or reach other systems
+    # (rest calls Splunk's own REST API from inside a search).
+    request_deny_patterns:
+      - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
+    rate_limit: {requests_per_second: 10, burst: 30}
+  redaction:
+    mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
+networkPolicy:
+  enabled: true
+  relayCIDRs: ["3.231.28.52/32", "32.196.200.125/32"]
+  upstreams:
+    - {cidr: <Splunk range>, ports: [8089]}

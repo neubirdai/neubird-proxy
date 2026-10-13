@@ -4,9 +4,12 @@ This guide covers what MetLife sets up to run neubird-proxy: the proxy in MetLif
 
 The proxy needs no outbound connection to NeuBird. It must accept connections only from APIM.
 
+Without APIM, the proxy reaches NeuBird through an outbound tunnel instead: see [tunnel.md](tunnel.md).
+
 | File | What it is |
 |---|---|
 | [`values.yaml`](values.yaml) | Helm values for the chart's inbound mode |
+| [`tunnel.md`](tunnel.md), [`values-tunnel.yaml`](values-tunnel.yaml) | The tunnel path, without APIM |
 | [`splunk-policy.xml`](splunk-policy.xml) | APIM policy for the Splunk API |
 | [`elastic-policy.xml`](elastic-policy.xml) | APIM policy for the Elasticsearch API |
 | [`servicenow-policy.xml`](servicenow-policy.xml) | APIM policy for the ServiceNow API |
