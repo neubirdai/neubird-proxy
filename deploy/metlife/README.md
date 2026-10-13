@@ -4,14 +4,13 @@
 NeuBird ─▶ relay ⇄ tunnel (dialed out by the proxy, :443, mutual TLS) ⇄ neubird-proxy (AKS) ─▶ Splunk, ServiceNow
 ```
 
-The proxy runs in MetLife's AKS and opens outbound tunnels to NeuBird's relay for MetLife; NeuBird's requests come back down those tunnels. Nothing connects in to MetLife: no load balancer, no inbound firewall rule. The proxy checks every request and redacts every response before it leaves MetLife.
+The proxy runs in MetLife's AKS and opens outbound tunnels to NeuBird's relay for MetLife; NeuBird's requests come back down those tunnels. Nothing connects in to MetLife: no load balancer, no inbound firewall rule. The proxy calls Splunk and ServiceNow directly, with no gateway in between; it checks every request and redacts every response before it leaves MetLife.
 
 There is no proxy token (`client_auth: none`): a request is accepted because it arrives over a tunnel this proxy opened, to a relay it verified, with a key the relay has pinned. Cutting NeuBird off is scaling to 0 (below).
 
 | File | What it is |
 |---|---|
 | [`values.yaml`](values.yaml) | Helm values for the chart's tunnel mode |
-| [`apim/`](apim/README.md) | Alternative: the proxy behind Azure API Management, no tunnel |
 
 ## What NeuBird sends MetLife
 
@@ -153,29 +152,7 @@ In NeuBird, add each system as a connection and choose access through the NeuBir
 
 On this path the credentials are held by NeuBird, in the connections, and sent with each request; the proxy forwards each only to its own system, which must be in `neubird_destinations.hosts`.
 
-**Writes through MCP.** A tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes, sends data or reaches other systems (including `| rest`), and nothing else on this path does: there is no APIM to restrict paths. Give the Splunk token a read-only role, and extend the patterns if your Splunk has other write commands.
-
-## Splunk directly or through APIM
-
-This guide calls Splunk directly from inside MetLife's network. If Splunk is reachable only through MetLife's APIM, the tunnel works the same; what changes is the proxy's upstream:
-
-| | Through APIM | Directly (this guide) |
-|---|---|---|
-| Proxy's upstream | `https://int.apis.metlife.com/<splunk api path>` | `https://splunk.metlife.com:8089` |
-| Splunk credential | APIM adds it | Sent with each request: a token with a read-only role |
-| APIM subscription key | Sent with each request (a named connection in the proxy adds it) | None |
-| Splunk's certificate | The gateway's | Possibly MetLife's internal CA: add it as `upstreamCA` |
-| Paths and methods | APIM's published operations, then the proxy | The proxy only |
-| Writes inside searches | `request_deny_patterns` | `request_deny_patterns`: the only guard |
-| Gateway or WAF refusals | Possible (fast 403s before Splunk sees the search) | None |
-
-Unchanged either way: the relay, the tunnel and the NeuBird side.
-
-Check reachability from a proxy pod (DNS, TCP and TLS only; no request is sent):
-
-```sh
-kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml https://splunk.metlife.com:8089
-```
+**Writes through MCP.** A tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes, sends data or reaches other systems (including `| rest`), and nothing in front of Splunk does. Give the Splunk token a read-only role, and extend the patterns if your Splunk has other write commands.
 
 ## Cutting NeuBird off
 
