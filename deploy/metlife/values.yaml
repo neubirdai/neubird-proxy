@@ -12,25 +12,36 @@ replicaCount: 2
 
 mode: tunnel
 tunnel:
-  relays: ["metlifemirror-tunnel.cluster.neubird.ai:443"]
-  tenant: metlifemirror
+  relays: ["metlife-tunnel.neubird.ai:443"]
+  tenant: metlife
   proxy: <proxy name>             # the name the join token is for, e.g. aks-prod
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
-# MetLife's internal CA bundle, if Splunk's certificate comes from it.
+# MetLife's internal CA bundle, if Splunk's certificate comes from it (delete
+# the block otherwise: the placeholder isn't a certificate). It is added to
+# the public CAs, so ServiceNow's certificate still verifies.
 upstreamCA:
   cert: |
     -----BEGIN CERTIFICATE-----
     ...
 
 env:
-  existingSecret: neubird-proxy-env   # NEUBIRD_JOIN_TOKEN (and REDACTION_HMAC_KEY for mask: hmac)
+  existingSecret: neubird-proxy-env   # NEUBIRD_JOIN_TOKEN until enrolled (and REDACTION_HMAC_KEY for mask: hmac)
 
-# Outbound HTTP proxy, if internet traffic must use one (a forwarding proxy;
-# one that inspects TLS breaks the tunnel). Allow it in networkPolicy.upstreams.
-extraEnv: []
-#  - {name: HTTPS_PROXY, value: "http://<egress-proxy>:3128"}
-#  - {name: NO_PROXY, value: ".metlife.com"}
+# Responses are buffered up to max_body_bytes, sized from this limit: 640Mi
+# fits 20 MiB with mask: label (512Mi stops at about 19 MiB, 15 MiB with hmac).
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 640Mi}
+
+# Outbound HTTP proxy for internet traffic: the relay tunnel and ServiceNow
+# (SaaS, no fixed addresses for networkPolicy). A forwarding proxy; one that
+# inspects TLS breaks the tunnel. NO_PROXY keeps Splunk direct. The egress
+# proxy is in networkPolicy.upstreams below; without one, set extraEnv: [] and
+# allow ServiceNow and the relay another way (see README, Locking down).
+extraEnv:
+  - {name: HTTPS_PROXY, value: "http://<egress proxy>:3128"}
+  - {name: NO_PROXY, value: "<splunk host>"}
 
 config:
   max_body_bytes: 20971520
@@ -39,8 +50,15 @@ config:
     # proxy's own tunnels. Cut NeuBird off by scaling to 0.
     client_auth: none
     hosts:                        # the only systems the proxy will call
-      - splunk.corp.example:8089
-    methods: [GET, HEAD, POST]
+      - <splunk host>:8089        # its certificate must name this host
+      - <instance>.service-now.com
+    # Headers NeuBird's credentials travel in: Authorization (Splunk token,
+    # ServiceNow OAuth/basic) and x-sn-apikey (ServiceNow API key).
+    credential_headers: [Authorization, x-sn-apikey]
+    methods: [GET, HEAD, POST]    # POST for Splunk (MCP and searches)
+    # ServiceNow read-only: no POST, so no records can be created.
+    host_methods:
+      - {hosts: ["*.service-now.com"], methods: [GET, HEAD]}
     # SPL commands that write, send, delete or reach other systems
     # (rest calls Splunk's own REST API from inside a search).
     request_deny_patterns:
@@ -51,8 +69,11 @@ config:
 
 networkPolicy:
   enabled: true
-  relayCIDRs: ["3.231.28.52/32", "32.196.200.125/32"]
+  relayCIDRs: ["<relay IP 1>/32", "<relay IP 2>/32", "<relay IP 3>/32"]   # from NeuBird
   relayPorts: [443]
   upstreams:
     - {cidr: <Splunk range>, ports: [8089]}
-    # - {cidr: <egress proxy>/32, ports: [3128]}
+    - {cidr: <egress proxy>/32, ports: [3128]}   # ServiceNow and the relay, via HTTPS_PROXY
+  # Prometheus may scrape :9090; empty blocks all inbound traffic.
+  metricsFrom: []
+  #  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}

@@ -298,3 +298,30 @@ func TestClientAuthNone(t *testing.T) {
 		})
 	}
 }
+
+// host_methods narrows methods per destination host and can't widen them.
+func TestHostMethods(t *testing.T) {
+	e := env(map[string]string{"TOKEN": tok})
+	base := "client_token_env: TOKEN\nneubird_destinations:\n  hosts: ['splunk.acme.com:8089', 'acme.service-now.com']\n  methods: [GET, HEAD, POST]\n"
+	c, err := Parse([]byte(base+"  host_methods:\n    - {hosts: ['*.service-now.com'], methods: [get, head]}\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := c.NeubirdDestinations
+	if ms := d.MethodsFor("acme.service-now.com", "443"); ms["POST"] || !ms["GET"] || !ms["HEAD"] {
+		t.Fatalf("service-now: %v", ms)
+	}
+	if ms := d.MethodsFor("splunk.acme.com", "8089"); !ms["POST"] {
+		t.Fatalf("splunk keeps the shared methods: %v", ms)
+	}
+	for _, bad := range []string{
+		"  host_methods:\n    - {hosts: ['*.service-now.com'], methods: [DELETE]}\n", // wider than methods
+		"  host_methods:\n    - {hosts: ['*.service-now.com']}\n",                    // no methods
+		"  host_methods:\n    - {methods: [GET]}\n",                                  // no hosts
+		"  host_methods:\n    - {hosts: ['bad name'], methods: [GET]}\n",
+	} {
+		if _, err := Parse([]byte(base+bad), e); err == nil {
+			t.Errorf("want an error for %q", bad)
+		}
+	}
+}
