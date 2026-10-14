@@ -62,7 +62,7 @@ Send NeuBird the key fingerprint from that summary (it isn't secret): NeuBird ch
 | `--relay-ca` | no | Path to the relay CA certificate (default `relay-ca.crt`) |
 | `--timeout` | no | Seconds to wait for the tunnels (default 300) |
 
-Each option can also be set as its environment variable (`--kube-context` as `KUBE_CONTEXT`, `--dry-run` as `DRY_RUN=1`, and so on); a command-line option wins, and the script says when a setting came from the environment.
+Each option can also be set as its environment variable (`--kube-context` as `KUBE_CONTEXT`, `--dry-run` as `DRY_RUN=1`, and so on); a command-line option wins, and the script says when a setting came from the environment. A package's presets (its `.env` file) win over the environment, with a note when one replaces a value you set. `--uninstall`, `--purge` and `--yes` are taken only from the command line, so a variable left in your shell can't turn an install into an uninstall.
 
 For example, Splunk and ServiceNow only, through an egress proxy for internet traffic:
 
