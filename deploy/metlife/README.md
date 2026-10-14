@@ -18,9 +18,10 @@ The proxy runs in MetLife's AKS and dials out to NeuBird's relay; NeuBird's requ
 | Relay IPs | `3.231.28.52`, `32.196.200.125` |
 | Tenant | `metlifemirror` |
 | Relay CA certificate | `relay-ca.crt` |
-| Join token (**secret**, single use, 72 h) | `nbjt_…`, for proxy `dryrun` |
+| Join token (**secret**, single use) | `nbjt_…`, for proxy `dryrun`; expires 2026-10-17 03:40 UTC |
+| Helm chart | A neubird-proxy checkout (`deploy/helm/neubird-proxy`) |
 
-Allow outbound TCP 443 to the relay IPs **without TLS inspection** (a plain CONNECT proxy is fine; set it with `extraEnv`). MetLife sends nothing back.
+Allow outbound TCP 443 to the relay IPs **without TLS inspection** (a plain CONNECT proxy is fine; uncomment `extraEnv` in the values). MetLife sends nothing back.
 
 ## Enrolling the proxy's key: join token
 
@@ -61,6 +62,14 @@ The key must be at least 32 characters. Keep it in MetLife's secret store and ne
       - <instance>.service-now.com
 ```
 
+**Dry run:** use NeuBird's dev systems instead:
+
+```yaml
+    hosts:
+      - splunk-e2e.tools.neubird.ai
+      - dev439803.service-now.com
+```
+
 Everything else is set: the image (by digest), the relay, tenant and proxy name (`dryrun`, which the join token is for), and the relay's IPs.
 
 Optional, each commented in the file:
@@ -73,7 +82,7 @@ Optional, each commented in the file:
 Then install:
 
 ```sh
-helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
+helm install neubird-proxy deploy/helm/neubird-proxy -n neubird -f values.yaml \
   --set-file relayCA.cert=relay-ca.crt
 ```
 
@@ -85,29 +94,25 @@ Notes:
 - **ServiceNow:** use a read-only API key (`x-sn-apikey`) or OAuth/basic auth. `host_methods` limits it to GET and HEAD.
 - **Memory:** keep the 640 Mi limit for the 20 MiB `max_body_bytes`.
 
-For an install NeuBird runs (or a test setup), `deploy/scripts/install-tunnel.sh` from NeuBird's repository does steps 1–3 in one go: it adds the join token to the Secret, installs, waits for enrollment and the tunnels, tests each system, and removes the spent token:
-
-```sh
-KUBE_CONTEXT=<context> NAMESPACE=neubird VALUES=values.yaml RELAY_CA=relay-ca.crt \
-  JOIN_TOKEN_FILE=join.token UPSTREAM_CA=metlife-ca.pem deploy/scripts/install-tunnel.sh
-```
-
 ### 3. Check it
 
 ```sh
-kubectl -n neubird rollout status deploy/neubird-proxy
-kubectl -n neubird logs -l app=neubird-proxy --tail=-1 --prefix \
-  | grep -E '"msg":"(starting|enrolled with the join token|key already enrolled|tunnel connected|tunnel connect failed|risky configuration)"'
-kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml
+kubectl -n neubird rollout status deploy/neubird-proxy --timeout=5m
 kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml \
   https://<splunk host>:8089 https://<instance>.service-now.com
 ```
 
-The pods turn ready only once a tunnel is up. The `starting` line should show `"tunnel":true`. A `risky configuration` warning for `client_auth: none` is expected. Once the proxy has enrolled, delete `NEUBIRD_JOIN_TOKEN` from the Secret (`kubectl -n neubird patch secret neubird-proxy-env --type=json -p '[{"op":"remove","path":"/data/NEUBIRD_JOIN_TOKEN"}]'`); it can't be used again anyway.
+It passes if the rollout completes and the test reports no failures: the pods turn ready only once the proxy has enrolled and a tunnel is up, and the test checks each system answers. If it fails, the logs say why: `kubectl -n neubird logs -l app=neubird-proxy --tail=50 --prefix`. A `risky configuration` warning for `client_auth: none` is expected.
+
+Once it passes, delete the spent join token from the Secret; it can't be used again anyway:
+
+```sh
+kubectl -n neubird patch secret neubird-proxy-env --type=json -p '[{"op":"remove","path":"/data/NEUBIRD_JOIN_TOKEN"}]'
+```
 
 ## Locking down the network
 
-In tunnel mode the proxy accepts no connections and needs only four outbound destinations. Box it in at three layers; the first comes with the chart.
+In tunnel mode the proxy accepts no connections and needs only four outbound destinations. Box it in at three layers; the chart can render the first (off by default in the values).
 
 | Direction | Peer | Port | Why |
 |---|---|---|---|
@@ -151,12 +156,14 @@ With all three, the pod can reach only DNS, the egress proxy (or the firewall's 
 
 ## Connect NeuBird
 
-In NeuBird, add each system as a connection and choose access through the NeuBird proxy. The relay is fixed for MetLife's NeuBird deployment, and there is no proxy token to enter.
+In metlifemirror's NeuBird, add each system as a connection and choose access through the NeuBird proxy. Only metlifemirror's NeuBird can reach this relay. There is no proxy token to enter.
 
 | System | URL | Credential |
 |---|---|---|
 | Splunk | `https://<splunk host>:8089/services/mcp` | Splunk token (read-only role) |
 | ServiceNow | `https://<instance>.service-now.com` | API access key (read-only role) |
+
+For the dry run: Splunk `https://splunk-e2e.tools.neubird.ai` and ServiceNow `https://dev439803.service-now.com`, with the dev credentials from NeuBird engineering.
 
 On this path the credentials are held by NeuBird, in the connections, and sent with each request; the proxy forwards each only to its own system, which must be in `neubird_destinations.hosts`.
 
