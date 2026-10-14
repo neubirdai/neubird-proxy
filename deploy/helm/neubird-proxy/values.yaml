@@ -58,7 +58,9 @@ relayCA:
   existingConfigMap: ""   # a ConfigMap with key relay-ca.crt
 
 # Optional: extra CA certificates to trust for your upstreams (e.g. an API
-# gateway with an internal certificate). Sets upstream_ca_file.
+# gateway with an internal certificate), added to the public ones. Sets
+# upstream_ca_file. Read at startup: a change to `cert` rolls the pods; after
+# changing an existingConfigMap, run kubectl rollout restart.
 upstreamCA:
   cert: ""                # PEM bundle, or:
   existingConfigMap: ""   # a ConfigMap with key ca.crt
@@ -74,11 +76,11 @@ tunnelKey:
   generate: true
   existingSecret: ""      # a Secret with key tunnel.key
 
-# A Secret you create, loaded as environment: NEUBIRD_PROXY_TOKEN (NeuBird's
-# token, which you also enter in NeuBird's connection; not needed in mode
-# tunnel with config.neubird_destinations.client_auth: none),
-# REDACTION_HMAC_KEY if config.redaction uses hmac, and every ${VAR} your
-# connections use.
+# A Secret you create, loaded as environment: NEUBIRD_JOIN_TOKEN (until the
+# key is enrolled), REDACTION_HMAC_KEY if config.redaction uses hmac, and
+# NEUBIRD_PROXY_TOKEN in mode inbound (the token your gateway sends). Mode
+# tunnel needs no proxy token: every request comes down the proxy's own
+# tunnel, and neubird_destinations defaults to client_auth: none.
 env:
   existingSecret: ""
 
@@ -97,10 +99,12 @@ extraEnv: []
 # with listen: off, or (mode inbound) listen: :8443 and tls (from
 # `inbound`). ${VAR} placeholders are filled from env.
 config:
+  # The proxy token's variable: used in mode inbound (the chart leaves it out
+  # in mode tunnel, where client_auth defaults to none).
   client_token_env: NEUBIRD_PROXY_TOKEN
   # neubird_destinations:
   #   hosts: ["*.corp.example.com"]   # optional; omitted means any host name
-  #   client_auth: none               # mode tunnel only: no proxy token
+  #   client_auth: none               # the default in mode tunnel; set bearer to require a token
   # redaction:
   #   mask: hmac
   #   hmac_key_env: REDACTION_HMAC_KEY

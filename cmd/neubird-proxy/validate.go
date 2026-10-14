@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -12,6 +13,7 @@ import (
 	"github.com/neubirdai/neubird-proxy/internal/config"
 	"github.com/neubirdai/neubird-proxy/internal/redact"
 	"github.com/neubirdai/neubird-proxy/internal/tunnel"
+	"gopkg.in/yaml.v3"
 )
 
 func contains(list []string, s string) bool { return slices.Contains(list, s) }
@@ -22,8 +24,9 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	var cf commonFlags
 	cf.register(fs)
 	offline := fs.Bool("offline", false, "don't require secrets: missing environment variables get placeholders and are listed")
+	asTunnel := fs.Bool("tunnel", false, "check the config as the Helm chart runs it in mode tunnel: adds listen: off, a placeholder tunnel section, and neubird_destinations.client_auth: none when unset")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: neubird-proxy validate [-config path] [-env-file file] [-offline]")
+		fmt.Fprintln(stderr, "usage: neubird-proxy validate [-config path] [-env-file file] [-offline] [-tunnel]")
 		fmt.Fprintln(stderr, "\nChecks everything the proxy checks at startup, prints its warnings, and summarizes each connection.")
 		fs.PrintDefaults()
 	}
@@ -36,7 +39,18 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
-	cfg, engine, err := loadConfig(cf.config, sec)
+	raw, err := os.ReadFile(cf.config)
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
+	if *asTunnel {
+		if raw, err = chartTunnel(raw); err != nil {
+			fmt.Fprintf(stdout, "INVALID %s\n  error: %v\n", cf.config, err)
+			return 1
+		}
+	}
+	cfg, engine, err := loadConfigBytes(raw, sec)
 	if err != nil {
 		fmt.Fprintf(stdout, "INVALID %s\n", cf.config)
 		lines := splitErrors(err)
@@ -111,7 +125,9 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		case t.JoinTokenEnv != "":
 			fmt.Fprintf(stdout, "  join token: %s is empty; the key must already be recorded or enrolled\n", t.JoinTokenEnv)
 		}
-		if *offline {
+		if *asTunnel {
+			fmt.Fprintln(stdout, "  tunnel section added as the Helm chart adds it (relay, tenant and key come from its values)")
+		} else if *offline {
 			fmt.Fprintln(stdout, "  certificate, key and CA files not checked (offline)")
 		} else if id, err := tunnel.Load(t); err != nil {
 			fmt.Fprintf(stdout, "INVALID tunnel: %v\n", err)
@@ -162,4 +178,42 @@ func allowHeaderOf(set map[string]bool) string {
 		}
 	}
 	return strings.Join(ms, ",")
+}
+
+// chartTunnel adds to a config what the Helm chart adds in mode tunnel:
+// listen: off, a tunnel section (placeholders here: the chart fills it from
+// its values), and, with a neubird_destinations that names no token
+// (client_auth, client_token_env, client_auth_header), client_auth: none. It refuses a config that already sets listen or tunnel, as the chart
+// does.
+func chartTunnel(raw []byte) ([]byte, error) {
+	var m map[string]any
+	if err := yaml.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	for _, k := range []string{"listen", "tunnel"} {
+		if _, ok := m[k]; ok {
+			return nil, fmt.Errorf("%s: leave it out with -tunnel (the chart sets it)", k)
+		}
+	}
+	m["listen"] = config.ListenOff
+	m["tunnel"] = map[string]any{
+		"relays": []string{"relay.invalid:443"}, "tenant": "tenant", "proxy": "proxy",
+		"key_file": "tunnel.key", "ca_file": "relay-ca.crt",
+	}
+	if d, ok := m["neubird_destinations"].(map[string]any); ok {
+		// As the chart: only when the section names no token at all.
+		unset := true
+		for _, k := range []string{"client_auth", "client_token_env", "client_auth_header"} {
+			if v, _ := d[k].(string); v != "" {
+				unset = false
+			}
+		}
+		if unset {
+			d["client_auth"] = "none"
+		}
+	}
+	return yaml.Marshal(m)
 }

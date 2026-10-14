@@ -11,20 +11,19 @@ tunnel:
 # relayCA: pass the file NeuBird sent: --set-file relayCA.cert=relay-ca.crt
 
 # Secret neubird-proxy-env, created by you (or your secret store) with:
-#   NEUBIRD_PROXY_TOKEN     neubird-proxy token (also entered in NeuBird's connections)
-#   REDACTION_HMAC_KEY      openssl rand -hex 32
 #   NEUBIRD_JOIN_TOKEN      the join token from NeuBird (enrolls the key; removable after)
+#   REDACTION_HMAC_KEY      openssl rand -hex 32 (only with mask: hmac)
+# No proxy token: requests come down the proxy's own tunnel (client_auth: none).
 env:
   existingSecret: neubird-proxy-env
 
 config:
-  client_token_env: NEUBIRD_PROXY_TOKEN
   max_body_bytes: 20971520
   # NeuBird names the host of each request (its connection's URL) and sends
   # that system's credentials; only hosts matching these patterns are reached.
   neubird_destinations:
     hosts: ["*.CHANGE_ME.example.com"]   # optional; omitted means any host name
-    methods: [GET, HEAD, POST, DELETE]
+    methods: [GET, HEAD, POST]   # Splunk MCP needs POST; its session DELETE gets a harmless 405
     # The headers NeuBird may set for a system: its token, and here an API
     # gateway's subscription key.
     credential_headers: [Authorization, Ocp-Apim-Subscription-Key]

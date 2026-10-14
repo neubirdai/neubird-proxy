@@ -61,9 +61,9 @@ Create `config.yaml` (or start from `docs/examples/config.yaml`):
 # listen, admin_listen and tunnel are set by the Helm chart: requests arrive
 # through the tunnel, nothing listens for them.
 
-# The token NeuBird sends. Secrets never go in this file: the proxy reads
-# them from environment variables, which come from a Kubernetes Secret.
-client_token_env: NEUBIRD_PROXY_TOKEN
+# No proxy token: every request arrives over the tunnel your proxy opens
+# (client_auth: none, which the chart sets). Secrets never go in this file:
+# the proxy reads them from environment variables, from a Kubernetes Secret.
 
 # NeuBird names the system each request is for (the endpoint URL of its
 # connection, such as https://splunk.example.com) and sends that system's
@@ -72,7 +72,7 @@ neubird_destinations:
   hosts:
     - splunk.example.com
     - yourinstance.service-now.com
-  methods: [GET, HEAD, POST, DELETE]   # Splunk MCP uses POST, and DELETE to end a session
+  methods: [GET, HEAD, POST]   # Splunk MCP uses POST (its session DELETE gets a harmless 405)
   # SPL commands that write, send, delete or reach other systems.
   request_deny_patterns:
     - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
@@ -101,33 +101,32 @@ A few things to know:
 ## 2. Validate it
 
 ```bash
-np validate -offline -config config.yaml
+np validate -offline -tunnel -config config.yaml
 ```
 
 `-offline` checks the config without its secrets: missing variables get
-placeholders, and are listed at the end. A good config prints `VALID`, a
+placeholders, and are listed at the end. `-tunnel` checks it as the chart
+runs it: with the tunnel section and `client_auth: none`. A good config prints `VALID`, a
 summary, and any warnings:
 
 ```
 VALID config.yaml
 
 CONNECTION            UPSTREAM                                         AUTH    METHODS               PATHS  MCP TOOLS  FIELDS  MODE
-neubird_destinations  splunk.example.com,yourinstance.service-now.com  bearer  GET,HEAD,POST,DELETE  any    -          all     NeuBird credentials
+neubird_destinations  splunk.example.com,yourinstance.service-now.com  none  GET,HEAD,POST  any    -          all     NeuBird credentials
 
 redaction: mask=label, rules: private_key, jwt, aws_access_key, ..., member_id, ...
 
-warnings:
-  - tls is not set: the proxy listener is plain HTTP and relies on the load balancer for TLS
-  - neubird_destinations: NeuBird chooses the destination host within splunk.example.com, yourinstance.service-now.com and supplies the credentials
+tunnel: 1 relay(s) x 1 connection(s), no inbound listener
+  tunnel section added as the Helm chart adds it (relay, tenant and key come from its values)
 
-not checked (offline, placeholders used): NEUBIRD_PROXY_TOKEN
+warnings:
+  - neubird_destinations: client_auth: none: requests from the NeuBird relay need no proxy token; cut NeuBird off by scaling to 0 or by NeuBird revoking the tunnel key
+  - neubird_destinations: NeuBird chooses the destination host within splunk.example.com, yourinstance.service-now.com and supplies the credentials
 ```
 
-Both warnings are expected:
-- **TLS**: ignore it. It's about the request listener, which the chart turns
-  off; the chart adds the tunnel part of the config in step 5.
-- **neubird_destinations** says what NeuBird may do, so it's visible in
-  every pod's log.
+Both warnings are expected, and printed in every pod's log too: they say
+what NeuBird may do and how to cut it off.
 
 A broken config lists every problem in one go, each with the setting it's
 in. Fix them and run it again.
@@ -246,8 +245,8 @@ If the agent doesn't need to tell values apart, keep the default,
 
 ## 4. Create the secrets
 
-Create the namespace (set your own name), then one Secret holding the proxy
-token and the join token. Your systems' credentials don't go here: they're
+Create the namespace (set your own name), then one Secret holding the join
+token. There is no proxy token. Your systems' credentials don't go here: they're
 entered in NeuBird (step 7).
 
 ```bash
@@ -257,7 +256,6 @@ kubectl label namespace $NS pod-security.kubernetes.io/enforce=restricted
 
 printf 'NeuBird join token: '; read -rs JOIN; echo
 kubectl -n $NS create secret generic neubird-proxy \
-  --from-literal=NEUBIRD_PROXY_TOKEN="$(np token)" \
   --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN"
 unset JOIN
 ```
@@ -274,8 +272,8 @@ rm hmac.env
 The proxy refuses to start with `mask: hmac` and no key, so a missing key
 shows up immediately rather than as wrong codes.
 
-`np token` generates the proxy token, so nobody types it. `read -rs` keeps
-the join token off the screen and out of your shell history.
+`read -rs` keeps the join token off the screen and out of your shell
+history.
 
 ## 5. Install with Helm
 
@@ -378,27 +376,17 @@ helm upgrade neubird-proxy ./neubird-proxy-<version>.tgz -n $NS \
 The tunnels are already up (step 5). In NeuBird, add each system as a
 connection, as you would without the proxy: its URL (for example
 `https://splunk.example.com/services/mcp`) and its credentials. Then choose
-access through the NeuBird proxy and enter:
-
-- the **relay URL** NeuBird gives you;
-- the **proxy token**. Print it with:
-
-```bash
-kubectl -n $NS get secret neubird-proxy -o jsonpath='{.data.NEUBIRD_PROXY_TOKEN}' | base64 -d
-```
-
-With `client_auth: none` under `neubird_destinations` (mode `tunnel` only),
-there is no proxy token to enter: requests are accepted because they come
-down the tunnel your proxy opened.
+access through the NeuBird Proxy. The relay is preset for your NeuBird
+deployment, and there is no proxy token to enter: requests are accepted
+because they come down the tunnel your proxy opened.
 
 NeuBird sends each request through the relay and the tunnel, naming the
 system's host, and the proxy forwards it only if the host is in `hosts`.
 Adding, changing or removing a system later happens in NeuBird; the proxy
 needs a change only when a new system's host isn't covered by `hosts`.
 
-To cut NeuBird off at any time: change the token in the Secret and restart
-the pods, or scale the Deployment to 0. With `client_auth: none`, scale to 0,
-or ask NeuBird to revoke the tunnel key at the relay.
+To cut NeuBird off at any time: scale the Deployment to 0, or ask NeuBird to
+revoke the tunnel key at the relay.
 
 ## 8. Watch it work
 

@@ -36,7 +36,7 @@ what the proxy will forward, the network what the pod can reach at all.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `client_token_env` | | Env var with NeuBird's token (32+ characters), e.g. `NEUBIRD_PROXY_TOKEN` |
+| `client_token_env` | | Env var with the proxy token (32+ characters), e.g. `NEUBIRD_PROXY_TOKEN`: for mode `inbound`, or `client_auth` set to require one |
 | `client_token_previous_env` | | Also accepted during a token rotation; remove afterwards |
 | `upstream_ca_file` | system roots | Don't set it: use the chart's `upstreamCA` value, which mounts the bundle and sets this |
 | `allow_http_upstreams` | `false` | Allow `http://` systems; otherwise only `https://` |
@@ -56,7 +56,7 @@ what the proxy will forward, the network what the pod can reach at all.
 | `request_headers` | | Extra client headers to forward; credentials and cookies are always refused |
 | `rate_limit` | | `{requests_per_second, burst}`, per replica, shared by every host |
 | `response_fields` | | JSON field allowlist for every host's responses: every other field is masked whatever it contains |
-| `client_auth` | `bearer` | How NeuBird presents the proxy token: `bearer`, `basic` (as password), or `header`; or `none` in mode `tunnel` (no inbound listener): no proxy token, since every request comes down the proxy's own mutually authenticated tunnel |
+| `client_auth` | `none` in mode `tunnel` (set by the chart), else `bearer` | How the proxy token is presented: `bearer`, `basic` (as password), or `header`; or `none` in mode `tunnel` (no inbound listener): no proxy token, since every request comes down the proxy's own mutually authenticated tunnel |
 | `client_auth_header` | | Header name when `client_auth: header` |
 | `client_token_env` | top-level | A token for this section only |
 
@@ -107,9 +107,8 @@ Write `config.yaml` (your `config` value, without the chart's part), then:
 ```sh
 IMG=<your registry>/neubird-proxy@sha256:...
 docker run --rm --entrypoint /neubird-proxy -v $PWD:/w -w /w \
-  -e NEUBIRD_PROXY_TOKEN=check-only-0123456789abcdef0123456 -e REDACTION_HMAC_KEY=check-only-0123456789abcdef0123456 \
-  $IMG validate -config config.yaml           # hosts, methods, risky settings
-# Ignore "tls is not set": that's the request listener, which the chart turns off.
+  -e REDACTION_HMAC_KEY=check-only-0123456789abcdef0123456 \
+  $IMG validate -tunnel -config config.yaml   # as the chart runs it: hosts, methods, risky settings
 
 docker run --rm --entrypoint /neubird-proxy -v $PWD:/w -w /w \
   $IMG -config config.yaml -redact sample.json # redact your own sample data, counts per rule

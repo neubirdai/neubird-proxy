@@ -45,7 +45,6 @@ Credentials).
    kubectl label namespace neubird pod-security.kubernetes.io/enforce=restricted
    printf 'NeuBird join token: '; read -rs JOIN; echo
    kubectl -n neubird create secret generic neubird-proxy-env \
-     --from-literal=NEUBIRD_PROXY_TOKEN=$(openssl rand -hex 32) \
      --from-literal=REDACTION_HMAC_KEY=$(openssl rand -hex 32) \
      --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN"
    unset JOIN
@@ -59,8 +58,10 @@ Credentials).
    The proxy enrolls its key with the join token and the pods turn Ready
    within seconds (their log says `enrolled with the join token`).
 3. In NeuBird, add each system as a connection with its URL and
-   credentials, access through the NeuBird proxy, the relay URL NeuBird
-   gives you, and `NEUBIRD_PROXY_TOKEN` from step 1 as the proxy token.
+   credentials, and access through the NeuBird Proxy. The relay is preset
+   for your NeuBird deployment, and there is no proxy token: every request
+   arrives over the tunnel your proxy opened (`client_auth: none`, the
+   chart's default in mode `tunnel`).
 
 Once enrolled, you may delete `NEUBIRD_JOIN_TOKEN` from the Secret: the
 relay knows the key. **Without a join token**, install without `--wait`,
@@ -128,7 +129,7 @@ startup.
 | `inbound.tls.existingSecret` | mode `inbound` | A `kubernetes.io/tls` Secret for the listener; or `inbound.allowPlainHTTP: true` |
 | `inbound.clientCA.cert` or `inbound.clientCA.existingConfigMap` | | Mode `inbound`: require client certificates this CA signed (key `ca.crt`) |
 | `inbound.service.type`, `.port`, `.annotations`, `.loadBalancerSourceRanges` | default `ClusterIP`, `8443` | Mode `inbound`: the Service in front of the proxy |
-| `env.existingSecret` | yes | Your Secret: `NEUBIRD_PROXY_TOKEN`, `REDACTION_HMAC_KEY`, `NEUBIRD_JOIN_TOKEN` |
+| `env.existingSecret` | yes | Your Secret: `NEUBIRD_JOIN_TOKEN` (until enrolled), `REDACTION_HMAC_KEY` (with `mask: hmac`); `NEUBIRD_PROXY_TOKEN` only in mode `inbound` |
 | `config` | yes | `neubird_destinations` (the hosts NeuBird may reach), redaction, limits: see [configuration.md](docs/configuration.md). `${VAR}` comes from `env` |
 | `tunnel.joinTokenEnv` | default `NEUBIRD_JOIN_TOKEN` | Env var with NeuBird's join token; empty or missing means send the fingerprint instead |
 | `tunnelKey.generate` | default `true` | Key generated in a Secret at install, kept on upgrade and uninstall |
@@ -163,11 +164,11 @@ Secrets in the namespace can read it either way.
 
 ## Operate
 
-- **Cut NeuBird off**: scale to 0 (tunnels close at once), or change
-  `NEUBIRD_PROXY_TOKEN` and `kubectl rollout restart` the Deployment: the
-  token is read at startup, so running pods accept the old one until they
-  restart. With `client_auth: none` (mode `tunnel` only) there is no token:
-  scale to 0, or ask NeuBird to revoke the tunnel key at the relay.
+- **Cut NeuBird off**: scale to 0 (the tunnels close at once), or ask
+  NeuBird to revoke the tunnel key at the relay. In mode `inbound` (or with
+  `client_auth` set to require a token), changing `NEUBIRD_PROXY_TOKEN` and
+  running `kubectl rollout restart` also works: pods read the token at
+  startup.
 - **Rotate the key**: create a new key Secret, send NeuBird its fingerprint,
   switch `tunnelKey.existingSecret` once NeuBird confirms.
 - **Upgrade**: load the new image, set `image.digest`, `helm upgrade`. The key is kept.

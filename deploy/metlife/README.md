@@ -84,7 +84,7 @@ Notes:
 - **Methods:** POST is allowed for Splunk (MCP and searches); `host_methods` keeps ServiceNow to GET and HEAD, so nothing can create records there. PUT, PATCH and DELETE are refused everywhere.
 - **Memory limit:** 640 Mi (as in the values) buffers responses up to the 20 MiB `max_body_bytes`; at 512 Mi the proxy refuses responses over about 19 MiB (15 MiB with `mask: hmac`) and says so at startup.
 
-Or run `deploy/scripts/install-tunnel.sh` (in NeuBird's repository): it adds the join token to the Secret, installs, waits for enrollment and the tunnels, tests each system, and removes the spent token:
+For an install NeuBird runs (or a test setup), `deploy/scripts/install-tunnel.sh` from NeuBird's repository does steps 1–3 in one go: it adds the join token to the Secret, installs, waits for enrollment and the tunnels, tests each system, and removes the spent token:
 
 ```sh
 KUBE_CONTEXT=<context> NAMESPACE=neubird VALUES=values.yaml RELAY_CA=relay-ca.crt \
