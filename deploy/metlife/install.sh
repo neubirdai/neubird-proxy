@@ -271,9 +271,14 @@ uninstall() {
   printf '\n== uninstall (namespace %s)\n' "$NAMESPACE"
   # Shown before anything is deleted, so a failure part way (or --yes, which
   # skips the prompt) never loses it: once the key Secret is gone, so is the key.
-  [ -z "$fp" ] || printf 'key   %s/%s %s (for NeuBird to revoke)\n' "$TENANT" "$PROXY_NAME" "$fp"
+  # It is only a record here; revoking is asked for once the purge is done.
+  [ -z "$fp" ] || printf 'key   %s/%s %s (still in place; revoke only after "Purged." below)\n' "$TENANT" "$PROXY_NAME" "$fp"
+  # Until the key Secret is deleted, a failure leaves the key usable for a
+  # reinstall: say so, so it isn't revoked by mistake.
+  local kept=
+  [ -z "${PURGE:-}" ] || [ -z "$key" ] || kept="; the key Secret $KEY_SECRET is untouched: don't revoke it, fix the error and rerun"
   if [ -n "$release" ]; then
-    out=$(h uninstall "$RELEASE" --wait 2>&1) || die "helm uninstall $RELEASE: $out"
+    out=$(h uninstall "$RELEASE" --wait 2>&1) || die "helm uninstall $RELEASE: $out$kept"
     printf 'ok    release %s removed\n' "$RELEASE"
   else
     printf -- '--    no release %s in namespace %s\n' "$RELEASE" "$NAMESPACE"
@@ -293,7 +298,8 @@ uninstall() {
 
   # The key Secret last: if a delete fails, the key is still there to retry with.
   for s in ${env:+"$ENV_SECRET"} ${key:+"$KEY_SECRET"}; do
-    out=$(k delete secret "$s" 2>&1) || die "can't delete Secret $s: $out"
+    [ "$s" != "$KEY_SECRET" ] || kept="; Secret $KEY_SECRET may still exist: check it, then rerun before asking NeuBird to revoke"
+    out=$(k delete secret "$s" 2>&1) || die "can't delete Secret $s: $out$kept"
     printf 'ok    Secret %s deleted\n' "$s"
   done
   if [ -n "$fp" ]; then
