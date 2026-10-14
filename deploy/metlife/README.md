@@ -1,12 +1,10 @@
-# neubird-proxy at MetLife: through the tunnel
+# neubird-proxy at MetLife
 
 ```
-NeuBird ─▶ relay ⇄ tunnel (dialed out by the proxy, :443, mutual TLS) ⇄ neubird-proxy (AKS) ─▶ Splunk, ServiceNow
+NeuBird ─▶ relay ⇄ tunnel (outbound :443, mutual TLS) ⇄ neubird-proxy (AKS) ─▶ Splunk, ServiceNow
 ```
 
-The proxy runs in MetLife's AKS and opens outbound tunnels to NeuBird's relay for MetLife; NeuBird's requests come back down those tunnels. Nothing connects in to MetLife: no load balancer, no inbound firewall rule. The proxy calls Splunk and ServiceNow directly, with no gateway in between; it checks every request and redacts every response before it leaves MetLife.
-
-There is no proxy token (`client_auth: none`): a request is accepted because it arrives over a tunnel this proxy opened, to a relay it verified, with a key the relay has pinned. Cutting NeuBird off is scaling to 0 (below).
+The proxy runs in MetLife's AKS and dials out to NeuBird's relay; NeuBird's requests come back down that tunnel. Nothing connects in to MetLife. The proxy calls Splunk and ServiceNow directly, checks every request and redacts every response. There is no proxy token (`client_auth: none`).
 
 | File | What it is |
 |---|---|
@@ -14,38 +12,21 @@ There is no proxy token (`client_auth: none`): a request is accepted because it 
 
 ## What NeuBird sends MetLife
 
-| Item | Secret | Value |
-|---|---|---|
-| Relay address | no | `metlife-tunnel.neubird.ai:443` |
-| Relay IP addresses, for the egress firewall | no | Fixed addresses, one per zone (NeuBird sends them) |
-| Tenant | no | `metlife` |
-| Relay CA certificate, `relay-ca.crt` | no | "NeuBird relay CA for metlife" |
-| Join token (`nbjt_…`) | **yes**, works once, expires in 72 hours | For the proxy name MetLife will use, e.g. `aks-prod` |
+| Item | Value |
+|---|---|
+| Relay address | `metlife-tunnel.neubird.ai:443` |
+| Relay IPs | Fixed, one per zone (NeuBird sends them) |
+| Tenant | `metlife` |
+| Relay CA certificate | `relay-ca.crt` |
+| Join token (**secret**, single use, 72 h) | `nbjt_…`, for the proxy name, e.g. `aks-prod` |
 
-The relay's IP addresses are reserved for MetLife and don't change; if they ever must, NeuBird tells MetLife first.
-
-Allow outbound TCP 443 to those addresses **without TLS inspection**: the tunnel is mutual TLS with pinned keys, so a proxy that re-signs TLS breaks it. A plain forwarding (CONNECT) proxy is fine; set it with `extraEnv` in the values.
-
-MetLife sends nothing back: the proxy enrolls its own key with the join token.
+Allow outbound TCP 443 to the relay IPs **without TLS inspection** (a plain CONNECT proxy is fine; set it with `extraEnv`). MetLife sends nothing back.
 
 ## Enrolling the proxy's key: join token
 
-The proxy's tunnel key is its identity at the relay. The chart generates it in a Secret in MetLife's cluster, and it never leaves that cluster. The join token lets the proxy enroll that key itself on its first connect.
+The chart generates the proxy's tunnel key in a Secret; it never leaves MetLife's cluster. Put the join token in the proxy's Secret (below): on first connect the proxy presents it, the relay records the key, and the tunnels open.
 
-**NeuBird, before MetLife installs:**
-
-1. Make a join token for the proxy name MetLife will use:
-   ```sh
-   neubird-relay join-token -tenant metlife -proxy <proxy name> -ttl 72h
-   ```
-2. Add the record it prints (the token's hash, not secret) under that proxy in the metlife relay's `tenants.yaml`, ConfigMap `neubird-relay-tenants` in namespace `metlife`. The relay picks it up without a restart.
-3. Send MetLife the token through the agreed secure channel, with the items above.
-
-**MetLife:** install the proxy with the token in its Secret (below). On first connect the proxy presents the token, the relay records the key, and the tunnels open within seconds.
-
-**NeuBird, after:** check the relay log for `proxy enrolled`, remove the spent token's record from `tenants.yaml`, and set the proxy's `expected_tunnels` to replicas × `connectionsPerRelay` (2 × 2 = 4 with the defaults), so alerts cover it.
-
-If the token expires or is refused, the proxy logs `enrollment: relay refused: …` (`join token expired`, `already used`, or `is for <tenant>/<proxy>`) and stays not ready; NeuBird makes a new token. A new key (a reinstall without the old Secret) needs a new token too.
+If enrollment fails, the proxy logs `enrollment: relay refused: …` (e.g. `join token expired` or `already used`) and stays not ready. Ask NeuBird for a new token; a reinstall with a new key needs one too.
 
 ## Deploy the proxy
 
@@ -73,16 +54,11 @@ helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
 ```
 
 Notes:
-- **`tunnel.proxy`** must be the name the join token is for.
-- **Image:** use the release NeuBird names (with `client_auth: none` and `host_methods`), by digest.
-- **Egress:** the proxy reaches the relay on 443 (the addresses above), Splunk, and ServiceNow.
-  - ServiceNow is SaaS without fixed addresses, so a NetworkPolicy can't allow it by CIDR: send it, and the relay tunnel, through your egress proxy (`extraEnv` `HTTPS_PROXY`), and allow that proxy in `networkPolicy.upstreams`. `NO_PROXY` must cover the Splunk host.
-  - The egress proxy must allow CONNECT to `metlife-tunnel.neubird.ai:443` and must not inspect TLS on it: the tunnel is mutual TLS end to end.
-  - Without an egress proxy, use an FQDN-aware egress policy (Azure Firewall, Cilium) for `<instance>.service-now.com`.
-- **Splunk's certificate:** it must name the host in `hosts` (Splunk's default certificate on 8089 names none and fails verification), and its CA goes in `upstreamCA`.
-- **ServiceNow credentials:** an API key travels in `x-sn-apikey`, OAuth or basic auth in `Authorization`; both are in `credential_headers`. Give the key a read-only role.
-- **Methods:** POST is allowed for Splunk (MCP and searches); `host_methods` keeps ServiceNow to GET and HEAD, so nothing can create records there. PUT, PATCH and DELETE are refused everywhere.
-- **Memory limit:** 640 Mi (as in the values) buffers responses up to the 20 MiB `max_body_bytes`; at 512 Mi the proxy refuses responses over about 19 MiB (15 MiB with `mask: hmac`) and says so at startup.
+- **`tunnel.proxy`** must be the name the join token is for. Use the image NeuBird names, by digest.
+- **Egress:** relay on 443, Splunk and ServiceNow. ServiceNow has no fixed IPs, so route it and the relay through your egress proxy (`extraEnv` `HTTPS_PROXY`, `NO_PROXY` covering Splunk; allow the proxy in `networkPolicy.upstreams`), or use an FQDN-aware egress policy.
+- **Splunk's certificate** must name the host in `hosts` (the default one on 8089 doesn't); its CA goes in `upstreamCA`.
+- **ServiceNow:** use a read-only API key (`x-sn-apikey`) or OAuth/basic auth. `host_methods` limits it to GET and HEAD.
+- **Memory:** keep 640 Mi for the 20 MiB `max_body_bytes`.
 
 For an install NeuBird runs (or a test setup), `deploy/scripts/install-tunnel.sh` from NeuBird's repository does steps 1–3 in one go: it adds the join token to the Secret, installs, waits for enrollment and the tunnels, tests each system, and removes the spent token:
 
@@ -160,11 +136,3 @@ In NeuBird, add each system as a connection and choose access through the NeuBir
 On this path the credentials are held by NeuBird, in the connections, and sent with each request; the proxy forwards each only to its own system, which must be in `neubird_destinations.hosts`.
 
 **Writes through MCP.** A tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes, sends data or reaches other systems (including `| rest`), and nothing in front of Splunk does. Give the Splunk token a read-only role, and extend the patterns if your Splunk has other write commands.
-
-## Cutting NeuBird off
-
-Either, at any time:
-- scale the Deployment to 0 (`kubectl -n neubird scale deploy/neubird-proxy --replicas=0`): the tunnels close and nothing reaches MetLife;
-- ask NeuBird to revoke the key at the relay.
-
-To rotate the tunnel key, see the chart's README (Operate).
