@@ -1,29 +1,28 @@
 # neubird-proxy at MetLife: Helm values for the chart's tunnel mode. The proxy
 # dials out to NeuBird's relay; nothing connects in. No proxy token
-# (client_auth: none). Replace every <...>. See README.md.
+# (client_auth: none). Fill in only the hosts below. See README.md.
 #
 #   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
 #     --set-file relayCA.cert=relay-ca.crt
 
 image:
-  repository: <your registry>/neubird/neubird-proxy
-  digest: sha256:<from NeuBird's release notes>
+  repository: docker.io/neubirdai/neubird-proxy   # or your registry's copy, same digest
+  digest: sha256:73b214a0feed2727bdc4731724d4093acc6d5a76cdad67dc9fd58b973dce6675
 replicaCount: 2
 
 mode: tunnel
 tunnel:
-  relays: ["metlife-tunnel.neubird.ai:443"]
-  tenant: metlife
-  proxy: <proxy name>             # the name the join token is for, e.g. aks-prod
+  relays: ["metlifemirror-tunnel.cluster.neubird.ai:443"]
+  tenant: metlifemirror
+  proxy: dryrun                   # the name the join token is for
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
-# MetLife's internal CA bundle, if Splunk's certificate comes from it (delete
-# the block otherwise: the placeholder isn't a certificate). It is added to
-# the public CAs, so ServiceNow's certificate still verifies.
-upstreamCA:
-  cert: |
-    -----BEGIN CERTIFICATE-----
-    ...
+# Optional: MetLife's internal CA bundle, if Splunk's certificate comes from
+# it. It is added to the public CAs, so ServiceNow's certificate still verifies.
+# upstreamCA:
+#   cert: |
+#     -----BEGIN CERTIFICATE-----
+#     ...
 
 env:
   existingSecret: neubird-proxy-env   # NEUBIRD_JOIN_TOKEN until enrolled (and REDACTION_HMAC_KEY for mask: hmac)
@@ -34,22 +33,20 @@ resources:
   requests: {cpu: 100m, memory: 128Mi}
   limits: {memory: 640Mi}
 
-# Outbound HTTP proxy for internet traffic: the relay tunnel and ServiceNow
-# (SaaS, no fixed addresses for networkPolicy). A forwarding proxy; one that
-# inspects TLS breaks the tunnel. NO_PROXY keeps Splunk direct. The egress
-# proxy is in networkPolicy.upstreams below; without one, set extraEnv: [] and
-# allow ServiceNow and the relay another way (see README, Locking down).
-extraEnv:
-  - {name: HTTPS_PROXY, value: "http://<egress proxy>:3128"}
-  - {name: NO_PROXY, value: "<splunk host>"}
+# Optional: an outbound HTTP proxy for the relay tunnel and ServiceNow. A
+# forwarding proxy; one that inspects TLS breaks the tunnel. NO_PROXY keeps
+# Splunk direct.
+extraEnv: []
+#  - {name: HTTPS_PROXY, value: "http://<egress proxy>:3128"}
+#  - {name: NO_PROXY, value: "<splunk host>"}
 
 config:
   max_body_bytes: 20971520
   neubird_destinations:
     # No proxy token: requests are accepted because they come down this
-    # proxy's own tunnels. Cut NeuBird off by scaling to 0.
+    # proxy's own tunnels.
     client_auth: none
-    hosts:                        # the only systems the proxy will call
+    hosts:                        # FILL IN: the only systems the proxy will call
       - <splunk host>:8089        # its certificate must name this host
       - <instance>.service-now.com
     # Headers NeuBird's credentials travel in: Authorization (Splunk token,
@@ -67,13 +64,16 @@ config:
   redaction:
     mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
 
+# Optional: lock egress down to DNS, the relay and the upstreams below (see
+# README, Locking down the network). Off by default because it needs your
+# Splunk range and, for ServiceNow, an egress proxy.
 networkPolicy:
-  enabled: true
-  relayCIDRs: ["<relay IP 1>/32", "<relay IP 2>/32", "<relay IP 3>/32"]   # from NeuBird
+  enabled: false
+  relayCIDRs: ["3.231.28.52/32", "32.196.200.125/32"]   # the relay's fixed IPs
   relayPorts: [443]
-  upstreams:
-    - {cidr: <Splunk range>, ports: [8089]}
-    - {cidr: <egress proxy>/32, ports: [3128]}   # ServiceNow and the relay, via HTTPS_PROXY
+  upstreams: []
+  #  - {cidr: <Splunk range>, ports: [8089]}
+  #  - {cidr: <egress proxy>/32, ports: [3128]}   # ServiceNow and the relay, via HTTPS_PROXY
   # Prometheus may scrape :9090; empty blocks all inbound traffic.
   metricsFrom: []
   #  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
