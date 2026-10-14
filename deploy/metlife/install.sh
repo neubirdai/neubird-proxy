@@ -20,9 +20,11 @@
 #   JOIN_TOKEN_FILE      file holding NeuBird's join token (first install only)
 #   RELAY_CA             NeuBird's relay CA certificate (default: relay-ca.crt)
 #   UPSTREAM_CA          CA bundle for systems with internal-CA certificates
-#   EGRESS_PROXY         forwarding proxy for the tunnel and internet systems,
+#   EGRESS_PROXY         forwarding proxy for the tunnel and internet systems
+#                        (set in the pod as HTTPS_PROXY),
 #                        e.g. http://proxy.metlife.com:3128 (no TLS inspection)
-#   NO_PROXY             hosts reached directly, not through EGRESS_PROXY,
+#   EGRESS_NO_PROXY      hosts reached directly, not through EGRESS_PROXY (set
+#                        in the pod as NO_PROXY; your shell's NO_PROXY is ignored),
 #                        e.g. splunk.metlife.com,.metlife.com
 #   ALLOW_CIDRS          turns on the NetworkPolicy: the ranges the proxy may
 #                        reach besides DNS and the relay, as cidr:port,...
@@ -97,7 +99,7 @@ if [ -n "${CONFIRM_ONLY:-}" ]; then confirm; exit; fi
 values=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-values.XXXXXX")
 trap 'rm -f "$values"' EXIT
 TENANT=$TENANT RELAY=$RELAY RELAY_IPS=$RELAY_IPS HOSTS=$HOSTS \
-EGRESS_PROXY=${EGRESS_PROXY:-} NO_PROXY_HOSTS=${NO_PROXY:-} \
+EGRESS_PROXY=${EGRESS_PROXY:-} NO_PROXY_HOSTS=${EGRESS_NO_PROXY:-} \
 EGRESS_PROXY_CIDR=${EGRESS_PROXY_CIDR:-} IMAGE_REPO=${IMAGE_REPO:-} \
 PROXY_NAME=$PROXY_NAME MASK=${MASK:-label} ALLOW_CIDRS=${ALLOW_CIDRS:-} \
 python3 - "$here/values.yaml" "$values" <<'PY'
@@ -129,7 +131,7 @@ if e["EGRESS_PROXY"]:
     if e["NO_PROXY_HOSTS"]:
         env.append({"name": "NO_PROXY", "value": e["NO_PROXY_HOSTS"]})
 elif e["NO_PROXY_HOSTS"]:
-    fail("NO_PROXY is only used with EGRESS_PROXY")
+    fail("EGRESS_NO_PROXY is only used with EGRESS_PROXY")
 v["extraEnv"] = env
 np = v.setdefault("networkPolicy", {})
 np["relayCIDRs"] = [ip.strip() + "/32" for ip in e["RELAY_IPS"].split(",") if ip.strip()]

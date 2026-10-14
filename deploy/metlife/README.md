@@ -52,7 +52,7 @@ Send NeuBird the key fingerprint from that summary (it isn't secret): NeuBird ch
 | `JOIN_TOKEN_FILE` | first install | File holding the join token |
 | `HOSTS` | no | The systems NeuBird may reach, comma-separated: `host[:port]`, `*.domain[:port]` or an IP; port 443 if omitted. Default `*`: any host name the proxy can reach (see Locking down the network) |
 | `EGRESS_PROXY` | no | Forwarding proxy for the tunnel and internet systems, e.g. `http://proxy.metlife.com:3128` |
-| `NO_PROXY` | no | Hosts reached directly rather than through `EGRESS_PROXY`, e.g. `splunk.metlife.com,.metlife.com` |
+| `EGRESS_NO_PROXY` | no | Hosts reached directly rather than through `EGRESS_PROXY` (the pod's `NO_PROXY`), e.g. `splunk.metlife.com,.metlife.com`. Your shell's own `NO_PROXY` isn't used |
 | `UPSTREAM_CA` | no | CA bundle for systems whose certificates come from MetLife's internal CA |
 | `ALLOW_CIDRS` | no | Turns on the NetworkPolicy: ranges the proxy may reach besides DNS and the relay, as `cidr:port,...`, e.g. `10.20.0.0/16:8089`. With `EGRESS_PROXY`, also `EGRESS_PROXY_CIDR` |
 | `MASK` | no | `label` (default) or `hmac` (below) |
@@ -64,7 +64,7 @@ For example, Splunk and ServiceNow only, through an egress proxy for internet tr
 ```sh
 KUBE_CONTEXT=<ctx> NAMESPACE=neubird JOIN_TOKEN_FILE=join.token \
 HOSTS='splunk.metlife.com:8089,<instance>.service-now.com' \
-EGRESS_PROXY=http://proxy.metlife.com:3128 NO_PROXY=splunk.metlife.com \
+EGRESS_PROXY=http://proxy.metlife.com:3128 EGRESS_NO_PROXY=splunk.metlife.com \
 deploy/metlife/install.sh
 ```
 
