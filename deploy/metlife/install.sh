@@ -21,8 +21,9 @@
 #   IMAGE_REPO           your registry's copy of the image (same digest)
 #   PROXY_NAME           the name the join token is for (default: aks-prod)
 #   MASK                 label or hmac (default: label)
-#   SPLUNK_CIDR          Splunk's range: turns on the NetworkPolicy (needs
-#                        EGRESS_PROXY_CIDR too if EGRESS_PROXY is set)
+#   SPLUNK_CIDR          Splunk's range: turns on the NetworkPolicy (with
+#                        ServiceNow it needs EGRESS_PROXY; with EGRESS_PROXY,
+#                        EGRESS_PROXY_CIDR)
 #   EGRESS_PROXY_CIDR    the egress proxy's address, e.g. 10.1.2.3/32
 #   NAMESPACE            default: neubird
 #   DRY_RUN=1            write the values and render them; install nothing
@@ -42,6 +43,11 @@ RELAY_CA=${RELAY_CA:-relay-ca.crt}
 case "$SPLUNK_HOST" in *:*) ;; *) SPLUNK_HOST="$SPLUNK_HOST:8089" ;; esac
 if [ -n "${EGRESS_PROXY:-}" ] && [ -n "${SPLUNK_CIDR:-}" ] && [ -z "${EGRESS_PROXY_CIDR:-}" ]; then
   echo "FAIL  with SPLUNK_CIDR (NetworkPolicy on) and EGRESS_PROXY, set EGRESS_PROXY_CIDR too" >&2; exit 1
+fi
+# ServiceNow is SaaS without fixed addresses, so the NetworkPolicy can allow it
+# only through an egress proxy.
+if [ -n "${SERVICENOW_INSTANCE:-}" ] && [ -n "${SPLUNK_CIDR:-}" ] && [ -z "${EGRESS_PROXY:-}" ]; then
+  echo "FAIL  with SPLUNK_CIDR (NetworkPolicy on) and SERVICENOW_INSTANCE, set EGRESS_PROXY and EGRESS_PROXY_CIDR: the policy can't allow ServiceNow by address" >&2; exit 1
 fi
 
 values=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-values.XXXXXX")
