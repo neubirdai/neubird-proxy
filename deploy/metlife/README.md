@@ -33,6 +33,15 @@ If enrollment fails, the proxy logs `enrollment: relay refused: …` (e.g. `join
 
 Use the Helm chart (`deploy/helm/neubird-proxy`) with `mode: tunnel`.
 
+**Quick install:** [`install.sh`](install.sh) does steps 1 to 3 from a few parameters (Splunk host, ServiceNow instance, egress proxy, join token file); see the top of the script. `DRY_RUN=1` writes the values without installing:
+
+```sh
+KUBE_CONTEXT=<ctx> SPLUNK_HOST=splunk.metlife.com SERVICENOW_INSTANCE=<instance> \
+JOIN_TOKEN_FILE=join.token deploy/metlife/install.sh
+```
+
+The steps below are the same install by hand.
+
 ### 1. Secret
 
 ```sh
