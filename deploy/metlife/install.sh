@@ -1,43 +1,185 @@
 #!/usr/bin/env bash
-# Install neubird-proxy at MetLife from a few parameters and confirm it: builds
-# the Helm values from values.yaml (next to this script), runs
-# deploy/scripts/install-tunnel.sh (Secret, chart, enrollment, tunnels, tests,
-# removing the spent join token), then re-checks the running proxy and prints
-# its key fingerprint for NeuBird.
-#
-#   KUBE_CONTEXT=<ctx> NAMESPACE=neubird \
-#   HOSTS='splunk.metlife.com:8089,metlife.service-now.com' \
-#   JOIN_TOKEN_FILE=join.token deploy/metlife/install.sh
-#
-# MetLife sets:
-#   KUBE_CONTEXT         kubectl context of the AKS cluster (required)
-#   NAMESPACE            namespace to install in (required)
-#   HOSTS                the systems NeuBird may reach, comma-separated:
-#                        host[:port], *.domain[:port] (any name under it) or
-#                        an IP address; port 443 if omitted. Default: '*'
-#                        (any host name the proxy can reach; never IP
-#                        literals). ServiceNow hosts stay read-only (GET, HEAD)
-#   JOIN_TOKEN_FILE      file holding NeuBird's join token (first install only)
-#   RELAY_CA             NeuBird's relay CA certificate (default: relay-ca.crt)
-#   UPSTREAM_CA          CA bundle for systems with internal-CA certificates
-#   EGRESS_PROXY         forwarding proxy for the tunnel and internet systems
-#                        (set in the pod as HTTPS_PROXY),
-#                        e.g. http://proxy.metlife.com:3128 (no TLS inspection)
-#   EGRESS_NO_PROXY      hosts reached directly, not through EGRESS_PROXY (set
-#                        in the pod as NO_PROXY; your shell's NO_PROXY is ignored),
-#                        e.g. splunk.metlife.com,.metlife.com
-#   ALLOW_CIDRS          turns on the NetworkPolicy: the ranges the proxy may
-#                        reach besides DNS and the relay, as cidr:port,...
-#                        e.g. 10.20.0.0/16:8089 (with EGRESS_PROXY, also
-#                        set EGRESS_PROXY_CIDR)
-#   EGRESS_PROXY_CIDR    the egress proxy's address, e.g. 10.1.2.3/32
-#   IMAGE_REPO           your registry's copy of the image (same digest)
-#   MASK                 label or hmac (default: label)
-#   DRY_RUN=1            write the values and render them; install nothing
-#   CONFIRM_ONLY=1       only re-run the confirmation on an existing install
-#
-# The token is read from its file and never printed or put on a command line.
+# neubird-proxy installer. Builds the Helm values from values.yaml (next to
+# this script), installs the chart with deploy/scripts/install-tunnel.sh
+# (Secret, chart, enrollment, tunnels, tests, removing the spent join token),
+# then re-checks the running proxy and prints its key fingerprint for NeuBird.
+# Run it with --help for the options. The join token is read from its file and
+# never printed or put on a command line.
 set -euo pipefail
+
+here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
+pkg=$(dirname -- "$(dirname -- "$here")")
+orig=$(pwd -P)
+chart=$here/../helm/neubird-proxy
+
+# A package from NeuBird presets the relay, tenant, CA and join token in
+# <tenant>.env next to deploy/; it's loaded below, so nothing is sourced by hand.
+envfile=
+envs=("$pkg"/*.env)
+[ -f "${envs[0]}" ] && envfile=${envs[0]}
+preset() { [ -n "$envfile" ] && sed -nE "s/^export $1=//p" "$envfile" | tail -1; }
+
+die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
+bad() { printf '%s: %s\nRun %s --help for usage.\n' "$0" "$*" "$0" >&2; exit 2; }
+
+usage() {
+  cat <<EOF
+Install NeuBird's proxy (neubird-proxy) in a Kubernetes cluster and confirm it
+works. The proxy dials out to NeuBird's relay; nothing connects in.
+
+Usage:
+  $0 --kube-context <context> --namespace <namespace> [options]
+
+Required:
+  -c, --kube-context <context>   kubectl context of the cluster to install in
+  -n, --namespace <namespace>    namespace to install in (created if missing)
+
+Options:
+      --hosts <list>             systems NeuBird may reach, comma-separated:
+                                 host[:port], *.domain[:port] or an IP address;
+                                 port 443 if omitted. Default: '*' (any host name
+                                 the proxy can reach, never IP literals).
+                                 ServiceNow hosts stay read-only (GET, HEAD)
+      --egress-proxy <url>       outbound HTTP proxy for the tunnel and internet
+                                 systems, e.g. http://proxy.metlife.com:3128
+                                 (no TLS inspection)
+      --egress-no-proxy <list>   hosts reached directly, not through
+                                 --egress-proxy, e.g. splunk.metlife.com,.metlife.com
+      --allow-cidrs <list>       turn on the NetworkPolicy: the ranges the proxy
+                                 may reach besides DNS and the relay, as
+                                 cidr:port,... e.g. 10.20.0.0/16:8089
+      --egress-proxy-cidr <cidr> the egress proxy's address, e.g. 10.1.2.3/32
+                                 (needed with --allow-cidrs and --egress-proxy)
+      --upstream-ca <file>       CA bundle for systems with internal-CA certificates
+      --image-repo <repo>        your registry's copy of the image (same digest)
+      --mask <label|hmac>        how redacted values are masked (default: label)
+      --timeout <seconds>        how long to wait for the tunnels (default: 300)
+      --join-token-file <file>   NeuBird's join token, for the first install
+                                 (a package from NeuBird presets it)
+      --relay-ca <file>          NeuBird's relay CA (default: relay-ca.crt;
+                                 a package from NeuBird presets it)
+
+Modes:
+      --dry-run                  build and render the values, write them to
+                                 ./neubird-proxy-values.yaml; install nothing
+      --confirm-only             only re-check an existing install
+  -h, --help                     show this help
+      --version                  show the chart version and this package's relay
+
+Each option can also be set as an environment variable (--kube-context as
+KUBE_CONTEXT, --dry-run as DRY_RUN=1, and so on); a command-line option wins.
+
+Examples:
+  $0 -c prod-aks -n neubird --join-token-file join.token
+  $0 -c prod-aks -n neubird --hosts splunk.metlife.com:8089,metlife.service-now.com
+  $0 -c prod-aks -n neubird --dry-run
+
+Requires kubectl, helm 3 or later and python3 with PyYAML.
+EOF
+  if [ -n "$envfile" ]; then
+    printf '\nThis package: tenant %s, relay %s\n' "$(preset TENANT)" "$(preset RELAY)"
+  fi
+}
+
+version() {
+  printf 'neubird-proxy chart %s (app %s)\n' \
+    "$(sed -nE 's/^version: *//p' "$chart/Chart.yaml")" \
+    "$(sed -nE 's/^appVersion: *"?([^"]*)"?.*/\1/p' "$chart/Chart.yaml")"
+  if [ -n "$envfile" ]; then
+    printf 'package: tenant %s, relay %s\n' "$(preset TENANT)" "$(preset RELAY)"
+  fi
+}
+
+# Options: --name value or --name=value; each maps to its environment variable
+# (--kube-context is KUBE_CONTEXT). Collected first and applied after the
+# package's .env, so they override its presets.
+takes_value=" KUBE_CONTEXT NAMESPACE HOSTS EGRESS_PROXY EGRESS_NO_PROXY ALLOW_CIDRS EGRESS_PROXY_CIDR UPSTREAM_CA IMAGE_REPO MASK TIMEOUT JOIN_TOKEN_FILE RELAY_CA "
+switches=" DRY_RUN CONFIRM_ONLY "
+opts=()
+from_env=
+[ -z "${KUBE_CONTEXT:-}" ] || from_env+=" KUBE_CONTEXT"
+[ -z "${NAMESPACE:-}" ] || from_env+=" NAMESPACE"
+while [ $# -gt 0 ]; do
+  arg=$1; shift
+  case $arg in
+    -h|--help) usage; exit 0 ;;
+    --version) version; exit 0 ;;
+    -c|--context) arg=--kube-context ;;
+    --context=*) arg=--kube-context=${arg#--context=} ;;
+    -n) arg=--namespace ;;
+    --*) ;;
+    *) bad "unexpected argument: $arg" ;;
+  esac
+  name=${arg#--} val= inline=
+  case $name in *=*) val=${name#*=} name=${name%%=*} inline=1 ;; esac
+  var=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')
+  if [[ $switches == *" $var "* ]]; then
+    [ -z "$inline" ] || bad "--$name takes no value"
+    opts+=("$var=1")
+  elif [[ $takes_value == *" $var "* ]]; then
+    if [ -z "$inline" ]; then
+      [ $# -gt 0 ] && [[ $1 != -* ]] || bad "--$name needs a value"
+      val=$1; shift
+    fi
+    [ -n "$val" ] || bad "--$name needs a value"
+    opts+=("$var=$val")
+    from_env=${from_env// $var/}
+  else
+    bad "unknown option: --$name"
+  fi
+done
+apply() {
+  local kv
+  for kv in ${opts[@]+"${opts[@]}"}; do printf -v "${kv%%=*}" '%s' "${kv#*=}"; export "${kv%%=*}"; done
+}
+apply
+[ -n "${KUBE_CONTEXT:-}" ] || bad "--kube-context is required"
+[ -n "${NAMESPACE:-}" ] || bad "--namespace is required"
+[ -z "${DRY_RUN:-}" ] || [ -z "${CONFIRM_ONLY:-}" ] || bad "--dry-run and --confirm-only don't go together"
+case ${MASK:-label} in label|hmac) ;; *) bad "--mask must be label or hmac" ;; esac
+case ${TIMEOUT:-300} in ''|*[!0-9]*) bad "--timeout must be a number of seconds" ;; esac
+export KUBE_CONTEXT NAMESPACE
+origin() { [[ $from_env == *" $1"* ]] && printf ' (from $%s in your environment)' "$1"; return 0; }
+printf '== context %s%s, namespace %s%s\n' "$KUBE_CONTEXT" "$(origin KUBE_CONTEXT)" "$NAMESPACE" "$(origin NAMESPACE)"
+
+# Files given by the caller are relative to where they ran this; the script
+# works from the package directory, so make them absolute first.
+for v in UPSTREAM_CA JOIN_TOKEN_FILE RELAY_CA; do
+  p=${!v:-}
+  if [ -n "$p" ] && [[ $p != /* ]]; then printf -v "$v" '%s' "$orig/$p"; fi
+done
+for i in ${opts[@]+"${!opts[@]}"}; do
+  kv=${opts[$i]}
+  case ${kv%%=*} in UPSTREAM_CA|JOIN_TOKEN_FILE|RELAY_CA) [[ ${kv#*=} == /* ]] || opts[$i]="${kv%%=*}=$orig/${kv#*=}" ;; esac
+done
+
+if [ -n "$envfile" ]; then
+  cd "$pkg"
+  # shellcheck disable=SC1090
+  source "$envfile"
+  apply
+fi
+
+# What it needs, checked before anything is changed.
+if [ -z "${CONFIRM_ONLY:-}" ]; then
+  [ -z "${UPSTREAM_CA:-}" ] || [ -f "$UPSTREAM_CA" ] || die "--upstream-ca $UPSTREAM_CA: no such file"
+  [ -z "${JOIN_TOKEN_FILE:-}" ] || [ -f "$JOIN_TOKEN_FILE" ] || die "--join-token-file $JOIN_TOKEN_FILE: no such file"
+fi
+command -v python3 >/dev/null 2>&1 || die "python3 not found"
+python3 -c 'import yaml' 2>/dev/null || die "python3 can't import yaml: pip3 install PyYAML"
+command -v helm >/dev/null 2>&1 || die "helm not found: https://helm.sh/docs/intro/install/"
+helm_v=$(helm version --short 2>/dev/null || true)
+helm_major=${helm_v#v}; helm_major=${helm_major%%.*}
+[[ $helm_major =~ ^[0-9]+$ ]] && [ "$helm_major" -ge 3 ] || die "helm 3 or later is required (found: ${helm_v:-unknown})"
+if [ -z "${DRY_RUN:-}" ]; then
+  command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
+  contexts=$(kubectl config get-contexts -o name 2>&1) || die "kubectl can't list its contexts: $contexts"
+  if ! grep -qxF -- "$KUBE_CONTEXT" <<<"$contexts"; then
+    printf 'FAIL  no kubectl context named %s%s\n      kubectl (KUBECONFIG=%s) has:\n' "$KUBE_CONTEXT" "$(origin KUBE_CONTEXT)" "${KUBECONFIG:-~/.kube/config}" >&2
+    sed 's/^/        /' <<<"${contexts:-(none)}" >&2
+    exit 1
+  fi
+fi
 
 # Set by NeuBird before sending this script.
 TENANT=${TENANT:-metlife}
@@ -47,9 +189,7 @@ RELAY_IPS=${RELAY_IPS:-52.206.84.184,23.23.64.142}
 # join token for that name.
 PROXY_NAME=$TENANT
 
-: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}"
 HOSTS=${HOSTS:-*}
-here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 RELAY_CA=${RELAY_CA:-relay-ca.crt}
 [ -n "${CONFIRM_ONLY:-}" ] || [ -f "$RELAY_CA" ] || { echo "FAIL  $RELAY_CA: no such file (NeuBird's relay CA certificate)" >&2; exit 1; }
 if [ -n "${EGRESS_PROXY:-}" ] && [ -n "${ALLOW_CIDRS:-}" ] && [ -z "${EGRESS_PROXY_CIDR:-}" ]; then
@@ -173,9 +313,9 @@ print('   network policy:', 'on' if v['networkPolicy']['enabled'] else 'off', '|
 if [ -n "${DRY_RUN:-}" ]; then
   args=(-f "$values" --set-file "relayCA.cert=$RELAY_CA")
   [ -n "${UPSTREAM_CA:-}" ] && args+=(--set-file "upstreamCA.cert=$UPSTREAM_CA")
-  helm template neubird-proxy "$here/../helm/neubird-proxy" -n "$NAMESPACE" "${args[@]}" >/dev/null
-  cp "$values" ./neubird-proxy-values.yaml
-  echo "ok    renders; values written to ./neubird-proxy-values.yaml (DRY_RUN: nothing installed)"
+  helm template neubird-proxy "$chart" -n "$NAMESPACE" "${args[@]}" >/dev/null
+  cp "$values" "$orig/neubird-proxy-values.yaml"
+  echo "ok    renders; values written to $orig/neubird-proxy-values.yaml (dry run: nothing installed)"
   exit 0
 fi
 
