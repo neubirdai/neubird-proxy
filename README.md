@@ -15,7 +15,7 @@ guide, and the [configuration reference](deploy/helm/neubird-proxy/docs/configur
 
 ```
 NeuBird ──▶ relay ⇄ tunnel (opened by the proxy, :443) ⇄ neubird-proxy ──▶ Splunk / Maestro / ServiceNow / APIM
-             (proxy token + the system's credentials)      │ checks the host, request rules; redacts responses
+             (the system's credentials)                    │ checks the host, request rules; redacts responses
 ```
 
 MetLife sets once which hosts NeuBird may reach (`neubird_destinations`).
@@ -32,12 +32,13 @@ connection). In order; the first check that fails ends the request.
 2. **Path hygiene.** Paths with `.` or `..` segments (including
    percent-encoded, double-encoded, backslash and `..;` forms) get a 400,
    so a path can't be normalized upstream into a different API.
-3. **Token.** The proxy token, in the form `client_auth` sets (a Bearer
-   token, a Basic password, or a named header). Tokens shorter than 32
-   characters are refused at startup. A tunnel-only proxy (`listen: "off"`)
-   may set `client_auth: none` instead: every request then arrives over the
-   mutually authenticated tunnel the proxy opened to its relay, and no token
-   is checked. A proxy with an inbound listener always needs a token.
+3. **Token.** A tunnel-only proxy (`listen: "off"`, the chart's mode
+   `tunnel`) uses `client_auth: none`, the chart's default there: every
+   request arrives over the mutually authenticated tunnel the proxy opened
+   to its relay, and no token is checked; NeuBird sends none. A proxy with
+   an inbound listener always needs a token, in the form `client_auth` sets
+   (a Bearer token, a Basic password, or a named header); tokens shorter
+   than 32 characters are refused at startup.
 4. **Destination.** The host must match `neubird_destinations.hosts`, or the
    request gets `403 destination_not_allowed`. This is checked after the
    token, so a caller without it learns nothing about the hosts.
@@ -134,9 +135,9 @@ With the fingerprint:
    returns its relay CA certificate and your relay's hostname.
 3. Put the key and relay CA in a Secret mounted at the paths above.
 
-Either way, generate the proxy token with `neubird-proxy token` and give it
-to NeuBird through your usual secure channel, unless the proxy is
-tunnel-only with `client_auth: none`, which needs no token.
+A tunnel-only proxy needs no proxy token (`client_auth: none`). A proxy
+with an inbound listener needs one: generate it with `neubird-proxy token`
+and give it to whatever calls the proxy (your gateway).
 
 Nothing expires: the proxy re-mints its certificate on every connect.
 To rotate the key, run `keygen` again, send NeuBird the new fingerprint,
@@ -439,16 +440,18 @@ then summarizes the config and prints the startup warnings. With
 listed.
 
 ```
-$ neubird-proxy validate -offline -config config.yaml
+$ neubird-proxy validate -offline -tunnel -config config.yaml
 VALID config.yaml
 
-CONNECTION            UPSTREAM                                     AUTH    METHODS               PATHS  MCP TOOLS  FIELDS  MODE
-neubird_destinations  *.apis.metlife.com,maestro.corp.metlife.com  bearer  GET,HEAD,POST,DELETE  any    -          all     NeuBird credentials
+CONNECTION            UPSTREAM                                     AUTH  METHODS        PATHS  MCP TOOLS  FIELDS  MODE
+neubird_destinations  *.apis.metlife.com,maestro.corp.metlife.com  none  GET,HEAD,POST  any    -          all     NeuBird credentials
 ...
+tunnel: 1 relay(s) x 1 connection(s), no inbound listener
+  tunnel section added as the Helm chart adds it (relay, tenant and key come from its values)
+
 warnings:
-  - tls is not set: the proxy listener is plain HTTP and relies on the load balancer for TLS
+  - neubird_destinations: client_auth: none: requests from the NeuBird relay need no proxy token; cut NeuBird off by scaling to 0 or by NeuBird revoking the tunnel key
   - neubird_destinations: NeuBird chooses the destination host within *.apis.metlife.com, maestro.corp.metlife.com and supplies the credentials
-not checked (offline, placeholders used): NEUBIRD_PROXY_TOKEN
 ```
 
 **`test`: can the proxy reach the relay and the systems?** Without
@@ -494,8 +497,8 @@ legend:     - returned by the system   + received by NeuBird
 NeuBird to record (see Outbound tunnel). **`fingerprint <file>`** prints the
 fingerprint of a key or certificate.
 
-**`token`** prints a new random 64-character token:
-`--from-literal=NEUBIRD_PROXY_TOKEN="$(neubird-proxy token)"`.
+**`token`** prints a new random 64-character token: a proxy token for an
+inbound listener, or an HMAC key (`REDACTION_HMAC_KEY`).
 
 **`netpol`** generates egress rules that allow only the relay and the
 hosts in `neubird_destinations.hosts`: a CiliumNetworkPolicy, a
@@ -692,11 +695,11 @@ With the Helm chart only: see its
 `make chart-check` lints and renders it, and validates the rendered config
 with this build.
 
-To rotate the proxy token:
+To rotate the proxy token (inbound listener only; a tunnel-only proxy has none):
 1. Add the new value as `NEUBIRD_PROXY_TOKEN` and move the old one to
    `NEUBIRD_PROXY_TOKEN_PREVIOUS`, with `client_token_previous_env` set, then
    restart.
-2. Update NeuBird.
+2. Update whatever sends it (your gateway).
 3. Remove the previous token and restart again.
 
 ## Supply chain
@@ -731,6 +734,5 @@ For NeuBird engineering: what is the largest expected response body (this
 sets `max_body_bytes`)? Which methods does each connector need (this sets
 `methods`)?
 
-For MetLife: will ServiceNow be fronted by APIM? One subscription key or one per
-API? What are the real member ID and PHI formats? Is regex-only detection
+For MetLife: what are the real member ID and PHI formats? Is regex-only detection
 acceptable? What is the status of Cribl for Splunk?

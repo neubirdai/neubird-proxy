@@ -100,6 +100,10 @@ func loadConfig(path string, sec *secrets) (*config.Config, *redact.Engine, erro
 	if err != nil {
 		return nil, nil, err
 	}
+	return loadConfigBytes(raw, sec)
+}
+
+func loadConfigBytes(raw []byte, sec *secrets) (*config.Config, *redact.Engine, error) {
 	cfg, err := config.Parse(raw, sec.lookup)
 	if err != nil {
 		return nil, nil, err

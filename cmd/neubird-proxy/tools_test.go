@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -476,4 +477,36 @@ neubird_destinations:
 		t.Fatalf("code %d out %s", code, out)
 	}
 	matches(t, out, `neubird_destinations\s.*\s2 allowed\s`)
+}
+
+// validate -tunnel checks a config as the chart runs it in mode tunnel.
+func TestValidateTunnel(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	ok := write("ok.yaml", "neubird_destinations:\n  hosts: [splunk.example.com]\n")
+	var out, errb bytes.Buffer
+	if code := cmdValidate([]string{"-offline", "-tunnel", "-config", ok}, &out, &errb); code != 0 {
+		t.Fatalf("code %d: %s%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "VALID") || !strings.Contains(out.String(), " none ") {
+		t.Fatalf("want VALID with client_auth none:\n%s", out.String())
+	}
+	// An explicit client_auth is kept.
+	bearer := write("bearer.yaml", "client_token_env: TOK\nneubird_destinations:\n  hosts: [splunk.example.com]\n  client_auth: bearer\n")
+	out.Reset()
+	if code := cmdValidate([]string{"-offline", "-tunnel", "-config", bearer}, &out, &errb); code != 0 || !strings.Contains(out.String(), " bearer ") {
+		t.Fatalf("code %d:\n%s", code, out.String())
+	}
+	// listen or tunnel in the file: the chart sets them.
+	listen := write("listen.yaml", "listen: \"off\"\nneubird_destinations:\n  hosts: [a.example.com]\n")
+	out.Reset()
+	if code := cmdValidate([]string{"-offline", "-tunnel", "-config", listen}, &out, &errb); code == 0 || !strings.Contains(out.String(), "leave it out") {
+		t.Fatalf("code %d:\n%s", code, out.String())
+	}
 }

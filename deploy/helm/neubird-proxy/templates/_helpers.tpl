@@ -82,7 +82,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{/* "true" when NeuBird's requests take no proxy token
 (neubird_destinations.client_auth: none, mode tunnel only). */}}
 {{- define "neubird-proxy.noToken" -}}
-{{- if eq (toString (dig "neubird_destinations" "client_auth" "" (.Values.config | default dict))) "none" -}}true{{- end -}}
+{{- $d := dig "neubird_destinations" nil (.Values.config | default dict) -}}
+{{- $ca := toString (dig "neubird_destinations" "client_auth" "" (.Values.config | default dict)) -}}
+{{- if or (eq $ca "none") (and $d (eq $ca "") (not (include "neubird-proxy.inbound" .))) -}}true{{- end -}}
 {{- end -}}
 
 {{- define "neubird-proxy.clientCAConfigMap" -}}
@@ -111,7 +113,7 @@ leave out the default client_token_env, which nothing would read. */ -}}
 {{- if include "neubird-proxy.inbound" . -}}
 {{- $in := .Values.inbound -}}
 {{- if .Values.tunnel.relays -}}{{- fail "tunnel.relays: mode inbound has no tunnel; leave tunnel out (or use mode: tunnel)" -}}{{- end -}}
-{{- if include "neubird-proxy.noToken" . -}}{{- fail "neubird_destinations.client_auth: none is for mode tunnel only; an inbound listener needs a proxy token" -}}{{- end -}}
+{{- if eq (toString (dig "neubird_destinations" "client_auth" "" ($c | default dict))) "none" -}}{{- fail "neubird_destinations.client_auth: none is for mode tunnel only; an inbound listener needs a proxy token" -}}{{- end -}}
 {{- $_ := set $cfg "listen" $listen -}}
 {{- if $in.tls.existingSecret -}}
 {{- $tls := dict "cert_file" "/etc/neubird-proxy/tls/tls.crt" "key_file" "/etc/neubird-proxy/tls/tls.key" -}}
@@ -137,6 +139,12 @@ leave out the default client_token_env, which nothing would read. */ -}}
   "connections_per_relay" $t.connectionsPerRelay
   "join_token_env" ($t.joinTokenEnv | default "") -}}
 {{- $_ := set $cfg "tunnel" $tunnel -}}
+{{- /* Mode tunnel: NeuBird sends no proxy token (the tunnel authenticates
+every request), so neubird_destinations defaults to client_auth: none. Set
+client_auth explicitly to require a token. */ -}}
+{{- if and (hasKey $cfg "neubird_destinations") (eq (toString (dig "neubird_destinations" "client_auth" "" $cfg)) "") -}}
+{{- $_ := set $cfg.neubird_destinations "client_auth" "none" -}}
+{{- end -}}
 {{- $_ := set $cfg "listen" $listen -}}
 {{- end -}}
 {{- if or .Values.upstreamCA.cert .Values.upstreamCA.existingConfigMap -}}

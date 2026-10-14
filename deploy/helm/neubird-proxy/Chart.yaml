@@ -7,6 +7,6 @@ description: >-
   port.
 type: application
 version: 0.1.0
-appVersion: "046a02c"
+appVersion: "6f17528"
 kubeVersion: ">=1.25.0-0"
 home: https://neubird.ai
