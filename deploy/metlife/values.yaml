@@ -14,7 +14,7 @@ mode: tunnel
 tunnel:
   relays: ["metlifemirror-tunnel.cluster.neubird.ai:443"]
   tenant: metlifemirror
-  proxy: metlife-aks-prod         # the name the join token is for
+  proxy: aks-prod                 # the name the join token is for
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
 # Optional: MetLife's internal CA bundle, if Splunk's certificate comes from
