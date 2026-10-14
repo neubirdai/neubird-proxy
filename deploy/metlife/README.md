@@ -79,7 +79,7 @@ It passes when every confirmation line is `ok`; it exits non-zero otherwise. If 
 Notes:
 - **ServiceNow** stays read-only: `*.service-now.com` is limited to GET and HEAD, under `*` too. Use a read-only API key (`x-sn-apikey`) or OAuth/basic auth.
 - **Splunk's certificate** must name the host NeuBird uses. Splunk's default certificate on 8089 names none and fails verification; its CA goes in `--upstream-ca`.
-- **Memory:** the values set a 640 Mi limit for the 20 MiB `max_body_bytes`.
+- **Memory:** the values set a 768 Mi limit, so responses up to the 20 MiB `max_body_bytes` fit with either `--mask`; at a lower limit the proxy refuses larger responses (`body_too_large`) and logs a `risky configuration` warning.
 
 **HMAC masking (optional).** The proxy masks sensitive values in responses. With `--mask label` each becomes a label such as `[EMAIL]`. With `--mask hmac` each becomes a keyed code, so the same value always masks the same way and NeuBird can correlate it without seeing it. The script generates the key (`REDACTION_HMAC_KEY` in the Secret) if it isn't there. Keep it in MetLife's secret store and never send it to NeuBird: anyone with the key can test guesses against masked values. Leave it in place; changing it changes every code.
 
