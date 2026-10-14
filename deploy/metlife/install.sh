@@ -6,25 +6,31 @@
 # the spent join token.
 #
 #   KUBE_CONTEXT=<ctx> NAMESPACE=neubird \
-#   SPLUNK_HOST=splunk.metlife.com SERVICENOW_INSTANCE=metlife \
+#   HOSTS='splunk.metlife.com:8089,metlife.service-now.com' \
 #   JOIN_TOKEN_FILE=join.token deploy/metlife/install.sh
 #
 # MetLife sets:
 #   KUBE_CONTEXT         kubectl context of the AKS cluster (required)
 #   NAMESPACE            namespace to install in (required)
-#   SPLUNK_HOST          Splunk's host[:port], port 8089 if omitted (required)
+#   HOSTS                the systems NeuBird may reach, comma-separated
+#                        (required): host[:port], *.domain[:port] (any name
+#                        under it) or an IP address. Port 443 if omitted.
+#                        *.service-now.com hosts are kept read-only (GET, HEAD)
 #   JOIN_TOKEN_FILE      file holding NeuBird's join token (first install only)
-#   SERVICENOW_INSTANCE  <instance> of <instance>.service-now.com (optional)
 #   RELAY_CA             NeuBird's relay CA certificate (default: relay-ca.crt)
-#   UPSTREAM_CA          CA bundle if Splunk's certificate is from an internal CA
-#   EGRESS_PROXY         forwarding proxy for the tunnel and ServiceNow,
+#   UPSTREAM_CA          CA bundle for systems with internal-CA certificates
+#   EGRESS_PROXY         forwarding proxy for the tunnel and internet systems,
 #                        e.g. http://proxy.metlife.com:3128 (no TLS inspection)
+#   NO_PROXY             hosts reached directly, not through EGRESS_PROXY,
+#                        e.g. splunk.metlife.com,.metlife.com
+#   ALLOW_CIDRS          turns on the NetworkPolicy: the ranges the proxy may
+#                        reach besides DNS and the relay, as cidr:port,...
+#                        e.g. 10.20.0.0/16:8089 (with EGRESS_PROXY, also
+#                        set EGRESS_PROXY_CIDR)
+#   EGRESS_PROXY_CIDR    the egress proxy's address, e.g. 10.1.2.3/32
 #   IMAGE_REPO           your registry's copy of the image (same digest)
 #   MASK                 label or hmac (default: label)
-#   SPLUNK_CIDR          Splunk's range: turns on the NetworkPolicy (with
-#                        ServiceNow it needs EGRESS_PROXY; with EGRESS_PROXY,
-#                        EGRESS_PROXY_CIDR)
-#   EGRESS_PROXY_CIDR    the egress proxy's address, e.g. 10.1.2.3/32
+#   ALLOW_ANY_HOST=1     allow HOSTS='*' (any host name the proxy can reach)
 #   DRY_RUN=1            write the values and render them; install nothing
 #
 # The token is read from its file and never printed or put on a command line.
@@ -38,60 +44,72 @@ RELAY_IPS=${RELAY_IPS:-52.206.84.184,23.23.64.142}
 # join token for that name.
 PROXY_NAME=$TENANT
 
-: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}" "${SPLUNK_HOST:?set SPLUNK_HOST}"
+: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}" "${HOSTS:?set HOSTS}"
 here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 RELAY_CA=${RELAY_CA:-relay-ca.crt}
 [ -f "$RELAY_CA" ] || { echo "FAIL  $RELAY_CA: no such file (NeuBird's relay CA certificate)" >&2; exit 1; }
-case "$SPLUNK_HOST" in *:*) ;; *) SPLUNK_HOST="$SPLUNK_HOST:8089" ;; esac
-if [ -n "${EGRESS_PROXY:-}" ] && [ -n "${SPLUNK_CIDR:-}" ] && [ -z "${EGRESS_PROXY_CIDR:-}" ]; then
-  echo "FAIL  with SPLUNK_CIDR (NetworkPolicy on) and EGRESS_PROXY, set EGRESS_PROXY_CIDR too" >&2; exit 1
-fi
-# ServiceNow is SaaS without fixed addresses, so the NetworkPolicy can allow it
-# only through an egress proxy.
-if [ -n "${SERVICENOW_INSTANCE:-}" ] && [ -n "${SPLUNK_CIDR:-}" ] && [ -z "${EGRESS_PROXY:-}" ]; then
-  echo "FAIL  with SPLUNK_CIDR (NetworkPolicy on) and SERVICENOW_INSTANCE, set EGRESS_PROXY and EGRESS_PROXY_CIDR: the policy can't allow ServiceNow by address" >&2; exit 1
+if [ -n "${EGRESS_PROXY:-}" ] && [ -n "${ALLOW_CIDRS:-}" ] && [ -z "${EGRESS_PROXY_CIDR:-}" ]; then
+  echo "FAIL  with ALLOW_CIDRS (NetworkPolicy on) and EGRESS_PROXY, set EGRESS_PROXY_CIDR too" >&2; exit 1
 fi
 
 values=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-values.XXXXXX")
 trap 'rm -f "$values"' EXIT
-TENANT=$TENANT RELAY=$RELAY RELAY_IPS=$RELAY_IPS SPLUNK_HOST=$SPLUNK_HOST \
-SERVICENOW_INSTANCE=${SERVICENOW_INSTANCE:-} EGRESS_PROXY=${EGRESS_PROXY:-} \
+TENANT=$TENANT RELAY=$RELAY RELAY_IPS=$RELAY_IPS HOSTS=$HOSTS \
+EGRESS_PROXY=${EGRESS_PROXY:-} NO_PROXY_HOSTS=${NO_PROXY:-} \
 EGRESS_PROXY_CIDR=${EGRESS_PROXY_CIDR:-} IMAGE_REPO=${IMAGE_REPO:-} \
-PROXY_NAME=$PROXY_NAME MASK=${MASK:-label} SPLUNK_CIDR=${SPLUNK_CIDR:-} \
+PROXY_NAME=$PROXY_NAME MASK=${MASK:-label} ALLOW_CIDRS=${ALLOW_CIDRS:-} \
+ALLOW_ANY_HOST=${ALLOW_ANY_HOST:-} \
 python3 - "$here/values.yaml" "$values" <<'PY'
 import os, sys, yaml
 src, out = sys.argv[1], sys.argv[2]
 e = os.environ
+def fail(msg): sys.exit("FAIL  " + msg)
 v = yaml.safe_load(open(src))
 if e["IMAGE_REPO"]:
     v["image"]["repository"] = e["IMAGE_REPO"]
 v["tunnel"].update(relays=[e["RELAY"]], tenant=e["TENANT"], proxy=e["PROXY_NAME"])
 d = v["config"]["neubird_destinations"]
-splunk = e["SPLUNK_HOST"]
-d["hosts"] = [splunk]
-if e["SERVICENOW_INSTANCE"]:
-    d["hosts"].append(e["SERVICENOW_INSTANCE"] + ".service-now.com")
-else:
+hosts = [h.strip().lower() for h in e["HOSTS"].split(",") if h.strip()]
+if not hosts:
+    fail("HOSTS is empty")
+if "*" in [h.split(":")[0] for h in hosts] and e["ALLOW_ANY_HOST"] != "1":
+    fail("HOSTS='*' lets NeuBird reach any host name the proxy can resolve; set ALLOW_ANY_HOST=1 to allow it")
+d["hosts"] = hosts
+# ServiceNow read-only: keep values.yaml's host_methods rule only if a
+# ServiceNow host is listed.
+if not any(h.split(":")[0].endswith("service-now.com") for h in hosts):
     d.pop("host_methods", None)
 if e["MASK"] not in ("label", "hmac"):
-    sys.exit("FAIL  MASK must be label or hmac")
+    fail("MASK must be label or hmac")
 v["config"]["redaction"]["mask"] = e["MASK"]
 if e["MASK"] == "hmac":
     v["config"]["redaction"]["hmac_key_env"] = "REDACTION_HMAC_KEY"
 env = []
 if e["EGRESS_PROXY"]:
-    # The tunnel and ServiceNow go through the egress proxy; Splunk stays direct.
-    env = [{"name": "HTTPS_PROXY", "value": e["EGRESS_PROXY"]},
-           {"name": "NO_PROXY", "value": splunk.rsplit(":", 1)[0]}]
+    env.append({"name": "HTTPS_PROXY", "value": e["EGRESS_PROXY"]})
+    if e["NO_PROXY_HOSTS"]:
+        env.append({"name": "NO_PROXY", "value": e["NO_PROXY_HOSTS"]})
+elif e["NO_PROXY_HOSTS"]:
+    fail("NO_PROXY is only used with EGRESS_PROXY")
 v["extraEnv"] = env
 np = v.setdefault("networkPolicy", {})
 np["relayCIDRs"] = [ip.strip() + "/32" for ip in e["RELAY_IPS"].split(",") if ip.strip()]
-if e["SPLUNK_CIDR"]:
+if e["ALLOW_CIDRS"]:
     np["enabled"] = True
-    up = [{"cidr": e["SPLUNK_CIDR"], "ports": [int(splunk.rsplit(":", 1)[1])]}]
+    up = []
+    for item in e["ALLOW_CIDRS"].split(","):
+        item = item.strip()
+        if not item:
+            continue
+        cidr, sep, port = item.rpartition(":")
+        if not sep or "/" not in cidr or not port.isdigit():
+            fail(f"ALLOW_CIDRS entry {item!r}: expected cidr:port, e.g. 10.20.0.0/16:8089")
+        up.append({"cidr": cidr, "ports": [int(port)]})
     if e["EGRESS_PROXY"]:
         from urllib.parse import urlsplit
         up.append({"cidr": e["EGRESS_PROXY_CIDR"], "ports": [urlsplit(e["EGRESS_PROXY"]).port or 3128]})
+    elif any(h.startswith("*") for h in hosts):
+        print("warn  wildcard HOSTS with the NetworkPolicy on and no EGRESS_PROXY: only names resolving into ALLOW_CIDRS are reachable", file=sys.stderr)
     np["upstreams"] = up
 else:
     np["enabled"] = False
