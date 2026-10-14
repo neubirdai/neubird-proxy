@@ -182,8 +182,8 @@ func allowHeaderOf(set map[string]bool) string {
 
 // chartTunnel adds to a config what the Helm chart adds in mode tunnel:
 // listen: off, a tunnel section (placeholders here: the chart fills it from
-// its values), and, with neubird_destinations and no client_auth, client_auth:
-// none. It refuses a config that already sets listen or tunnel, as the chart
+// its values), and, with a neubird_destinations that names no token
+// (client_auth, client_token_env, client_auth_header), client_auth: none. It refuses a config that already sets listen or tunnel, as the chart
 // does.
 func chartTunnel(raw []byte) ([]byte, error) {
 	var m map[string]any
@@ -204,7 +204,14 @@ func chartTunnel(raw []byte) ([]byte, error) {
 		"key_file": "tunnel.key", "ca_file": "relay-ca.crt",
 	}
 	if d, ok := m["neubird_destinations"].(map[string]any); ok {
-		if ca, _ := d["client_auth"].(string); ca == "" {
+		// As the chart: only when the section names no token at all.
+		unset := true
+		for _, k := range []string{"client_auth", "client_token_env", "client_auth_header"} {
+			if v, _ := d[k].(string); v != "" {
+				unset = false
+			}
+		}
+		if unset {
 			d["client_auth"] = "none"
 		}
 	}

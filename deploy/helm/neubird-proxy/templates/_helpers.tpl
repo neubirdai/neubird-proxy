@@ -81,11 +81,18 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 
 {{/* "true" when NeuBird's requests take no proxy token
 (neubird_destinations.client_auth: none, mode tunnel only). */}}
+{{/* "true" when a neubird_destinations map says nothing about a proxy token
+(no client_auth, client_token_env or client_auth_header): mode tunnel then
+defaults it to client_auth: none. */}}
+{{- define "neubird-proxy.tokenUnset" -}}
+{{- if and (kindIs "map" .) (not (get . "client_auth")) (not (get . "client_token_env")) (not (get . "client_auth_header")) -}}true{{- end -}}
+{{- end -}}
+
 {{- define "neubird-proxy.noToken" -}}
 {{- $d := get (.Values.config | default dict) "neubird_destinations" -}}
 {{- if kindIs "map" $d -}}
 {{- $ca := toString (get $d "client_auth") -}}
-{{- if or (eq $ca "none") (and (eq $ca "") (not (include "neubird-proxy.inbound" .))) -}}true{{- end -}}
+{{- if or (eq $ca "none") (and (include "neubird-proxy.tokenUnset" $d) (not (include "neubird-proxy.inbound" .))) -}}true{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -142,9 +149,10 @@ leave out the default client_token_env, which nothing would read. */ -}}
   "join_token_env" ($t.joinTokenEnv | default "") -}}
 {{- $_ := set $cfg "tunnel" $tunnel -}}
 {{- /* Mode tunnel: NeuBird sends no proxy token (the tunnel authenticates
-every request), so neubird_destinations defaults to client_auth: none. Set
-client_auth explicitly to require a token. */ -}}
-{{- if and (kindIs "map" (get $cfg "neubird_destinations")) (eq (toString (get $cfg.neubird_destinations "client_auth")) "") -}}
+every request), so neubird_destinations defaults to client_auth: none, unless
+the section names a token (client_auth, client_token_env or
+client_auth_header). */ -}}
+{{- if include "neubird-proxy.tokenUnset" (get $cfg "neubird_destinations") -}}
 {{- $_ := set $cfg.neubird_destinations "client_auth" "none" -}}
 {{- end -}}
 {{- $_ := set $cfg "listen" $listen -}}

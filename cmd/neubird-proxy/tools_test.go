@@ -503,6 +503,12 @@ func TestValidateTunnel(t *testing.T) {
 	if code := cmdValidate([]string{"-offline", "-tunnel", "-config", bearer}, &out, &errb); code != 0 || !strings.Contains(out.String(), " bearer ") {
 		t.Fatalf("code %d:\n%s", code, out.String())
 	}
+	// A section that names its own token keeps it (no client_auth: none).
+	section := write("section.yaml", "neubird_destinations:\n  hosts: [splunk.example.com]\n  client_token_env: TOK\n")
+	out.Reset()
+	if code := cmdValidate([]string{"-offline", "-tunnel", "-config", section}, &out, &errb); code != 0 || !strings.Contains(out.String(), " bearer ") {
+		t.Fatalf("code %d:\n%s", code, out.String())
+	}
 	// listen or tunnel in the file: the chart sets them.
 	listen := write("listen.yaml", "listen: \"off\"\nneubird_destinations:\n  hosts: [a.example.com]\n")
 	out.Reset()
