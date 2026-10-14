@@ -76,6 +76,8 @@ It passes when every confirmation line is `ok`; it exits non-zero otherwise. If 
 
 **Changing the install later** (another system, an egress proxy): rerun `install.sh` with the full set of options, without `--join-token-file` (a package's preset token is harmless: the relay already knows the key). The key is kept, so no new token is needed; the pods restart and reconnect. Options left out are removed: for example, a `--hosts` list without Splunk cuts Splunk off.
 
+**Uninstalling.** `install.sh -c <ctx> -n neubird --uninstall` removes the proxy (the Helm release) and keeps two Secrets: the proxy's key (`neubird-proxy-tunnel-key`, its identity at the relay) and `neubird-proxy-env` (the HMAC key). A reinstall then needs no new join token, and the masking codes stay the same. `--uninstall --purge` deletes both Secrets too, after asking you to type the namespace (`--yes` skips the question, for scripts), and prints the key's fingerprint: send it to NeuBird so the relay revokes the key. A reinstall after a purge needs a new join token. Neither removes the namespace.
+
 Notes:
 - **ServiceNow** stays read-only: `*.service-now.com` is limited to GET and HEAD, under `*` too. Use a read-only API key (`x-sn-apikey`) or OAuth/basic auth.
 - **Splunk's certificate** must name the host NeuBird uses. Splunk's default certificate on 8089 names none and fails verification; its CA goes in `--upstream-ca`.
