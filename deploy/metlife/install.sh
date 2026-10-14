@@ -17,14 +17,21 @@ chart=$here/../helm/neubird-proxy
 die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
 # Only a file whose name is the tenant it presets counts, so a stray local.env
 # (say, in a checkout of the repo) is never loaded; two packages' files are an
-# error rather than a silent pick.
+# error rather than a silent pick, and a skipped file is named.
+# A variable as the file sets it: sourced in a clean shell, so quoting works
+# as it does when the file is loaded.
+envvar() { env -i "$BASH" --noprofile --norc -c 'source "$1" >/dev/null 2>&1; printf "%s" "${!2:-}"' _ "$1" "$2"; }
 envfile=
 for f in "$pkg"/*.env; do
-  [ -f "$f" ] && grep -qxE "export TENANT=$(basename -- "$f" .env)" "$f" || continue
+  [ -f "$f" ] || continue
+  if [ "$(envvar "$f" TENANT)" != "$(basename -- "$f" .env)" ]; then
+    printf 'warn  ignoring %s: it doesn'"'"'t preset TENANT=%s\n' "$f" "$(basename -- "$f" .env)" >&2
+    continue
+  fi
   [ -z "$envfile" ] || die "two package files next to deploy/: $envfile and $f (keep one)"
   envfile=$f
 done
-preset() { [ -n "$envfile" ] && sed -nE "s/^export $1=//p" "$envfile" | tail -1; }
+preset() { [ -n "$envfile" ] && envvar "$envfile" "$1"; }
 bad() { printf '%s: %s\nRun %s --help for usage.\n' "$0" "$*" "$0" >&2; exit 2; }
 
 usage() {
@@ -187,7 +194,14 @@ if [ -n "$envfile" ]; then
   for v in $(sed -nE 's/^export ([A-Z_]+)=.*/\1/p' "$envfile"); do
     [ -n "${!v:-}" ] || continue
     printf '%s\n' ${opts[@]+"${opts[@]}"} | grep -q "^$v=" && continue
-    [ "${!v}" = "$(preset "$v")" ] && continue
+    pv=$(preset "$v")
+    [ "${!v}" = "$pv" ] && continue
+    # Paths: the environment's is already absolute (from where this was run),
+    # the package's is relative to the package; the same file is no change.
+    case $v in UPSTREAM_CA|JOIN_TOKEN_FILE|RELAY_CA)
+      [[ $pv == /* ]] || pv=$pkg/$pv
+      { [ "${!v}" = "$pv" ] || [ "${!v}" -ef "$pv" ]; } && continue ;;
+    esac
     o=$(printf '%s' "$v" | tr 'A-Z_' 'a-z-')
     if [[ $takes_value == *" $v "* ]]; then
       printf 'note  $%s in your environment is replaced by the package'"'"'s %s (use --%s to change it)\n' "$v" "$(preset "$v")" "$o"
@@ -303,7 +317,7 @@ uninstall() {
   [ -z "${PURGE:-}" ] || [ -z "$key" ] || kept="; the key Secret $KEY_SECRET is untouched: don't revoke it, fix the error and rerun"
   if [ -n "$release" ]; then
     # --wait came in Helm 3.7; without it, helm returns while the pods stop.
-    w=(); h uninstall --help 2>/dev/null | grep -q -- '--wait' && w=(--wait)
+    w=(); h uninstall --help 2>/dev/null | grep -- '--wait' >/dev/null && w=(--wait)
     out=$(h uninstall "$RELEASE" ${w[@]+"${w[@]}"} 2>&1) || die "helm uninstall $RELEASE: $out$kept"
     printf 'ok    release %s removed\n' "$RELEASE"
   else
@@ -348,7 +362,7 @@ fi
 # config, pods, tunnel and Secret) and print what to send NeuBird.
 confirm() {
   k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
-  local dep cfg relay ident want ready out fp tested r fails=0
+  local dep cfg relay ident want ready out fp tested r err fails=0
   dep=$(k get deploy -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
   [ -n "$dep" ] || { echo "FAIL  no neubird-proxy Deployment in namespace $NAMESPACE" >&2; return 1; }
   # Every lookup below may come back empty on a broken install: none may stop
@@ -380,12 +394,15 @@ except Exception:
   else
     printf '  --    systems: only wildcard hosts, nothing to test; check one with\n        kubectl -n %s exec deploy/%s -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml https://<host>\n' "$NAMESPACE" "$dep"
   fi
-  if out=$(k get secret neubird-proxy-env -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}' 2>&1); then
+  # kubectl's stderr kept apart: a warning on a good lookup isn't a token.
+  err=$(mktemp)
+  if out=$(k get secret neubird-proxy-env -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}' 2>"$err"); then
     [ -z "$out" ] && r=ok || r=fail
     check "$r" "join token removed from the Secret"
   else
-    check fail "join token removed from the Secret: can't read Secret neubird-proxy-env: $out"
+    check fail "join token removed from the Secret: can't read Secret neubird-proxy-env: $(tr '\n' ' ' < "$err")"
   fi
+  rm -f "$err"
   if [ "$fails" -gt 0 ]; then
     printf '\n%d check(s) failed: kubectl -n %s logs -l app.kubernetes.io/instance=neubird-proxy --tail=50 --prefix\n' "$fails" "$NAMESPACE"
     return 1
