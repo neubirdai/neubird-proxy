@@ -5,12 +5,14 @@
 # chart, waits for enrollment and the tunnels, tests each system and removes
 # the spent join token.
 #
-#   KUBE_CONTEXT=<ctx> SPLUNK_HOST=splunk.metlife.com \
-#   SERVICENOW_INSTANCE=metlife JOIN_TOKEN_FILE=join.token \
-#   deploy/metlife/install.sh
+#   KUBE_CONTEXT=<ctx> NAMESPACE=neubird PROXY_NAME=aks-prod \
+#   SPLUNK_HOST=splunk.metlife.com SERVICENOW_INSTANCE=metlife \
+#   JOIN_TOKEN_FILE=join.token deploy/metlife/install.sh
 #
 # MetLife sets:
 #   KUBE_CONTEXT         kubectl context of the AKS cluster (required)
+#   NAMESPACE            namespace to install in (required)
+#   PROXY_NAME           the name the join token is for (required)
 #   SPLUNK_HOST          Splunk's host[:port], port 8089 if omitted (required)
 #   JOIN_TOKEN_FILE      file holding NeuBird's join token (first install only)
 #   SERVICENOW_INSTANCE  <instance> of <instance>.service-now.com (optional)
@@ -19,13 +21,11 @@
 #   EGRESS_PROXY         forwarding proxy for the tunnel and ServiceNow,
 #                        e.g. http://proxy.metlife.com:3128 (no TLS inspection)
 #   IMAGE_REPO           your registry's copy of the image (same digest)
-#   PROXY_NAME           the name the join token is for (default: aks-prod)
 #   MASK                 label or hmac (default: label)
 #   SPLUNK_CIDR          Splunk's range: turns on the NetworkPolicy (with
 #                        ServiceNow it needs EGRESS_PROXY; with EGRESS_PROXY,
 #                        EGRESS_PROXY_CIDR)
 #   EGRESS_PROXY_CIDR    the egress proxy's address, e.g. 10.1.2.3/32
-#   NAMESPACE            default: neubird
 #   DRY_RUN=1            write the values and render them; install nothing
 #
 # The token is read from its file and never printed or put on a command line.
@@ -36,7 +36,7 @@ TENANT=${TENANT:-metlife}
 RELAY=${RELAY:-metlife-tunnel.neubird.ai:443}
 RELAY_IPS=${RELAY_IPS:-52.206.84.184,23.23.64.142}
 
-: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${SPLUNK_HOST:?set SPLUNK_HOST}"
+: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}" "${PROXY_NAME:?set PROXY_NAME}" "${SPLUNK_HOST:?set SPLUNK_HOST}"
 here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 RELAY_CA=${RELAY_CA:-relay-ca.crt}
 [ -f "$RELAY_CA" ] || { echo "FAIL  $RELAY_CA: no such file (NeuBird's relay CA certificate)" >&2; exit 1; }
@@ -55,7 +55,7 @@ trap 'rm -f "$values"' EXIT
 TENANT=$TENANT RELAY=$RELAY RELAY_IPS=$RELAY_IPS SPLUNK_HOST=$SPLUNK_HOST \
 SERVICENOW_INSTANCE=${SERVICENOW_INSTANCE:-} EGRESS_PROXY=${EGRESS_PROXY:-} \
 EGRESS_PROXY_CIDR=${EGRESS_PROXY_CIDR:-} IMAGE_REPO=${IMAGE_REPO:-} \
-PROXY_NAME=${PROXY_NAME:-aks-prod} MASK=${MASK:-label} SPLUNK_CIDR=${SPLUNK_CIDR:-} \
+PROXY_NAME=$PROXY_NAME MASK=${MASK:-label} SPLUNK_CIDR=${SPLUNK_CIDR:-} \
 python3 - "$here/values.yaml" "$values" <<'PY'
 import os, sys, yaml
 src, out = sys.argv[1], sys.argv[2]
@@ -96,7 +96,7 @@ else:
 yaml.safe_dump(v, open(out, "w"), sort_keys=False)
 PY
 
-printf '== values for tenant %s, proxy %s, relay %s\n' "$TENANT" "${PROXY_NAME:-aks-prod}" "$RELAY"
+printf '== values for tenant %s, proxy %s, relay %s\n' "$TENANT" "$PROXY_NAME" "$RELAY"
 python3 -c "
 import sys,yaml; v=yaml.safe_load(open(sys.argv[1])); d=v['config']['neubird_destinations']
 print('   hosts:', ', '.join(d['hosts']))
@@ -106,7 +106,7 @@ print('   network policy:', 'on' if v['networkPolicy']['enabled'] else 'off', '|
 if [ -n "${DRY_RUN:-}" ]; then
   args=(-f "$values" --set-file "relayCA.cert=$RELAY_CA")
   [ -n "${UPSTREAM_CA:-}" ] && args+=(--set-file "upstreamCA.cert=$UPSTREAM_CA")
-  helm template neubird-proxy "$here/../helm/neubird-proxy" -n "${NAMESPACE:-neubird}" "${args[@]}" >/dev/null
+  helm template neubird-proxy "$here/../helm/neubird-proxy" -n "$NAMESPACE" "${args[@]}" >/dev/null
   cp "$values" ./neubird-proxy-values.yaml
   echo "ok    renders; values written to ./neubird-proxy-values.yaml (DRY_RUN: nothing installed)"
   exit 0
