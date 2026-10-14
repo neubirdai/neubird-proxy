@@ -4,7 +4,11 @@
 # preset, the relay CA, and a fresh join token for <tenant>/<tenant> that is
 # recorded on the tenant's relay first. NeuBird-internal; it isn't shipped.
 #
-#   scripts/make-package.sh -t <tenant> --relay-ca <file> --relay-context <ctx>
+#   scripts/make-package.sh -t <tenant>
+#
+# The relay's details come from neubird-relay's
+# deploy/production/customers/<tenant>/ (relay.env and ca/relay-ca.crt, written
+# by its scripts/setup-relay.sh); options override them.
 #
 # Run with --help for the options. The join token is never printed: it goes to
 # ~/.neubird-onboard/<tenant>/ (mode 600) and into the package.
@@ -24,16 +28,21 @@ Build a customer's neubird-proxy install package for a tenant, with a join
 token for <tenant>/<tenant> recorded on the tenant's relay.
 
 Usage:
-  $0 -t <tenant> --relay-ca <file> --relay-context <context> [options]
+  $0 -t <tenant> [options]
 
 Required:
   -t, --tenant <tenant>          the tenant; the proxy is <tenant>/<tenant>
+
+The relay's details default to neubird-relay's
+deploy/production/customers/<tenant>/: relay.env (context, namespace, host)
+and ca/relay-ca.crt, as its scripts/setup-relay.sh wrote them. For a relay
+without that directory, give --relay-ca and --relay-context.
+
+Options:
       --relay-ca <file>          the tenant's relay CA certificate (public); it
                                  must verify the live relay's certificate
       --relay-context <context>  kubectl context of the cluster running the
                                  tenant's relay (not needed with --no-record)
-
-Options:
       --relay-namespace <ns>     the relay's namespace (default: the tenant)
       --relay <host:port>        default: <tenant>-tunnel.cluster.neubird.ai:443
       --relay-ips <list>         the relay's IP addresses, comma-separated
@@ -82,8 +91,17 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$TENANT" ] || bad "--tenant is required"
 [[ $TENANT =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || bad "--tenant must be a DNS label (lower case letters, digits, '-')"
-[ -n "$RELAY_CA" ] || bad "--relay-ca is required"
-[ -n "$NO_RECORD" ] || [ -n "$RELAY_CONTEXT" ] || bad "--relay-context is required (or --no-record)"
+# Defaults from the relay's directory in neubird-relay, if it has one.
+cust=$RELAY_REPO/deploy/production/customers/$TENANT
+envv() { [ -f "$cust/relay.env" ] && sed -n "s/^$1=//p" "$cust/relay.env" | tail -1; }
+if [ -f "$cust/relay.env" ]; then
+  RELAY_CONTEXT=${RELAY_CONTEXT:-$(envv KUBE_CONTEXT)}
+  RELAY_NS=${RELAY_NS:-$(envv NAMESPACE)}
+  h=$(envv RELAY_HOST); [ -z "$h" ] || RELAY=${RELAY:-$h:443}
+fi
+[ -n "$RELAY_CA" ] || [ ! -f "$cust/ca/relay-ca.crt" ] || RELAY_CA=$cust/ca/relay-ca.crt
+[ -n "$RELAY_CA" ] || bad "--relay-ca is required ($cust/ca/relay-ca.crt doesn't exist: set the relay up with neubird-relay's scripts/setup-relay.sh)"
+[ -n "$NO_RECORD" ] || [ -n "$RELAY_CONTEXT" ] || bad "--relay-context is required (or --no-record): no $cust/relay.env"
 case $MASK in hmac|label) ;; *) bad "--mask must be hmac or label" ;; esac
 [[ $RELAY_CA == /* ]] || RELAY_CA=$orig/$RELAY_CA
 [[ $OUT == /* ]] || OUT=$orig/$OUT
@@ -181,6 +199,12 @@ PY
   diff -q <(k get configmap neubird-relay-tenants -o jsonpath='{.data.tenants\.yaml}') "$WORK/tenants.yaml" >/dev/null \
     || die "the relay's records don't read back as written"
   ok "recorded (the relay loads it within about a minute); backup $WORK/tenants-cm.backup.$stamp.yaml"
+  # Keep the relay's directory in git in step with the live records, so
+  # applying it (setup-relay.sh) doesn't drop this token.
+  if [ -f "$cust/tenants.yaml" ]; then
+    cp "$WORK/tenants.yaml" "$cust/tenants.yaml"
+    ok "updated ${cust#"$RELAY_REPO"/}/tenants.yaml in $RELAY_REPO: commit it"
+  fi
 fi
 
 step "build the package"
