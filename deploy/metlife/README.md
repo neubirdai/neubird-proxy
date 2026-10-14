@@ -98,11 +98,14 @@ Notes:
 
 ```sh
 kubectl -n neubird rollout status deploy/neubird-proxy --timeout=5m
+# the tunnel: the relay accepts this proxy's key
+kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml
+# each system: DNS, TCP and TLS from the pod
 kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml \
   https://<splunk host>:8089 https://<instance>.service-now.com
 ```
 
-It passes if the rollout completes and the test reports no failures: the pods turn ready only once the proxy has enrolled and a tunnel is up, and the test checks each system answers. If it fails, the logs say why: `kubectl -n neubird logs -l app=neubird-proxy --tail=50 --prefix`. A `risky configuration` warning for `client_auth: none` is expected.
+It passes if the rollout completes and both tests report no failures. The pods turn ready only once the proxy has enrolled and a tunnel is up. If it fails, the logs say why: `kubectl -n neubird logs -l app=neubird-proxy --tail=50 --prefix`. A `risky configuration` warning for `client_auth: none` is expected.
 
 Once it passes, delete the spent join token from the Secret; it can't be used again anyway:
 
