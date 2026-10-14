@@ -14,12 +14,27 @@ chart=$here/../helm/neubird-proxy
 
 # A package from NeuBird presets the relay, tenant, CA and join token in
 # <tenant>.env next to deploy/; it's loaded below, so nothing is sourced by hand.
-envfile=
-envs=("$pkg"/*.env)
-[ -f "${envs[0]}" ] && envfile=${envs[0]}
-preset() { [ -n "$envfile" ] && sed -nE "s/^export $1=//p" "$envfile" | tail -1; }
-
 die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
+# A package's file is named for the tenant it presets. One that presets a
+# different tenant (renamed, say) stops the script rather than falling back to
+# the defaults below; one that presets none (a stray local.env in a checkout of
+# the repo) is named and ignored; two packages' files are an error.
+# A variable as the file sets it: sourced in a clean shell, so quoting works
+# as it does when the file is loaded.
+envvar() { env -i "$BASH" --noprofile --norc -c 'source "$1" >/dev/null 2>&1; printf "%s" "${!2:-}"' _ "$1" "$2"; }
+envfile=
+for f in "$pkg"/*.env; do
+  [ -f "$f" ] || continue
+  t=$(envvar "$f" TENANT)
+  if [ -z "$t" ]; then
+    printf 'warn  ignoring %s: it presets no TENANT\n' "$f" >&2
+    continue
+  fi
+  [ "$t" = "$(basename -- "$f" .env)" ] || die "$f presets TENANT=$t: a package's file is named for its tenant, so rename it $t.env"
+  [ -z "$envfile" ] || die "two package files next to deploy/: $envfile and $f (keep one)"
+  envfile=$f
+done
+preset() { [ -n "$envfile" ] && envvar "$envfile" "$1"; }
 bad() { printf '%s: %s\nRun %s --help for usage.\n' "$0" "$*" "$0" >&2; exit 2; }
 
 usage() {
@@ -52,7 +67,8 @@ Options:
                                  (needed with --allow-cidrs and --egress-proxy)
       --upstream-ca <file>       CA bundle for systems with internal-CA certificates
       --image-repo <repo>        your registry's copy of the image (same digest)
-      --mask <label|hmac>        how redacted values are masked (default: label)
+      --mask <label|hmac>        how redacted values are masked (default: label,
+                                 or the package's preset)
       --timeout <seconds>        how long to wait for the tunnels (default: 300)
       --join-token-file <file>   NeuBird's join token, for the first install
                                  (a package from NeuBird presets it)
@@ -73,6 +89,8 @@ Modes:
 
 Each option can also be set as an environment variable (--kube-context as
 KUBE_CONTEXT, --dry-run as DRY_RUN=1, and so on); a command-line option wins.
+A package's presets (its .env file) win over the environment. --uninstall,
+--purge and --yes are taken only from the command line.
 
 Examples:
   $0 -c prod-aks -n neubird --join-token-file join.token
@@ -83,7 +101,7 @@ Examples:
 Requires kubectl, helm 3 or later and python3 with PyYAML.
 EOF
   if [ -n "$envfile" ]; then
-    printf '\nThis package: tenant %s, relay %s\n' "$(preset TENANT)" "$(preset RELAY)"
+    printf '\nThis package: tenant %s, relay %s, mask %s\n' "$(preset TENANT)" "$(preset RELAY)" "$(preset MASK)"
   fi
 }
 
@@ -99,6 +117,9 @@ version() {
 # Options: --name value or --name=value; each maps to its environment variable
 # (--kube-context is KUBE_CONTEXT). Collected first and applied after the
 # package's .env, so they override its presets.
+# --uninstall, --purge and --yes only from the command line: a variable left
+# in the shell must never turn an install into an uninstall or a purge.
+unset UNINSTALL PURGE YES
 takes_value=" KUBE_CONTEXT NAMESPACE HOSTS EGRESS_PROXY EGRESS_NO_PROXY ALLOW_CIDRS EGRESS_PROXY_CIDR UPSTREAM_CA IMAGE_REPO MASK TIMEOUT JOIN_TOKEN_FILE RELAY_CA "
 switches=" DRY_RUN CONFIRM_ONLY UNINSTALL PURGE YES "
 opts=()
@@ -171,6 +192,26 @@ for i in ${opts[@]+"${!opts[@]}"}; do
 done
 
 if [ -n "$envfile" ]; then
+  # The package's presets replace the environment's values (an option still
+  # wins): say so, rather than silently ignoring what the caller set.
+  for v in $(sed -nE 's/^export ([A-Z_]+)=.*/\1/p' "$envfile"); do
+    [ -n "${!v:-}" ] || continue
+    printf '%s\n' ${opts[@]+"${opts[@]}"} | grep "^$v=" >/dev/null && continue
+    pv=$(preset "$v")
+    [ "${!v}" = "$pv" ] && continue
+    # Paths: the environment's is already absolute (from where this was run),
+    # the package's is relative to the package; the same file is no change.
+    case $v in UPSTREAM_CA|JOIN_TOKEN_FILE|RELAY_CA)
+      [[ $pv == /* ]] || pv=$pkg/$pv
+      { [ "${!v}" = "$pv" ] || [ "${!v}" -ef "$pv" ]; } && continue ;;
+    esac
+    o=$(printf '%s' "$v" | tr 'A-Z_' 'a-z-')
+    if [[ $takes_value == *" $v "* ]]; then
+      printf 'note  $%s in your environment is replaced by the package'"'"'s %s (use --%s to change it)\n' "$v" "$(preset "$v")" "$o"
+    else
+      printf 'note  $%s in your environment is replaced by the package'"'"'s %s\n' "$v" "$(preset "$v")"
+    fi
+  done
   cd "$pkg"
   # shellcheck disable=SC1090
   source "$envfile"
@@ -228,7 +269,7 @@ uninstall() {
     grep -q 'NotFound' <<<"$out" && return 1
     die "can't look up Secret $1 in namespace $NAMESPACE: $out"
   }
-  local out release= key= env= fp= b64 s answer
+  local out release= key= env= fp= b64 s answer w
   if out=$(h status "$RELEASE" 2>&1); then
     release=1
   elif ! grep -q 'release: not found' <<<"$out"; then
@@ -264,7 +305,7 @@ uninstall() {
     [ -z "$key" ] || printf '  the key of proxy %s/%s (%s)\n' "$TENANT" "$PROXY_NAME" "$fp"
     [ -z "$env" ] || printf '  Secret %s (the HMAC key)\n' "$ENV_SECRET"
     printf 'A reinstall then needs a new join token from NeuBird.\nType the namespace to confirm: '
-    read -r answer
+    read -r answer || { echo; answer=; }
     [ "$answer" = "$NAMESPACE" ] || die "not confirmed; nothing changed"
   fi
 
@@ -278,7 +319,9 @@ uninstall() {
   local kept=
   [ -z "${PURGE:-}" ] || [ -z "$key" ] || kept="; the key Secret $KEY_SECRET is untouched: don't revoke it, fix the error and rerun"
   if [ -n "$release" ]; then
-    out=$(h uninstall "$RELEASE" --wait 2>&1) || die "helm uninstall $RELEASE: $out$kept"
+    # --wait came in Helm 3.7; without it, helm returns while the pods stop.
+    w=(); h uninstall --help 2>/dev/null | grep -- '--wait' >/dev/null && w=(--wait)
+    out=$(h uninstall "$RELEASE" ${w[@]+"${w[@]}"} 2>&1) || die "helm uninstall $RELEASE: $out$kept"
     printf 'ok    release %s removed\n' "$RELEASE"
   else
     printf -- '--    no release %s in namespace %s\n' "$RELEASE" "$NAMESPACE"
@@ -322,7 +365,7 @@ fi
 # config, pods, tunnel and Secret) and print what to send NeuBird.
 confirm() {
   k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
-  local dep cfg relay ident want ready out fp tested r fails=0
+  local dep cfg relay ident want ready out fp tested r err fails=0
   dep=$(k get deploy -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
   [ -n "$dep" ] || { echo "FAIL  no neubird-proxy Deployment in namespace $NAMESPACE" >&2; return 1; }
   # Every lookup below may come back empty on a broken install: none may stop
@@ -354,8 +397,15 @@ except Exception:
   else
     printf '  --    systems: only wildcard hosts, nothing to test; check one with\n        kubectl -n %s exec deploy/%s -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml https://<host>\n' "$NAMESPACE" "$dep"
   fi
-  [ -z "$(k get secret neubird-proxy-env -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}' 2>/dev/null || true)" ] && r=ok || r=fail
-  check "$r" "join token removed from the Secret"
+  # kubectl's stderr kept apart: a warning on a good lookup isn't a token.
+  err=$(mktemp)
+  if out=$(k get secret neubird-proxy-env -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}' 2>"$err"); then
+    [ -z "$out" ] && r=ok || r=fail
+    check "$r" "join token removed from the Secret"
+  else
+    check fail "join token removed from the Secret: can't read Secret neubird-proxy-env: $(tr '\n' ' ' < "$err")"
+  fi
+  rm -f "$err"
   if [ "$fails" -gt 0 ]; then
     printf '\n%d check(s) failed: kubectl -n %s logs -l app.kubernetes.io/instance=neubird-proxy --tail=50 --prefix\n' "$fails" "$NAMESPACE"
     return 1

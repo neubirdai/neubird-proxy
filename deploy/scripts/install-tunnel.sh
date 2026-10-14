@@ -64,7 +64,9 @@ fi
 if grep -q 'mask: hmac' <<<"$config"; then
   have=$(k get secret "$SECRET" -o jsonpath='{.data.REDACTION_HMAC_KEY}')
   if [ -z "$have" ]; then
-    t=$(mktemp); openssl rand -hex 32 | tr -d '\n' > "$t"; put REDACTION_HMAC_KEY "$t"; rm -f "$t"; ok "REDACTION_HMAC_KEY generated"
+    # python3 (already needed here), not openssl, which may not be installed.
+    t=$(mktemp); python3 -c 'import secrets,sys; sys.stdout.write(secrets.token_hex(32))' > "$t"
+    put REDACTION_HMAC_KEY "$t"; rm -f "$t"; ok "REDACTION_HMAC_KEY generated"
   fi
 fi
 
