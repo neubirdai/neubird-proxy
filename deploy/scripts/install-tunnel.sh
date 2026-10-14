@@ -88,8 +88,12 @@ step "enrollment and tunnels (up to ${TIMEOUT}s)"
 # Enrollment refusals (token expired, used, for another proxy) are final:
 # stop at once. A refused tunnel can be transient (a relay replica that hasn't
 # seen a just-enrolled key yet), so it fails only if no tunnel connects within
-# a minute of the first refusal.
-end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""; ready=""
+# a minute of the first refusal. So can a relay that turns the enrollment away
+# at the handshake (the proxy isn't in its records, or the key is revoked):
+# records NeuBird just added take the relay up to a minute to load, so that
+# too fails only if it goes on for two minutes without an enrollment (a
+# minute to load, then the proxy's next try).
+end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""; ready=""; turned_away_at=""
 while [ $SECONDS -lt $end ]; do
   logs=$(k logs -l "app.kubernetes.io/instance=$RELEASE" --tail=-1 2>/dev/null || true)
   grep -qE '"msg":"(enrolled with the join token|key already enrolled)"' <<<"$logs" && enrolled=1
@@ -97,6 +101,11 @@ while [ $SECONDS -lt $end ]; do
   # enrollment (...)" is a connection error the proxy retries.
   r=$(grep -oE 'enrollment: relay refused: [^"]*' <<<"$logs" | tail -1 || true)
   [ -n "$r" ] && [ -z "$enrolled" ] && die "$r (ask NeuBird for a new join token)"
+  a=$(grep -oE 'relay refused the enrollment \(is [^ ]+ in NeuBird' <<<"$logs" | tail -1 | sed -E 's/.*\(is ([^ ]+) in NeuBird/\1/' || true)
+  if [ -n "$a" ] && [ -z "$enrolled" ]; then
+    turned_away_at=${turned_away_at:-$SECONDS}
+    [ $((SECONDS - turned_away_at)) -ge 120 ] && die "the relay turns away $a at the handshake (not in its records, or the key is revoked): ask NeuBird to check that $a is recorded with this join token"
+  fi
   connected=$(grep -c '"msg":"tunnel connected"' <<<"$logs" || true)
   # Ready means the rollout finished: in tunnel mode a pod is ready only with
   # a tunnel up, so old pods' log lines can't stand in for it.
