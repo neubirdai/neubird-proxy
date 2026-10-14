@@ -196,7 +196,7 @@ if [ -n "$envfile" ]; then
   # wins): say so, rather than silently ignoring what the caller set.
   for v in $(sed -nE 's/^export ([A-Z_]+)=.*/\1/p' "$envfile"); do
     [ -n "${!v:-}" ] || continue
-    printf '%s\n' ${opts[@]+"${opts[@]}"} | grep -q "^$v=" && continue
+    printf '%s\n' ${opts[@]+"${opts[@]}"} | grep "^$v=" >/dev/null && continue
     pv=$(preset "$v")
     [ "${!v}" = "$pv" ] && continue
     # Paths: the environment's is already absolute (from where this was run),
