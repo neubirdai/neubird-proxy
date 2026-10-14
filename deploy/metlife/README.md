@@ -18,7 +18,7 @@ The proxy runs in MetLife's AKS and dials out to NeuBird's relay; NeuBird's requ
 | Relay IPs | `3.231.28.52`, `32.196.200.125` |
 | Tenant | `metlifemirror` |
 | Relay CA certificate | `relay-ca.crt` |
-| Join token (**secret**, single use, 72 h) | `nbjt_…`, for proxy `aks-prod` |
+| Join token (**secret**, single use, 72 h) | `nbjt_…`, for proxy `dryrun` |
 
 Allow outbound TCP 443 to the relay IPs **without TLS inspection** (a plain CONNECT proxy is fine; set it with `extraEnv`). MetLife sends nothing back.
 
@@ -61,7 +61,7 @@ The key must be at least 32 characters. Keep it in MetLife's secret store and ne
       - <instance>.service-now.com
 ```
 
-Everything else is set: the image (by digest), the relay, tenant and proxy name (`aks-prod`, which the join token is for), and the relay's IPs.
+Everything else is set: the image (by digest), the relay, tenant and proxy name (`dryrun`, which the join token is for), and the relay's IPs.
 
 Optional, each commented in the file:
 - `upstreamCA`: your internal CA bundle, if Splunk's certificate comes from it.
