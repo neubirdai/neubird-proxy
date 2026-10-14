@@ -218,46 +218,83 @@ KEY_SECRET=$RELEASE-tunnel-key
 ENV_SECRET=neubird-proxy-env
 uninstall() {
   k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
-  local fp= s answer
-  if [ -n "${PURGE:-}" ]; then
-    # The fingerprint NeuBird revokes: sha256 of the public key (DER
-    # SubjectPublicKeyInfo), as the proxy prints it. The private key is
-    # piped from the Secret, never written to disk.
-    if k get secret "$KEY_SECRET" >/dev/null 2>&1; then
-      fp=$(k get secret "$KEY_SECRET" -o jsonpath='{.data.tunnel\.key}' | base64 -d \
-        | openssl pkey -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -r | cut -d' ' -f1) || true
-      [[ $fp =~ ^[0-9a-f]{64}$ ]] && fp=sha256:$fp || fp=
-    fi
-    if [ -z "${YES:-}" ]; then
-      [ -t 0 ] || die "--purge deletes the proxy's key: add --yes to confirm when not running interactively"
-      printf '\n--purge deletes, for good, from namespace %s:\n  the key of proxy %s/%s%s\n  the HMAC key\nA reinstall then needs a new join token from NeuBird.\nType the namespace to confirm: ' \
-        "$NAMESPACE" "$TENANT" "$PROXY_NAME" "${fp:+ ($fp)}"
-      read -r answer
-      [ "$answer" = "$NAMESPACE" ] || die "not confirmed; nothing changed"
-    fi
+  h() { helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
+  # Look everything up first. "Not found" is an answer; any other error (the
+  # cluster unreachable, no permission) stops the script before anything is
+  # changed, rather than being taken for "nothing installed".
+  has_secret() {
+    local out
+    out=$(k get secret "$1" -o name 2>&1) && return 0
+    grep -q 'NotFound' <<<"$out" && return 1
+    die "can't look up Secret $1 in namespace $NAMESPACE: $out"
+  }
+  local out release= key= env= fp= b64 s answer
+  if out=$(h status "$RELEASE" 2>&1); then
+    release=1
+  elif ! grep -q 'release: not found' <<<"$out"; then
+    die "can't look up release $RELEASE in namespace $NAMESPACE: $out"
   fi
+  has_secret "$KEY_SECRET" && key=1
+  has_secret "$ENV_SECRET" && env=1
+
+  if [ -n "${PURGE:-}" ] && [ -n "$key" ]; then
+    # The fingerprint NeuBird revokes: sha256 of the public key (DER
+    # SubjectPublicKeyInfo), as the proxy prints it. The private key goes
+    # from the Secret through a pipe, never to disk. Without the right
+    # fingerprint the key can't be revoked, so a failure stops here, before
+    # anything is deleted.
+    b64=$(k get secret "$KEY_SECRET" -o jsonpath='{.data.tunnel\.key}' 2>&1) \
+      || die "can't read Secret $KEY_SECRET: $b64; nothing changed"
+    [ -n "$b64" ] || die "Secret $KEY_SECRET has no tunnel.key; nothing changed"
+    fp=$(printf '%s' "$b64" | base64 -d | openssl pkey -pubout -outform DER | openssl dgst -sha256 -r) \
+      || die "can't work out the key's fingerprint from Secret $KEY_SECRET; nothing changed"
+    fp=${fp%% *}
+    # sha256 of nothing: openssl read no key.
+    [[ $fp =~ ^[0-9a-f]{64}$ ]] && [ "$fp" != e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] \
+      || die "can't work out the key's fingerprint from Secret $KEY_SECRET; nothing changed"
+    fp=sha256:$fp
+  fi
+
+  if [ -n "${PURGE:-}" ] && [ -z "${YES:-}" ] && [ -n "$release$key$env" ]; then
+    [ -t 0 ] || die "--purge deletes the proxy's key: add --yes to confirm when not running interactively"
+    printf '\n--purge deletes, for good, from namespace %s:\n' "$NAMESPACE"
+    [ -z "$release" ] || printf '  the release %s\n' "$RELEASE"
+    [ -z "$key" ] || printf '  the key of proxy %s/%s (%s)\n' "$TENANT" "$PROXY_NAME" "$fp"
+    [ -z "$env" ] || printf '  Secret %s (the HMAC key)\n' "$ENV_SECRET"
+    printf 'A reinstall then needs a new join token from NeuBird.\nType the namespace to confirm: '
+    read -r answer
+    [ "$answer" = "$NAMESPACE" ] || die "not confirmed; nothing changed"
+  fi
+
   printf '\n== uninstall (namespace %s)\n' "$NAMESPACE"
-  if helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" status "$RELEASE" >/dev/null 2>&1; then
-    helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" uninstall "$RELEASE" --wait >/dev/null
+  if [ -n "$release" ]; then
+    out=$(h uninstall "$RELEASE" --wait 2>&1) || die "helm uninstall $RELEASE: $out"
     printf 'ok    release %s removed\n' "$RELEASE"
   else
     printf -- '--    no release %s in namespace %s\n' "$RELEASE" "$NAMESPACE"
   fi
+
   if [ -z "${PURGE:-}" ]; then
-    for s in "$KEY_SECRET" "$ENV_SECRET"; do
-      k get secret "$s" >/dev/null 2>&1 && printf 'kept  Secret %s\n' "$s"
-    done
-    printf '\nThe key is kept: reinstalling (without --join-token-file) needs no new join token.\n'
-    printf 'To remove the key and HMAC key too: %s -c %s -n %s --uninstall --purge\n' "$0" "$KUBE_CONTEXT" "$NAMESPACE"
+    [ -z "$env" ] || printf 'kept  Secret %s (the HMAC key)\n' "$ENV_SECRET"
+    if [ -n "$key" ]; then
+      printf 'kept  Secret %s (the proxy key)\n' "$KEY_SECRET"
+      printf '\nThe key is kept: reinstalling (without --join-token-file) needs no new join token.\n'
+      printf 'To remove the key and HMAC key too: %s -c %s -n %s --uninstall --purge\n' "$0" "$KUBE_CONTEXT" "$NAMESPACE"
+    else
+      printf 'warn  no Secret %s: there is no proxy key to keep, so a reinstall\n      makes a new key and needs a new join token from NeuBird\n' "$KEY_SECRET"
+    fi
     return 0
   fi
-  for s in "$KEY_SECRET" "$ENV_SECRET"; do
-    if k get secret "$s" >/dev/null 2>&1; then
-      k delete secret "$s" >/dev/null
-      printf 'ok    Secret %s deleted\n' "$s"
-    fi
+
+  for s in ${key:+"$KEY_SECRET"} ${env:+"$ENV_SECRET"}; do
+    out=$(k delete secret "$s" 2>&1) || die "can't delete Secret $s: $out"
+    printf 'ok    Secret %s deleted\n' "$s"
   done
-  printf '\nPurged. Ask NeuBird to revoke the key of %s/%s: %s\n' "$TENANT" "$PROXY_NAME" "${fp:-(no key was found)}"
+  if [ -n "$fp" ]; then
+    printf '\nPurged. Ask NeuBird to revoke the key of %s/%s: %s\n' "$TENANT" "$PROXY_NAME" "$fp"
+  else
+    printf '\nPurged. There was no Secret %s, so the key'"'"'s fingerprint is unknown: ask\nNeuBird to revoke whatever key is enrolled for %s/%s.\n' "$KEY_SECRET" "$TENANT" "$PROXY_NAME"
+  fi
   printf 'A reinstall needs a new join token. The namespace %s is left in place.\n' "$NAMESPACE"
 }
 if [ -n "${UNINSTALL:-}" ]; then uninstall; exit; fi
