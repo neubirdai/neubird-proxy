@@ -28,11 +28,13 @@ tunnel:
 env:
   existingSecret: neubird-proxy-env   # NEUBIRD_JOIN_TOKEN until enrolled (and REDACTION_HMAC_KEY for mask: hmac)
 
-# Responses are buffered up to max_body_bytes, sized from this limit: 640Mi
-# fits 20 MiB with mask: label (512Mi stops at about 19 MiB, 15 MiB with hmac).
+# Responses are buffered up to max_body_bytes, sized from this limit (the
+# proxy refuses larger ones as body_too_large): 768Mi fits 20 MiB with either
+# mask, about 22 MiB with hmac and 28 MiB with label (640Mi stops at about
+# 18 MiB with hmac).
 resources:
   requests: {cpu: 100m, memory: 128Mi}
-  limits: {memory: 640Mi}
+  limits: {memory: 768Mi}
 
 # Optional: an outbound HTTP proxy for the relay tunnel and ServiceNow. A
 # forwarding proxy; one that inspects TLS breaks the tunnel. NO_PROXY keeps
