@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install neubird-proxy at MetLife from a few parameters: builds the Helm
-# values from values.yaml (next to this script), then runs
-# deploy/scripts/install-tunnel.sh, which creates the Secret, installs the
-# chart, waits for enrollment and the tunnels, tests each system and removes
-# the spent join token.
+# Install neubird-proxy at MetLife from a few parameters and confirm it: builds
+# the Helm values from values.yaml (next to this script), runs
+# deploy/scripts/install-tunnel.sh (Secret, chart, enrollment, tunnels, tests,
+# removing the spent join token), then re-checks the running proxy and prints
+# its key fingerprint for NeuBird.
 #
 #   KUBE_CONTEXT=<ctx> NAMESPACE=neubird \
 #   HOSTS='splunk.metlife.com:8089,metlife.service-now.com' \
@@ -32,6 +32,7 @@
 #   IMAGE_REPO           your registry's copy of the image (same digest)
 #   MASK                 label or hmac (default: label)
 #   DRY_RUN=1            write the values and render them; install nothing
+#   CONFIRM_ONLY=1       only re-run the confirmation on an existing install
 #
 # The token is read from its file and never printed or put on a command line.
 set -euo pipefail
@@ -48,10 +49,50 @@ PROXY_NAME=$TENANT
 HOSTS=${HOSTS:-*}
 here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 RELAY_CA=${RELAY_CA:-relay-ca.crt}
-[ -f "$RELAY_CA" ] || { echo "FAIL  $RELAY_CA: no such file (NeuBird's relay CA certificate)" >&2; exit 1; }
+[ -n "${CONFIRM_ONLY:-}" ] || [ -f "$RELAY_CA" ] || { echo "FAIL  $RELAY_CA: no such file (NeuBird's relay CA certificate)" >&2; exit 1; }
 if [ -n "${EGRESS_PROXY:-}" ] && [ -n "${ALLOW_CIDRS:-}" ] && [ -z "${EGRESS_PROXY_CIDR:-}" ]; then
   echo "FAIL  with ALLOW_CIDRS (NetworkPolicy on) and EGRESS_PROXY, set EGRESS_PROXY_CIDR too" >&2; exit 1
 fi
+
+# confirm: re-check the installed proxy from what's actually running (its
+# config, pods, tunnel and Secret) and print what to send NeuBird.
+confirm() {
+  k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
+  local dep cfg relay ident want ready out fp tested r fails=0
+  dep=$(k get deploy -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  [ -n "$dep" ] || { echo "FAIL  no neubird-proxy Deployment in namespace $NAMESPACE" >&2; return 1; }
+  cfg=$(k get configmap -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{range .items[*]}{.data.config\.yaml}{end}')
+  read -r relay ident tested < <(python3 -c '
+import sys,yaml
+c=yaml.safe_load(sys.stdin); t=c["tunnel"]; h=(c.get("neubird_destinations") or {}).get("hosts") or []
+print(",".join(t["relays"]), t["tenant"]+"/"+t["proxy"], ",".join(x for x in h if "*" not in x) or "-")' <<<"$cfg")
+  check() { if [ "$1" = ok ]; then printf '  ok    %s\n' "$2"; else printf '  FAIL  %s\n' "$2"; fails=$((fails + 1)); fi; }
+  printf '\n== confirm (namespace %s)\n' "$NAMESPACE"
+  want=$(k get "deploy/$dep" -o jsonpath='{.spec.replicas}'); ready=$(k get "deploy/$dep" -o jsonpath='{.status.readyReplicas}')
+  [ "${ready:-0}" -ge 1 ] && [ "${ready:-0}" = "$want" ] && r=ok || r=fail
+  check "$r" "pods ready: ${ready:-0}/$want (a pod is ready only with a tunnel up)"
+  out=$(k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml 2>&1 | grep -v 'Unknown stream id' || true)
+  grep -qE '^[[:space:]]*ok[[:space:]]+relay' <<<"$out" && r=ok || r=fail
+  check "$r" "tunnel to $relay: mutual TLS accepted by the relay"
+  fp=$(grep -oE 'key sha256:[0-9a-f]{64}' <<<"$out" | head -1 | cut -d' ' -f2)
+  [ -n "$fp" ] && r=ok || r=fail
+  check "$r" "identity $ident, key ${fp:-unknown}"
+  if [ "$tested" != "-" ]; then
+    # shellcheck disable=SC2046
+    if k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml $(tr ',' '\n' <<<"$tested" | sed 's#^#https://#') >/dev/null 2>&1; then r=ok; else r=fail; fi
+    check "$r" "systems reachable (DNS, TCP, TLS): $tested"
+  else
+    printf '  --    systems: only wildcard hosts, nothing to test; check one with\n        kubectl -n %s exec deploy/%s -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml https://<host>\n' "$NAMESPACE" "$dep"
+  fi
+  [ -z "$(k get secret neubird-proxy-env -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}' 2>/dev/null)" ] && r=ok || r=fail
+  check "$r" "join token removed from the Secret"
+  if [ "$fails" -gt 0 ]; then
+    printf '\n%d check(s) failed: kubectl -n %s logs -l app.kubernetes.io/instance=neubird-proxy --tail=50 --prefix\n' "$fails" "$NAMESPACE"
+    return 1
+  fi
+  printf '\nConfirmed. Send NeuBird the key fingerprint above (it is not secret) so they can check it\nmatches the key their relay enrolled; then they set up the connections.\n'
+}
+if [ -n "${CONFIRM_ONLY:-}" ]; then confirm; exit; fi
 
 values=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-values.XXXXXX")
 trap 'rm -f "$values"' EXIT
@@ -132,3 +173,4 @@ fi
 
 KUBE_CONTEXT=$KUBE_CONTEXT VALUES=$values RELAY_CA=$RELAY_CA \
   "$here/../scripts/install-tunnel.sh"
+confirm

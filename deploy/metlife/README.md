@@ -32,7 +32,18 @@ Requires kubectl, helm 3 and python3 with PyYAML, from a checkout with `relay-ca
 KUBE_CONTEXT=<ctx> NAMESPACE=neubird JOIN_TOKEN_FILE=join.token deploy/metlife/install.sh
 ```
 
-The script builds the values, creates the namespace and Secret, installs the chart, waits until the key is enrolled and the tunnels are up, tests the tunnel and each listed system, and removes the spent join token from the Secret. It prints nothing secret. `DRY_RUN=1` writes `./neubird-proxy-values.yaml` and renders it without installing.
+The script builds the values, creates the namespace and Secret, installs the chart, waits until the key is enrolled and the tunnels are up, tests the tunnel and each listed system, and removes the spent join token from the Secret. It then confirms the running proxy and ends with a summary:
+
+```
+== confirm (namespace neubird)
+  ok    pods ready: 2/2 (a pod is ready only with a tunnel up)
+  ok    tunnel to metlife-tunnel.neubird.ai:443: mutual TLS accepted by the relay
+  ok    identity metlife/metlife, key sha256:…
+  ok    systems reachable (DNS, TCP, TLS): splunk.metlife.com:8089
+  ok    join token removed from the Secret
+```
+
+Send NeuBird the key fingerprint from that summary (it isn't secret): NeuBird checks it matches the key its relay enrolled. The script prints nothing secret. `DRY_RUN=1` writes `./neubird-proxy-values.yaml` and renders it without installing; `CONFIRM_ONLY=1` (with `KUBE_CONTEXT` and `NAMESPACE`) re-runs only the confirmation on an existing install.
 
 | Parameter | Required | What |
 |---|---|---|
@@ -57,7 +68,7 @@ EGRESS_PROXY=http://proxy.metlife.com:3128 NO_PROXY=splunk.metlife.com \
 deploy/metlife/install.sh
 ```
 
-It passes when it prints `Done`. If enrollment fails, the proxy logs `enrollment: relay refused: …` (e.g. `join token expired` or `already used`) and stays not ready; ask NeuBird for a new token. A reinstall with a new key (the chart's key Secret deleted) needs a new token too. A `risky configuration` warning for `client_auth: none` (and for `*` hosts) is expected.
+It passes when every confirmation line is `ok`; it exits non-zero otherwise. If enrollment fails, the proxy logs `enrollment: relay refused: …` (e.g. `join token expired` or `already used`) and stays not ready; ask NeuBird for a new token. A reinstall with a new key (the chart's key Secret deleted) needs a new token too. A `risky configuration` warning for `client_auth: none` (and for `*` hosts) is expected.
 
 **Changing the install later** (another system, an egress proxy): rerun `install.sh` with the full set of parameters, without `JOIN_TOKEN_FILE`. The key is kept, so no new token is needed; the pods restart and reconnect. Parameters left out are removed: for example, a `HOSTS` list without Splunk cuts Splunk off.
 
