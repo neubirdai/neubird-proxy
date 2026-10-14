@@ -140,9 +140,3 @@ In MetLife's NeuBird, add each system as a connection and choose access through 
 The credentials are held by NeuBird, in the connections, and sent with each request; the proxy forwards each only to a host matching `HOSTS`.
 
 **Writes through MCP.** A tool call can carry any SPL. The proxy's `request_deny_patterns` block SPL that writes, sends data or reaches other systems (including `| rest`), and nothing in front of Splunk does. Give the Splunk token a read-only role, and extend the patterns if your Splunk has other write commands.
-
-## Cutting NeuBird off
-
-Either, at any time:
-- scale the proxy to 0 (`kubectl -n neubird scale deploy/neubird-proxy --replicas=0`): the tunnels close and nothing reaches MetLife;
-- ask NeuBird to revoke the proxy's key at the relay.
