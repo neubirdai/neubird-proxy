@@ -243,8 +243,10 @@ uninstall() {
     # from the Secret through a pipe, never to disk. Without the right
     # fingerprint the key can't be revoked, so a failure stops here, before
     # anything is deleted.
-    b64=$(k get secret "$KEY_SECRET" -o jsonpath='{.data.tunnel\.key}' 2>&1) \
-      || die "can't read Secret $KEY_SECRET: $b64; nothing changed"
+    # stderr is left out of $b64 (a warning from kubectl or an auth plugin
+    # would corrupt the base64); it goes to the terminal instead.
+    b64=$(k get secret "$KEY_SECRET" -o jsonpath='{.data.tunnel\.key}') \
+      || die "can't read Secret $KEY_SECRET (kubectl's error above); nothing changed"
     [ -n "$b64" ] || die "Secret $KEY_SECRET has no tunnel.key; nothing changed"
     fp=$(printf '%s' "$b64" | base64 -d | openssl pkey -pubout -outform DER | openssl dgst -sha256 -r) \
       || die "can't work out the key's fingerprint from Secret $KEY_SECRET; nothing changed"
@@ -267,6 +269,9 @@ uninstall() {
   fi
 
   printf '\n== uninstall (namespace %s)\n' "$NAMESPACE"
+  # Shown before anything is deleted, so a failure part way (or --yes, which
+  # skips the prompt) never loses it: once the key Secret is gone, so is the key.
+  [ -z "$fp" ] || printf 'key   %s/%s %s (for NeuBird to revoke)\n' "$TENANT" "$PROXY_NAME" "$fp"
   if [ -n "$release" ]; then
     out=$(h uninstall "$RELEASE" --wait 2>&1) || die "helm uninstall $RELEASE: $out"
     printf 'ok    release %s removed\n' "$RELEASE"
@@ -286,7 +291,8 @@ uninstall() {
     return 0
   fi
 
-  for s in ${key:+"$KEY_SECRET"} ${env:+"$ENV_SECRET"}; do
+  # The key Secret last: if a delete fails, the key is still there to retry with.
+  for s in ${env:+"$ENV_SECRET"} ${key:+"$KEY_SECRET"}; do
     out=$(k delete secret "$s" 2>&1) || die "can't delete Secret $s: $out"
     printf 'ok    Secret %s deleted\n' "$s"
   done
