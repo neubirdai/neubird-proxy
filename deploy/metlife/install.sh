@@ -15,19 +15,22 @@ chart=$here/../helm/neubird-proxy
 # A package from NeuBird presets the relay, tenant, CA and join token in
 # <tenant>.env next to deploy/; it's loaded below, so nothing is sourced by hand.
 die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
-# Only a file whose name is the tenant it presets counts, so a stray local.env
-# (say, in a checkout of the repo) is never loaded; two packages' files are an
-# error rather than a silent pick, and a skipped file is named.
+# A package's file is named for the tenant it presets. One that presets a
+# different tenant (renamed, say) stops the script rather than falling back to
+# the defaults below; one that presets none (a stray local.env in a checkout of
+# the repo) is named and ignored; two packages' files are an error.
 # A variable as the file sets it: sourced in a clean shell, so quoting works
 # as it does when the file is loaded.
 envvar() { env -i "$BASH" --noprofile --norc -c 'source "$1" >/dev/null 2>&1; printf "%s" "${!2:-}"' _ "$1" "$2"; }
 envfile=
 for f in "$pkg"/*.env; do
   [ -f "$f" ] || continue
-  if [ "$(envvar "$f" TENANT)" != "$(basename -- "$f" .env)" ]; then
-    printf 'warn  ignoring %s: it doesn'"'"'t preset TENANT=%s\n' "$f" "$(basename -- "$f" .env)" >&2
+  t=$(envvar "$f" TENANT)
+  if [ -z "$t" ]; then
+    printf 'warn  ignoring %s: it presets no TENANT\n' "$f" >&2
     continue
   fi
+  [ "$t" = "$(basename -- "$f" .env)" ] || die "$f presets TENANT=$t: a package's file is named for its tenant, so rename it $t.env"
   [ -z "$envfile" ] || die "two package files next to deploy/: $envfile and $f (keep one)"
   envfile=$f
 done
