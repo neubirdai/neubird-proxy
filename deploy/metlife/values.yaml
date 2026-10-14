@@ -1,6 +1,7 @@
 # neubird-proxy at MetLife: Helm values for the chart's tunnel mode. The proxy
 # dials out to NeuBird's relay; nothing connects in. No proxy token
-# (client_auth: none). Fill in only the hosts below. See README.md.
+# (client_auth: none). install.sh builds the values from this file; to install
+# by hand, review hosts below. See README.md.
 #
 #   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
 #     --set-file relayCA.cert=relay-ca.crt
@@ -12,9 +13,9 @@ replicaCount: 2
 
 mode: tunnel
 tunnel:
-  relays: ["metlifemirror-tunnel.cluster.neubird.ai:443"]
-  tenant: metlifemirror
-  proxy: dryrun                   # the name the join token is for
+  relays: ["metlife-tunnel.neubird.ai:443"]
+  tenant: metlife
+  proxy: metlife                  # named after the tenant; the join token is for it
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
 # Optional: MetLife's internal CA bundle, if Splunk's certificate comes from
@@ -46,9 +47,11 @@ config:
     # No proxy token: requests are accepted because they come down this
     # proxy's own tunnels.
     client_auth: none
-    hosts:                        # FILL IN: the only systems the proxy will call
-      - <splunk host>:8089        # its certificate must name this host
-      - <instance>.service-now.com
+    # The systems the proxy will call: "*" is any host name it can reach
+    # (never IP literals, loopback, link-local or metadata addresses), so limit
+    # egress at the network, or list them, e.g. splunk.metlife.com:8089 (its
+    # certificate must name that host) and <instance>.service-now.com.
+    hosts: ["*"]
     # Headers NeuBird's credentials travel in: Authorization (Splunk token,
     # ServiceNow OAuth/basic) and x-sn-apikey (ServiceNow API key).
     credential_headers: [Authorization, x-sn-apikey]
@@ -69,7 +72,7 @@ config:
 # Splunk range and, for ServiceNow, an egress proxy.
 networkPolicy:
   enabled: false
-  relayCIDRs: ["3.231.28.52/32", "32.196.200.125/32"]   # the relay's fixed IPs
+  relayCIDRs: ["52.206.84.184/32", "23.23.64.142/32"]   # the relay's IPs
   relayPorts: [443]
   upstreams: []
   #  - {cidr: <Splunk range>, ports: [8089]}
