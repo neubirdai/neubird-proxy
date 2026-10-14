@@ -55,9 +55,10 @@ helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
 
 Notes:
 - **`tunnel.proxy`** must be the name the join token is for. Use the image NeuBird names, by digest.
-- **Egress:** relay on 443, Splunk and ServiceNow. ServiceNow has no fixed IPs, so route it and the relay through your egress proxy (`extraEnv` `HTTPS_PROXY`, `NO_PROXY` covering Splunk; allow the proxy in `networkPolicy.upstreams`), or use an FQDN-aware egress policy.
+- **Egress:** relay on 443, Splunk and ServiceNow. ServiceNow has no fixed IPs, so route it and the relay through your egress proxy (`extraEnv` `HTTPS_PROXY`, `NO_PROXY` covering Splunk; allow the proxy in `networkPolicy.upstreams`), or use an FQDN-aware egress policy. The egress proxy URL must be `http://`, with Basic authentication at most (`http://user:password@host:3128`; not NTLM or Kerberos); with a password, put `HTTPS_PROXY` in the Secret rather than `extraEnv`.
 - **Splunk's certificate** must name the host in `hosts` (the default one on 8089 doesn't); its CA goes in `upstreamCA`.
-- **ServiceNow:** use a read-only API key (`x-sn-apikey`) or OAuth/basic auth. `host_methods` limits it to GET and HEAD.
+- **ServiceNow:** use a read-only API key (`x-sn-apikey`; needs an API Key authentication profile and REST API access policy) or basic auth. `host_methods` limits it to GET and HEAD, so not OAuth: its token refresh is a POST to the instance.
+- **Splunk:** the MCP URL needs Splunk's MCP Server app; without it, add Splunk as a Splunk (REST) connection.
 - **Memory:** keep 640 Mi for the 20 MiB `max_body_bytes`.
 
 For an install NeuBird runs (or a test setup), `deploy/scripts/install-tunnel.sh` from NeuBird's repository does steps 1–3 in one go: it adds the join token to the Secret, installs, waits for enrollment and the tunnels, tests each system, and removes the spent token:
@@ -79,6 +80,25 @@ kubectl -n neubird exec deploy/neubird-proxy -- /neubird-proxy test -config /etc
 ```
 
 The pods turn ready only once a tunnel is up. The `starting` line should show `"tunnel":true`. A `risky configuration` warning for `client_auth: none` is expected. Once the proxy has enrolled, delete `NEUBIRD_JOIN_TOKEN` from the Secret (`kubectl -n neubird patch secret neubird-proxy-env --type=json -p '[{"op":"remove","path":"/data/NEUBIRD_JOIN_TOKEN"}]'`); it can't be used again anyway.
+
+### 4. If it doesn't work
+
+| What you see | Usually | Fix |
+|---|---|---|
+| `ImagePullBackOff` / `CreateContainerConfigError` | Image not in your registry / Secret missing | Import the image (`imagePullSecrets`) / create the Secret |
+| `tunnel connect failed … no such host`, `i/o timeout` | DNS or port 443 to the relay IPs blocked | Firewall, `networkPolicy.relayCIDRs`, or the egress proxy |
+| `outbound proxy … refused CONNECT: 407` / `only http:// proxies` | Egress proxy login / URL scheme | Basic credentials in `HTTPS_PROXY` (in the Secret); an `http://` URL |
+| `tls: … certificate signed by unknown authority` | TLS inspection on the relay host, or the wrong `relay-ca.crt` | No inspection for `metlife-tunnel.neubird.ai`; check `relayCA.cert` |
+| `enrollment: relay refused: …` | Token expired or used, or `tunnel.proxy` not the token's name | New token from NeuBird; fix `tunnel.proxy` |
+| `relay refused the tunnel (… unrecorded …)` | No join token in the Secret, or a new key | Add `NEUBIRD_JOIN_TOKEN` and restart |
+| `test`: `FAIL dns` / `FAIL tcp` | The pod can't reach the system | `networkPolicy.upstreams`, `NO_PROXY`, the egress proxy's allowlist |
+| `test`: `FAIL tls` | Splunk's certificate: not your CA in `upstreamCA`, or wrong name | `upstreamCA`; a certificate for the host in `hosts` |
+| NeuBird: `destination_not_allowed` (403) | The connection's host isn't in `hosts` | Add it |
+| NeuBird: 401/403 from Splunk or ServiceNow | The credential or its role | Fix it in the connection |
+| NeuBird: 405 from ServiceNow | A write, or OAuth | Expected for writes; use an API key or basic auth |
+| NeuBird: 404 on `/services/mcp` | No MCP Server app | A Splunk (REST) connection |
+
+Log lines `GET`/`DELETE … /services/mcp 405` are MCP's stream and session calls: expected.
 
 ## Locking down the network
 
