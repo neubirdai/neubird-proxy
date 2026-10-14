@@ -42,23 +42,45 @@ kubectl -n neubird create secret generic neubird-proxy-env \
 unset JOIN
 ```
 
-Add `REDACTION_HMAC_KEY` (32+ characters) if the values use `mask: hmac`.
+**Optional, HMAC masking.** The proxy masks sensitive values in responses. With `mask: label` (the default) each becomes a label such as `[EMAIL]`. With `mask: hmac` each becomes a keyed code, so the same value always masks the same way and NeuBird can correlate it without seeing it. For `hmac`, add a key to the Secret and set `mask: hmac` in the values:
+
+```sh
+kubectl -n neubird patch secret neubird-proxy-env --type=merge \
+  -p "{\"stringData\":{\"REDACTION_HMAC_KEY\":\"$(openssl rand -hex 32)\"}}"
+```
+
+The key must be at least 32 characters. Keep it in MetLife's secret store and never send it to NeuBird: anyone with the key can test guesses against masked values. Unlike the join token, leave it in place; changing it changes every code.
 
 ### 2. Values
 
-Fill in [`values.yaml`](values.yaml), then:
+Copy [`values.yaml`](values.yaml) and replace each placeholder:
+
+| Value | Replace with |
+|---|---|
+| `image.repository`, `image.digest` | Your registry's copy of the image NeuBird ships, by digest |
+| `tunnel.proxy` | The proxy name the join token is for, e.g. `aks-prod` |
+| `upstreamCA.cert` | Your internal CA bundle, if Splunk's certificate comes from it; otherwise delete the block |
+| `extraEnv` | Your egress proxy in `HTTPS_PROXY`, and the Splunk host in `NO_PROXY`. Without an egress proxy, set `extraEnv: []` |
+| `config.neubird_destinations.hosts` | Your Splunk host and port, and your ServiceNow instance |
+| `networkPolicy.relayCIDRs` | The relay IPs NeuBird sends, each as `/32` |
+| `networkPolicy.upstreams` | Your Splunk range on 8089, and the egress proxy on 3128 |
+
+Leave the rest as is: `tunnel.relays` and `tunnel.tenant` are already set for MetLife. Change `redaction.mask` to `hmac` only if you added the key in step 1.
+
+Then install:
 
 ```sh
 helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
   --set-file relayCA.cert=relay-ca.crt
 ```
 
+The join token isn't passed here: the chart reads it from the Secret in step 1.
+
 Notes:
-- **`tunnel.proxy`** must be the name the join token is for. Use the image NeuBird names, by digest.
-- **Egress:** relay on 443, Splunk and ServiceNow. ServiceNow has no fixed IPs, so route it and the relay through your egress proxy (`extraEnv` `HTTPS_PROXY`, `NO_PROXY` covering Splunk; allow the proxy in `networkPolicy.upstreams`), or use an FQDN-aware egress policy.
-- **Splunk's certificate** must name the host in `hosts` (the default one on 8089 doesn't); its CA goes in `upstreamCA`.
+- **Egress:** ServiceNow has no fixed IPs, so a NetworkPolicy can't allow it by CIDR. Route it and the relay through your egress proxy, or use an FQDN-aware egress policy. The egress proxy must not inspect TLS to the relay.
+- **Splunk's certificate** must name the host in `hosts`. Splunk's default certificate on 8089 names none and fails verification.
 - **ServiceNow:** use a read-only API key (`x-sn-apikey`) or OAuth/basic auth. `host_methods` limits it to GET and HEAD.
-- **Memory:** keep 640 Mi for the 20 MiB `max_body_bytes`.
+- **Memory:** keep the 640 Mi limit for the 20 MiB `max_body_bytes`.
 
 For an install NeuBird runs (or a test setup), `deploy/scripts/install-tunnel.sh` from NeuBird's repository does steps 1–3 in one go: it adds the join token to the Secret, installs, waits for enrollment and the tunnels, tests each system, and removes the spent token:
 
