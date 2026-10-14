@@ -63,6 +63,11 @@ Modes:
       --dry-run                  build and render the values, write them to
                                  ./neubird-proxy-values.yaml; install nothing
       --confirm-only             only re-check an existing install
+      --uninstall                remove the proxy; its key and HMAC key are kept,
+                                 so reinstalling needs no new join token
+      --purge                    with --uninstall: also delete the key and HMAC
+                                 key and print the key's fingerprint for NeuBird
+                                 to revoke (asks first; --yes skips the question)
   -h, --help                     show this help
       --version                  show the chart version and this package's relay
 
@@ -73,6 +78,7 @@ Examples:
   $0 -c prod-aks -n neubird --join-token-file join.token
   $0 -c prod-aks -n neubird --hosts splunk.metlife.com:8089,metlife.service-now.com
   $0 -c prod-aks -n neubird --dry-run
+  $0 -c prod-aks -n neubird --uninstall
 
 Requires kubectl, helm 3 or later and python3 with PyYAML.
 EOF
@@ -94,7 +100,7 @@ version() {
 # (--kube-context is KUBE_CONTEXT). Collected first and applied after the
 # package's .env, so they override its presets.
 takes_value=" KUBE_CONTEXT NAMESPACE HOSTS EGRESS_PROXY EGRESS_NO_PROXY ALLOW_CIDRS EGRESS_PROXY_CIDR UPSTREAM_CA IMAGE_REPO MASK TIMEOUT JOIN_TOKEN_FILE RELAY_CA "
-switches=" DRY_RUN CONFIRM_ONLY "
+switches=" DRY_RUN CONFIRM_ONLY UNINSTALL PURGE YES "
 opts=()
 from_env=
 [ -z "${KUBE_CONTEXT:-}" ] || from_env+=" KUBE_CONTEXT"
@@ -136,6 +142,17 @@ apply
 [ -n "${KUBE_CONTEXT:-}" ] || bad "--kube-context is required"
 [ -n "${NAMESPACE:-}" ] || bad "--namespace is required"
 [ -z "${DRY_RUN:-}" ] || [ -z "${CONFIRM_ONLY:-}" ] || bad "--dry-run and --confirm-only don't go together"
+[ -z "${PURGE:-}" ] || [ -n "${UNINSTALL:-}" ] || bad "--purge goes with --uninstall"
+[ -z "${YES:-}" ] || [ -n "${PURGE:-}" ] || bad "--yes goes with --uninstall --purge"
+if [ -n "${UNINSTALL:-}" ]; then
+  [ -z "${DRY_RUN:-}${CONFIRM_ONLY:-}" ] || bad "--uninstall doesn't go with --dry-run or --confirm-only"
+  for kv in ${opts[@]+"${opts[@]}"}; do
+    case ${kv%%=*} in
+      KUBE_CONTEXT|NAMESPACE|UNINSTALL|PURGE|YES) ;;
+      *) bad "--$(printf '%s' "${kv%%=*}" | tr 'A-Z_' 'a-z-') doesn't apply to --uninstall" ;;
+    esac
+  done
+fi
 case ${MASK:-label} in label|hmac) ;; *) bad "--mask must be label or hmac" ;; esac
 case ${TIMEOUT:-300} in ''|*[!0-9]*) bad "--timeout must be a number of seconds" ;; esac
 export KUBE_CONTEXT NAMESPACE
@@ -161,12 +178,15 @@ if [ -n "$envfile" ]; then
 fi
 
 # What it needs, checked before anything is changed.
-if [ -z "${CONFIRM_ONLY:-}" ]; then
+if [ -z "${CONFIRM_ONLY:-}${UNINSTALL:-}" ]; then
   [ -z "${UPSTREAM_CA:-}" ] || [ -f "$UPSTREAM_CA" ] || die "--upstream-ca $UPSTREAM_CA: no such file"
   [ -z "${JOIN_TOKEN_FILE:-}" ] || [ -f "$JOIN_TOKEN_FILE" ] || die "--join-token-file $JOIN_TOKEN_FILE: no such file"
 fi
-command -v python3 >/dev/null 2>&1 || die "python3 not found"
-python3 -c 'import yaml' 2>/dev/null || die "python3 can't import yaml: pip3 install PyYAML"
+if [ -z "${UNINSTALL:-}" ]; then
+  command -v python3 >/dev/null 2>&1 || die "python3 not found"
+  python3 -c 'import yaml' 2>/dev/null || die "python3 can't import yaml: pip3 install PyYAML"
+fi
+[ -z "${PURGE:-}" ] || command -v openssl >/dev/null 2>&1 || die "openssl not found (--purge needs it for the key's fingerprint)"
 command -v helm >/dev/null 2>&1 || die "helm not found: https://helm.sh/docs/intro/install/"
 helm_v=$(helm version --short 2>/dev/null || true)
 helm_major=${helm_v#v}; helm_major=${helm_major%%.*}
@@ -188,6 +208,59 @@ RELAY_IPS=${RELAY_IPS:-52.206.84.184,23.23.64.142}
 # The proxy is named after the tenant (<tenant>/<tenant>); NeuBird issues the
 # join token for that name.
 PROXY_NAME=$TENANT
+
+# --uninstall removes the Helm release. The chart keeps the key Secret (the
+# proxy's identity at the relay; helm.sh/resource-policy: keep) and Helm never
+# owned the env Secret (HMAC key, join token), so both stay unless --purge: a
+# reinstall then needs no new join token and keeps the masking codes.
+RELEASE=neubird-proxy
+KEY_SECRET=$RELEASE-tunnel-key
+ENV_SECRET=neubird-proxy-env
+uninstall() {
+  k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
+  local fp= s answer
+  if [ -n "${PURGE:-}" ]; then
+    # The fingerprint NeuBird revokes: sha256 of the public key (DER
+    # SubjectPublicKeyInfo), as the proxy prints it. The private key is
+    # piped from the Secret, never written to disk.
+    if k get secret "$KEY_SECRET" >/dev/null 2>&1; then
+      fp=$(k get secret "$KEY_SECRET" -o jsonpath='{.data.tunnel\.key}' | base64 -d \
+        | openssl pkey -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -r | cut -d' ' -f1) || true
+      [[ $fp =~ ^[0-9a-f]{64}$ ]] && fp=sha256:$fp || fp=
+    fi
+    if [ -z "${YES:-}" ]; then
+      [ -t 0 ] || die "--purge deletes the proxy's key: add --yes to confirm when not running interactively"
+      printf '\n--purge deletes, for good, from namespace %s:\n  the key of proxy %s/%s%s\n  the HMAC key\nA reinstall then needs a new join token from NeuBird.\nType the namespace to confirm: ' \
+        "$NAMESPACE" "$TENANT" "$PROXY_NAME" "${fp:+ ($fp)}"
+      read -r answer
+      [ "$answer" = "$NAMESPACE" ] || die "not confirmed; nothing changed"
+    fi
+  fi
+  printf '\n== uninstall (namespace %s)\n' "$NAMESPACE"
+  if helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" status "$RELEASE" >/dev/null 2>&1; then
+    helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" uninstall "$RELEASE" --wait >/dev/null
+    printf 'ok    release %s removed\n' "$RELEASE"
+  else
+    printf -- '--    no release %s in namespace %s\n' "$RELEASE" "$NAMESPACE"
+  fi
+  if [ -z "${PURGE:-}" ]; then
+    for s in "$KEY_SECRET" "$ENV_SECRET"; do
+      k get secret "$s" >/dev/null 2>&1 && printf 'kept  Secret %s\n' "$s"
+    done
+    printf '\nThe key is kept: reinstalling (without --join-token-file) needs no new join token.\n'
+    printf 'To remove the key and HMAC key too: %s -c %s -n %s --uninstall --purge\n' "$0" "$KUBE_CONTEXT" "$NAMESPACE"
+    return 0
+  fi
+  for s in "$KEY_SECRET" "$ENV_SECRET"; do
+    if k get secret "$s" >/dev/null 2>&1; then
+      k delete secret "$s" >/dev/null
+      printf 'ok    Secret %s deleted\n' "$s"
+    fi
+  done
+  printf '\nPurged. Ask NeuBird to revoke the key of %s/%s: %s\n' "$TENANT" "$PROXY_NAME" "${fp:-(no key was found)}"
+  printf 'A reinstall needs a new join token. The namespace %s is left in place.\n' "$NAMESPACE"
+}
+if [ -n "${UNINSTALL:-}" ]; then uninstall; exit; fi
 
 HOSTS=${HOSTS:-*}
 RELAY_CA=${RELAY_CA:-relay-ca.crt}
