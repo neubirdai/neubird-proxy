@@ -5,14 +5,13 @@
 # chart, waits for enrollment and the tunnels, tests each system and removes
 # the spent join token.
 #
-#   KUBE_CONTEXT=<ctx> NAMESPACE=neubird PROXY_NAME=aks-prod \
+#   KUBE_CONTEXT=<ctx> NAMESPACE=neubird \
 #   SPLUNK_HOST=splunk.metlife.com SERVICENOW_INSTANCE=metlife \
 #   JOIN_TOKEN_FILE=join.token deploy/metlife/install.sh
 #
 # MetLife sets:
 #   KUBE_CONTEXT         kubectl context of the AKS cluster (required)
 #   NAMESPACE            namespace to install in (required)
-#   PROXY_NAME           the name the join token is for (required)
 #   SPLUNK_HOST          Splunk's host[:port], port 8089 if omitted (required)
 #   JOIN_TOKEN_FILE      file holding NeuBird's join token (first install only)
 #   SERVICENOW_INSTANCE  <instance> of <instance>.service-now.com (optional)
@@ -35,8 +34,11 @@ set -euo pipefail
 TENANT=${TENANT:-metlife}
 RELAY=${RELAY:-metlife-tunnel.neubird.ai:443}
 RELAY_IPS=${RELAY_IPS:-52.206.84.184,23.23.64.142}
+# The proxy is named after the tenant (<tenant>/<tenant>); NeuBird issues the
+# join token for that name.
+PROXY_NAME=$TENANT
 
-: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}" "${PROXY_NAME:?set PROXY_NAME}" "${SPLUNK_HOST:?set SPLUNK_HOST}"
+: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}" "${SPLUNK_HOST:?set SPLUNK_HOST}"
 here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 RELAY_CA=${RELAY_CA:-relay-ca.crt}
 [ -f "$RELAY_CA" ] || { echo "FAIL  $RELAY_CA: no such file (NeuBird's relay CA certificate)" >&2; exit 1; }
