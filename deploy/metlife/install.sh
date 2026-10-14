@@ -63,20 +63,26 @@ confirm() {
   local dep cfg relay ident want ready out fp tested r fails=0
   dep=$(k get deploy -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
   [ -n "$dep" ] || { echo "FAIL  no neubird-proxy Deployment in namespace $NAMESPACE" >&2; return 1; }
-  cfg=$(k get configmap -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{range .items[*]}{.data.config\.yaml}{end}')
+  # Every lookup below may come back empty on a broken install: none may stop
+  # the script (set -e), so each failure is reported as a FAIL line instead.
+  cfg=$(k get configmap -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{range .items[*]}{.data.config\.yaml}{end}' 2>/dev/null || true)
   read -r relay ident tested < <(python3 -c '
 import sys,yaml
-c=yaml.safe_load(sys.stdin); t=c["tunnel"]; h=(c.get("neubird_destinations") or {}).get("hosts") or []
-print(",".join(t["relays"]), t["tenant"]+"/"+t["proxy"], ",".join(x for x in h if "*" not in x) or "-")' <<<"$cfg")
+try:
+    c=yaml.safe_load(sys.stdin) or {}; t=c["tunnel"]; h=(c.get("neubird_destinations") or {}).get("hosts") or []
+    print(",".join(t["relays"]), t["tenant"]+"/"+t["proxy"], ",".join(x for x in h if "*" not in x) or "-")
+except Exception:
+    print("unknown unknown -")' <<<"$cfg") || true
   check() { if [ "$1" = ok ]; then printf '  ok    %s\n' "$2"; else printf '  FAIL  %s\n' "$2"; fails=$((fails + 1)); fi; }
   printf '\n== confirm (namespace %s)\n' "$NAMESPACE"
-  want=$(k get "deploy/$dep" -o jsonpath='{.spec.replicas}'); ready=$(k get "deploy/$dep" -o jsonpath='{.status.readyReplicas}')
-  [ "${ready:-0}" -ge 1 ] && [ "${ready:-0}" = "$want" ] && r=ok || r=fail
+  want=$(k get "deploy/$dep" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+  ready=$(k get "deploy/$dep" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+  [ "${ready:-0}" -ge 1 ] 2>/dev/null && [ "${ready:-0}" = "$want" ] && r=ok || r=fail
   check "$r" "pods ready: ${ready:-0}/$want (a pod is ready only with a tunnel up)"
   out=$(k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml 2>&1 | grep -v 'Unknown stream id' || true)
   grep -qE '^[[:space:]]*ok[[:space:]]+relay' <<<"$out" && r=ok || r=fail
   check "$r" "tunnel to $relay: mutual TLS accepted by the relay"
-  fp=$(grep -oE 'key sha256:[0-9a-f]{64}' <<<"$out" | head -1 | cut -d' ' -f2)
+  fp=$(grep -oE 'key sha256:[0-9a-f]{64}' <<<"$out" | head -1 | cut -d' ' -f2 || true)
   [ -n "$fp" ] && r=ok || r=fail
   check "$r" "identity $ident, key ${fp:-unknown}"
   if [ "$tested" != "-" ]; then
@@ -86,7 +92,7 @@ print(",".join(t["relays"]), t["tenant"]+"/"+t["proxy"], ",".join(x for x in h i
   else
     printf '  --    systems: only wildcard hosts, nothing to test; check one with\n        kubectl -n %s exec deploy/%s -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml https://<host>\n' "$NAMESPACE" "$dep"
   fi
-  [ -z "$(k get secret neubird-proxy-env -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}' 2>/dev/null)" ] && r=ok || r=fail
+  [ -z "$(k get secret neubird-proxy-env -o jsonpath='{.data.NEUBIRD_JOIN_TOKEN}' 2>/dev/null || true)" ] && r=ok || r=fail
   check "$r" "join token removed from the Secret"
   if [ "$fails" -gt 0 ]; then
     printf '\n%d check(s) failed: kubectl -n %s logs -l app.kubernetes.io/instance=neubird-proxy --tail=50 --prefix\n' "$fails" "$NAMESPACE"
