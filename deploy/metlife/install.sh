@@ -12,10 +12,11 @@
 # MetLife sets:
 #   KUBE_CONTEXT         kubectl context of the AKS cluster (required)
 #   NAMESPACE            namespace to install in (required)
-#   HOSTS                the systems NeuBird may reach, comma-separated
-#                        (required): host[:port], *.domain[:port] (any name
-#                        under it) or an IP address. Port 443 if omitted.
-#                        *.service-now.com hosts are kept read-only (GET, HEAD)
+#   HOSTS                the systems NeuBird may reach, comma-separated:
+#                        host[:port], *.domain[:port] (any name under it) or
+#                        an IP address; port 443 if omitted. Default: '*'
+#                        (any host name the proxy can reach; never IP
+#                        literals). ServiceNow hosts stay read-only (GET, HEAD)
 #   JOIN_TOKEN_FILE      file holding NeuBird's join token (first install only)
 #   RELAY_CA             NeuBird's relay CA certificate (default: relay-ca.crt)
 #   UPSTREAM_CA          CA bundle for systems with internal-CA certificates
@@ -30,7 +31,6 @@
 #   EGRESS_PROXY_CIDR    the egress proxy's address, e.g. 10.1.2.3/32
 #   IMAGE_REPO           your registry's copy of the image (same digest)
 #   MASK                 label or hmac (default: label)
-#   ALLOW_ANY_HOST=1     allow HOSTS='*' (any host name the proxy can reach)
 #   DRY_RUN=1            write the values and render them; install nothing
 #
 # The token is read from its file and never printed or put on a command line.
@@ -44,7 +44,8 @@ RELAY_IPS=${RELAY_IPS:-52.206.84.184,23.23.64.142}
 # join token for that name.
 PROXY_NAME=$TENANT
 
-: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}" "${HOSTS:?set HOSTS}"
+: "${KUBE_CONTEXT:?set KUBE_CONTEXT}" "${NAMESPACE:?set NAMESPACE}"
+HOSTS=${HOSTS:-*}
 here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 RELAY_CA=${RELAY_CA:-relay-ca.crt}
 [ -f "$RELAY_CA" ] || { echo "FAIL  $RELAY_CA: no such file (NeuBird's relay CA certificate)" >&2; exit 1; }
@@ -58,7 +59,6 @@ TENANT=$TENANT RELAY=$RELAY RELAY_IPS=$RELAY_IPS HOSTS=$HOSTS \
 EGRESS_PROXY=${EGRESS_PROXY:-} NO_PROXY_HOSTS=${NO_PROXY:-} \
 EGRESS_PROXY_CIDR=${EGRESS_PROXY_CIDR:-} IMAGE_REPO=${IMAGE_REPO:-} \
 PROXY_NAME=$PROXY_NAME MASK=${MASK:-label} ALLOW_CIDRS=${ALLOW_CIDRS:-} \
-ALLOW_ANY_HOST=${ALLOW_ANY_HOST:-} \
 python3 - "$here/values.yaml" "$values" <<'PY'
 import os, sys, yaml
 src, out = sys.argv[1], sys.argv[2]
@@ -72,12 +72,10 @@ d = v["config"]["neubird_destinations"]
 hosts = [h.strip().lower() for h in e["HOSTS"].split(",") if h.strip()]
 if not hosts:
     fail("HOSTS is empty")
-if "*" in [h.split(":")[0] for h in hosts] and e["ALLOW_ANY_HOST"] != "1":
-    fail("HOSTS='*' lets NeuBird reach any host name the proxy can resolve; set ALLOW_ANY_HOST=1 to allow it")
 d["hosts"] = hosts
-# ServiceNow read-only: keep values.yaml's host_methods rule only if a
-# ServiceNow host is listed.
-if not any(h.split(":")[0].endswith("service-now.com") for h in hosts):
+# ServiceNow read-only: keep values.yaml's host_methods rule if a ServiceNow
+# host (or '*', which includes them) is listed.
+if not any(h.split(":")[0] == "*" or h.split(":")[0].endswith("service-now.com") for h in hosts):
     d.pop("host_methods", None)
 if e["MASK"] not in ("label", "hmac"):
     fail("MASK must be label or hmac")

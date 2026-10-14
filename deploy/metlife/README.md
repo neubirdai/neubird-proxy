@@ -33,7 +33,7 @@ If enrollment fails, the proxy logs `enrollment: relay refused: …` (e.g. `join
 
 Use the Helm chart (`deploy/helm/neubird-proxy`) with `mode: tunnel`.
 
-**Quick install:** [`install.sh`](install.sh) does steps 1 to 3 from a few parameters (the hosts NeuBird may reach, egress proxy, join token file); see the top of the script. `DRY_RUN=1` writes the values without installing:
+**Quick install:** [`install.sh`](install.sh) does steps 1 to 3 from a few parameters (egress proxy, join token file, and optionally `HOSTS`, the systems NeuBird may reach: any host name by default, so restrict egress at the network or list them); see the top of the script. `DRY_RUN=1` writes the values without installing:
 
 ```sh
 KUBE_CONTEXT=<ctx> NAMESPACE=neubird \
