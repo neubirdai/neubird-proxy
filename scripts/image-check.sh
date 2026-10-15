@@ -31,7 +31,7 @@ for sh in /bin/sh /bin/bash /busybox/sh; do
   if docker run --rm --entrypoint "$sh" "$img" -c true >/dev/null 2>&1; then fail "$sh runs in the image"; fi
 done
 ok "no shell"
-docker run --rm "${pod[@]}" "$img" help | grep -q '^commands:' || fail "help"
+grep -q '^commands:' <<<"$(docker run --rm "${pod[@]}" "$img" help)" || fail "help"
 
 # keygen and fingerprint, writing only to a tmpfs as in the pod.
 out=$(docker run --rm "${pod[@]}" --tmpfs /tmp:uid=65532 "$img" keygen -tenant acme -proxy aks-prod -key-out /tmp/tunnel.key) \
@@ -71,7 +71,7 @@ token=nbjt_$(openssl rand 32 | openssl base64 -A | tr '+/' '-_' | tr -d '=')
 mounts=(-v "$W/config.yaml:/etc/neubird-proxy/config.yaml:ro" -v "$W/tunnel.key:/etc/neubird-proxy/tunnel/tunnel.key:ro"
   -v "$W/ca.crt:/etc/neubird-proxy/ca/relay-ca.crt:ro")
 
-docker run --rm "${pod[@]}" "${mounts[@]}" "$img" fingerprint /etc/neubird-proxy/tunnel/tunnel.key | grep -q 'sha256:' \
+grep -q 'sha256:' <<<"$(docker run --rm "${pod[@]}" "${mounts[@]}" "$img" fingerprint /etc/neubird-proxy/tunnel/tunnel.key)" \
   || fail "fingerprint of the chart's key"
 docker run --rm "${pod[@]}" "${mounts[@]}" -e NEUBIRD_JOIN_TOKEN="$token" "$img" \
   validate -config /etc/neubird-proxy/config.yaml > "$W/validate.txt" || { cat "$W/validate.txt"; fail "validate MetLife's rendered config"; }
