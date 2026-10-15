@@ -55,9 +55,6 @@ config:
     # certificate must name that host) and <instance>.service-now.com.
     hosts: ["*"]
     methods: [GET, HEAD, POST]    # POST for Splunk (MCP and searches)
-    # ServiceNow read-only: no POST, so no records can be created.
-    host_methods:
-      - {hosts: ["*.service-now.com"], methods: [GET, HEAD]}
     # SPL commands that write, send, delete or reach other systems
     # (rest calls Splunk's own REST API from inside a search).
     request_deny_patterns:

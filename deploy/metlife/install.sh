@@ -54,7 +54,6 @@ Options:
                                  host[:port], *.domain[:port] or an IP address;
                                  port 443 if omitted. Default: '*' (any host name
                                  the proxy can reach, never IP literals).
-                                 ServiceNow hosts stay read-only (GET, HEAD)
       --egress-proxy <url>       outbound HTTP proxy for the tunnel and internet
                                  systems, e.g. http://proxy.metlife.com:3128
                                  (no TLS inspection)
@@ -434,10 +433,6 @@ hosts = [h.strip().lower() for h in e["HOSTS"].split(",") if h.strip()]
 if not hosts:
     fail("HOSTS is empty")
 d["hosts"] = hosts
-# ServiceNow read-only: keep values.yaml's host_methods rule if a ServiceNow
-# host (or '*', which includes them) is listed.
-if not any(h.split(":")[0] == "*" or h.split(":")[0].endswith("service-now.com") for h in hosts):
-    d.pop("host_methods", None)
 if e["MASK"] not in ("label", "hmac"):
     fail("MASK must be label or hmac")
 v["config"]["redaction"]["mask"] = e["MASK"]
