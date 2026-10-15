@@ -13,7 +13,7 @@ replicaCount: 2
 
 mode: tunnel
 tunnel:
-  relays: ["metlife-tunnel.neubird.ai:443"]
+  relays: ["metlife-tunnel.cluster.neubird.ai:443"]
   tenant: metlife
   proxy: metlife                  # named after the tenant; the join token is for it
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
@@ -69,16 +69,8 @@ config:
   redaction:
     mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
 
-# Optional: lock egress down to DNS, the relay and the upstreams below (see
-# README, Locking down the network). Off by default because it needs your
-# Splunk range and, for ServiceNow, an egress proxy.
+# Optional: lock egress down to DNS, the relay and your systems (see README,
+# Locking down the network). install.sh --allow-cidrs turns it on and fills
+# in the relay's IPs and your ranges.
 networkPolicy:
   enabled: false
-  relayCIDRs: ["52.206.84.184/32", "23.23.64.142/32"]   # the relay's IPs
-  relayPorts: [443]
-  upstreams: []
-  #  - {cidr: <Splunk range>, ports: [8089]}
-  #  - {cidr: <egress proxy>/32, ports: [3128]}   # ServiceNow and the relay, via HTTPS_PROXY
-  # Prometheus may scrape :9090; empty blocks all inbound traffic.
-  metricsFrom: []
-  #  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}

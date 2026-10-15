@@ -244,7 +244,7 @@ fi
 
 # Set by NeuBird before sending this script.
 TENANT=${TENANT:-metlife}
-RELAY=${RELAY:-metlife-tunnel.neubird.ai:443}
+RELAY=${RELAY:-metlife-tunnel.cluster.neubird.ai:443}
 RELAY_IPS=${RELAY_IPS:-52.206.84.184,23.23.64.142}
 # The proxy is named after the tenant (<tenant>/<tenant>); NeuBird issues the
 # join token for that name.
