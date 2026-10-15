@@ -18,13 +18,6 @@ tunnel:
   proxy: metlife                  # named after the tenant; the join token is for it
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
-# Optional: MetLife's internal CA bundle, if Splunk's certificate comes from
-# it. It is added to the public CAs, so ServiceNow's certificate still verifies.
-# upstreamCA:
-#   cert: |
-#     -----BEGIN CERTIFICATE-----
-#     ...
-
 env:
   existingSecret: neubird-proxy-env   # REDACTION_HMAC_KEY, and NEUBIRD_JOIN_TOKEN until enrolled
 
