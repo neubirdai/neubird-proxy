@@ -109,6 +109,8 @@ RELAY_NS=${RELAY_NS:-$TENANT}
 RELAY=${RELAY:-$TENANT-tunnel.cluster.neubird.ai:443}
 [[ $RELAY == *:* ]] || RELAY=$RELAY:443
 host=${RELAY%:*} port=${RELAY##*:}
+[[ $host =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || bad "relay host $host isn't a host name"
+[[ $port =~ ^[0-9]{1,5}$ ]] || bad "relay port $port isn't a number"
 PROXY=$TENANT
 name=neubird-proxy-$TENANT
 pkgfile=$OUT/$name-with-token.tgz
@@ -142,6 +144,12 @@ if [ -z "$RELAY_IPS" ]; then
   RELAY_IPS=$(python3 -c 'import socket,sys; print(",".join(sorted({a[4][0] for a in socket.getaddrinfo(sys.argv[1], 443, socket.AF_INET, socket.SOCK_STREAM)})))' "$host" 2>/dev/null || true)
   [ -n "$RELAY_IPS" ] || die "$host doesn't resolve: give --relay-ips"
 fi
+# One comma-separated list of IPv4 addresses, without spaces: it goes in the
+# package's .env, which install.sh loads as shell.
+RELAY_IPS=$(tr -d ' \t' <<<"$RELAY_IPS")
+for ip in ${RELAY_IPS//,/ }; do
+  [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "relay IP $ip isn't an IPv4 address (--relay-ips takes a comma-separated list)"
+done
 ok "relay IPs $RELAY_IPS"
 
 step "package source ($REF)"
@@ -164,49 +172,6 @@ hash=$(sed -E 's/hash: ([^,]+),.*/\1/' <<<"$rec"); expires=$(sed -E 's/.*expires
 [ "$hash" = "sha256:$(tr -d '\n' < "$WORK/join.token" | openssl dgst -sha256 -r | cut -d' ' -f1)" ] || die "the recorded hash isn't the token's"
 ok "made; expires $expires; in $WORK/join.token (never printed)"
 
-step "record it on the relay"
-if [ -n "$NO_RECORD" ]; then
-  printf 'skip  --no-record. Add to %s'"'"'s records, under proxies:, before the customer installs:\n\n' "$TENANT"
-  printf '      - name: %s\n        expected_tunnels: 0\n        keys: []\n        join_tokens:\n          - {hash: %s, expires: %s}\n' "$PROXY" "$hash" "$expires"
-else
-  k get configmap neubird-relay-tenants -o yaml > "$WORK/tenants-cm.backup.$stamp.yaml"
-  k get configmap neubird-relay-tenants -o jsonpath='{.data.tenants\.yaml}' > "$WORK/tenants.yaml.orig"
-  cp "$WORK/tenants.yaml.orig" "$WORK/tenants.yaml"
-  python3 "$RELAY_REPO/scripts/onboard/tenants_edit.py" "$WORK/tenants.yaml" "$PROXY" add-proxy
-  python3 "$RELAY_REPO/scripts/onboard/tenants_edit.py" "$WORK/tenants.yaml" "$PROXY" add-join-token "$hash" "$expires"
-  out=$(relay tenants check -f "$WORK/tenants.yaml" -tenant "$TENANT" 2>&1) || die "the new records don't check: $out"
-  # The new proxy record must be under this tenant, with this token.
-  python3 - "$WORK/tenants.yaml" "$TENANT" "$PROXY" "$hash" <<'PY' || die "the edit didn't record the token under $TENANT/$PROXY"
-import sys, yaml
-f, tenant, proxy, h = sys.argv[1:]
-t = [t for t in yaml.safe_load(open(f))["tenants"] if t["name"] == tenant]
-p = [p for p in (t[0].get("proxies") or []) if p["name"] == proxy] if t else []
-sys.exit(0 if p and any(j["hash"].lower() == h for j in p[0].get("join_tokens") or []) else 1)
-PY
-  printf 'The change to %s'"'"'s records (namespace %s, %s):\n' "$TENANT" "$RELAY_NS" "$RELAY_CONTEXT"
-  diff "$WORK/tenants.yaml.orig" "$WORK/tenants.yaml" | sed 's/^/      /' || true
-  if [ -z "$YES" ]; then
-    [ -t 0 ] || die "not recording without a terminal: add --yes, or --no-record"
-    printf 'Record it on the live relay? Type the tenant to confirm: '
-    read -r answer || answer=
-    [ "$answer" = "$TENANT" ] || die "not confirmed: the relay is unchanged; the token in $WORK/join.token isn't recorded"
-  fi
-  # Nobody else changed the records since they were read.
-  diff -q <(k get configmap neubird-relay-tenants -o jsonpath='{.data.tenants\.yaml}') "$WORK/tenants.yaml.orig" >/dev/null \
-    || die "the relay's records changed while this ran: run it again"
-  python3 -c 'import json,sys; json.dump({"data":{"tenants.yaml":open(sys.argv[1]).read()}}, open(sys.argv[2],"w"))' "$WORK/tenants.yaml" "$WORK/patch.json"
-  k patch configmap neubird-relay-tenants --type merge --patch-file "$WORK/patch.json" >/dev/null
-  diff -q <(k get configmap neubird-relay-tenants -o jsonpath='{.data.tenants\.yaml}') "$WORK/tenants.yaml" >/dev/null \
-    || die "the relay's records don't read back as written"
-  ok "recorded (the relay loads it within about a minute); backup $WORK/tenants-cm.backup.$stamp.yaml"
-  # Keep the relay's directory in git in step with the live records, so
-  # applying it (setup-relay.sh) doesn't drop this token.
-  if [ -f "$cust/tenants.yaml" ]; then
-    cp "$WORK/tenants.yaml" "$cust/tenants.yaml"
-    ok "updated ${cust#"$RELAY_REPO"/}/tenants.yaml in $RELAY_REPO: commit it"
-  fi
-fi
-
 step "build the package"
 umask 022   # the package's files readable as usual; join.token stays 600
 B=$(mktemp -d); trap 'rm -rf "$B"' EXIT
@@ -221,9 +186,9 @@ cat > "$P/$TENANT.env" <<EOF
 # Loaded by deploy/metlife/install.sh; you don't need to source it.
 
 # Preset by NeuBird for the $TENANT relay: don't change.
-export TENANT=$TENANT
-export RELAY=$RELAY
-export RELAY_IPS=$RELAY_IPS
+export TENANT='$TENANT'
+export RELAY='$RELAY'
+export RELAY_IPS='$RELAY_IPS'
 export RELAY_CA=relay-ca.crt
 # The proxy is $TENANT/$PROXY (named after the tenant); the join token is for it.
 
@@ -294,20 +259,73 @@ prints its key fingerprint.
 
 Requires kubectl, helm 3 or later and python3 with PyYAML.
 EOF
-# No macOS metadata files (._*) in the package.
-tarflags=(); tar --version 2>/dev/null | grep -q bsdtar && tarflags=(--no-mac-metadata)
-(cd "$B" && COPYFILE_DISABLE=1 tar ${tarflags[@]+"${tarflags[@]}"} -czf "$pkgfile" "$name")
-chmod 600 "$pkgfile"
-ok "$pkgfile ($(tar -tzf "$pkgfile" | wc -l | tr -d ' ') entries, from $sha)"
+ok "assembled from $sha"
 
+# Checked before the token is recorded: a package that doesn't work leaves
+# the relay unchanged.
 step "check the package"
 T=$B/check; mkdir -p "$T"
-tar -xzf "$pkgfile" -C "$T"
+cp -Rp "$P" "$T/"
 out=$(cd "$T" && env -u KUBE_CONTEXT -u NAMESPACE -u MASK -u TENANT -u RELAY -u RELAY_IPS -u RELAY_CA -u JOIN_TOKEN_FILE \
   "$T/$name/deploy/metlife/install.sh" -c check -n check --dry-run 2>&1) || die "the package's dry run failed: $out"
 grep -q "values for tenant $TENANT, proxy $PROXY, relay $RELAY" <<<"$out" || die "the package's dry run didn't pick up its presets: $out"
 grep -q "mask: $MASK" <<<"$out" || die "the package's dry run has the wrong mask: $out"
 ok "a dry run from the package builds $TENANT's values (mask: $MASK)"
+
+step "record it on the relay"
+umask 077
+if [ -n "$NO_RECORD" ]; then
+  printf 'skip  --no-record. Add to %s'"'"'s records, under proxies:, before the customer installs:\n\n' "$TENANT"
+  printf '      - name: %s\n        expected_tunnels: 0\n        keys: []\n        join_tokens:\n          - {hash: %s, expires: %s}\n' "$PROXY" "$hash" "$expires"
+else
+  k get configmap neubird-relay-tenants -o yaml > "$WORK/tenants-cm.backup.$stamp.yaml"
+  k get configmap neubird-relay-tenants -o jsonpath='{.data.tenants\.yaml}' > "$WORK/tenants.yaml.orig"
+  cp "$WORK/tenants.yaml.orig" "$WORK/tenants.yaml"
+  python3 "$RELAY_REPO/scripts/onboard/tenants_edit.py" "$WORK/tenants.yaml" "$PROXY" add-proxy
+  python3 "$RELAY_REPO/scripts/onboard/tenants_edit.py" "$WORK/tenants.yaml" "$PROXY" add-join-token "$hash" "$expires"
+  out=$(relay tenants check -f "$WORK/tenants.yaml" -tenant "$TENANT" 2>&1) || die "the new records don't check: $out"
+  # The new proxy record must be under this tenant, with this token.
+  python3 - "$WORK/tenants.yaml" "$TENANT" "$PROXY" "$hash" <<'PY' || die "the edit didn't record the token under $TENANT/$PROXY"
+import sys, yaml
+f, tenant, proxy, h = sys.argv[1:]
+t = [t for t in yaml.safe_load(open(f))["tenants"] if t["name"] == tenant]
+p = [p for p in (t[0].get("proxies") or []) if p["name"] == proxy] if t else []
+sys.exit(0 if p and any(j["hash"].lower() == h for j in p[0].get("join_tokens") or []) else 1)
+PY
+  printf 'The change to %s'"'"'s records (namespace %s, %s):\n' "$TENANT" "$RELAY_NS" "$RELAY_CONTEXT"
+  diff "$WORK/tenants.yaml.orig" "$WORK/tenants.yaml" | sed 's/^/      /' || true
+  if [ -z "$YES" ]; then
+    [ -t 0 ] || die "not recording without a terminal: add --yes, or --no-record"
+    printf 'Record it on the live relay? Type the tenant to confirm: '
+    read -r answer || answer=
+    [ "$answer" = "$TENANT" ] || die "not confirmed: the relay is unchanged; the token in $WORK/join.token isn't recorded"
+  fi
+  # Nobody else changed the records since they were read.
+  diff -q <(k get configmap neubird-relay-tenants -o jsonpath='{.data.tenants\.yaml}') "$WORK/tenants.yaml.orig" >/dev/null \
+    || die "the relay's records changed while this ran: run it again"
+  python3 -c 'import json,sys; json.dump({"data":{"tenants.yaml":open(sys.argv[1]).read()}}, open(sys.argv[2],"w"))' "$WORK/tenants.yaml" "$WORK/patch.json"
+  k patch configmap neubird-relay-tenants --type merge --patch-file "$WORK/patch.json" >/dev/null
+  diff -q <(k get configmap neubird-relay-tenants -o jsonpath='{.data.tenants\.yaml}') "$WORK/tenants.yaml" >/dev/null \
+    || die "the relay's records don't read back as written"
+  ok "recorded (the relay loads it within about a minute); backup $WORK/tenants-cm.backup.$stamp.yaml"
+  # Keep the relay's directory in git in step with the live records, so
+  # applying it (setup-relay.sh) doesn't drop this token.
+  if [ -f "$cust/tenants.yaml" ]; then
+    if [ "$(cat "$cust/tenants.yaml")" != "$(cat "$WORK/tenants.yaml.orig")" ]; then
+      printf 'note  %s differed from the live records before this token (not committed, or the relay was\n      changed directly); it now holds the live records: check its diff before committing\n' "${cust#"$RELAY_REPO"/}/tenants.yaml"
+    fi
+    cp "$WORK/tenants.yaml" "$cust/tenants.yaml"
+    ok "updated ${cust#"$RELAY_REPO"/}/tenants.yaml in $RELAY_REPO: commit it"
+  fi
+fi
+
+step "write the package"
+# No macOS metadata files (._*) in the package.
+tarflags=(); tar --version 2>/dev/null | grep -q bsdtar && tarflags=(--no-mac-metadata)
+(cd "$B" && COPYFILE_DISABLE=1 tar ${tarflags[@]+"${tarflags[@]}"} -czf "$pkgfile" "$name")
+chmod 600 "$pkgfile"
+cmp -s <(tar -xzOf "$pkgfile" "$name/join.token") "$WORK/join.token" || die "$pkgfile doesn't hold the token"
+ok "$pkgfile ($(tar -tzf "$pkgfile" | wc -l | tr -d ' ') entries, from $sha)"
 
 printf '\nDone: %s\n' "$pkgfile"
 printf 'It holds the join token (single use, until %s): send it to whoever installs, over a secure channel.\n' "$until"
