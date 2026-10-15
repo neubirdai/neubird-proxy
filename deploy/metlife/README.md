@@ -15,7 +15,7 @@ The proxy runs in MetLife's AKS and dials out to NeuBird's relay; NeuBird's requ
 
 | Item | Value |
 |---|---|
-| Relay address | `metlife-tunnel.neubird.ai:443` |
+| Relay address | `metlife-tunnel.cluster.neubird.ai:443` |
 | Relay IPs | `52.206.84.184`, `23.23.64.142` |
 | Tenant and proxy name | `metlife` (the proxy is named after the tenant) |
 | Relay CA certificate | `relay-ca.crt` (public) |
@@ -39,7 +39,7 @@ The script builds the values, creates the namespace and Secret, installs the cha
 ```
 == confirm (namespace neubird)
   ok    pods ready: 2/2 (a pod is ready only with a tunnel up)
-  ok    tunnel to metlife-tunnel.neubird.ai:443: mutual TLS accepted by the relay
+  ok    tunnel to metlife-tunnel.cluster.neubird.ai:443: mutual TLS accepted by the relay
   ok    identity metlife/metlife, key sha256:…
   ok    systems reachable (DNS, TCP, TLS): splunk.metlife.com:8089
   ok    join token removed from the Secret
@@ -111,11 +111,11 @@ In tunnel mode the proxy accepts no connections. With `--hosts` left at `*`, the
 |---|---|---|---|
 | Inbound | nothing (optionally Prometheus) | 9090 | Health and metrics only; no Service, no load balancer |
 | Outbound | cluster DNS | 53 | Name resolution |
-| Outbound | relay `metlife-tunnel.neubird.ai` (`52.206.84.184`, `23.23.64.142`) | 443 | The tunnel |
+| Outbound | relay `metlife-tunnel.cluster.neubird.ai` (`52.206.84.184`, `23.23.64.142`) | 443 | The tunnel |
 | Outbound | Splunk (and other internal systems) | e.g. 8089 | Inside MetLife's network |
 | Outbound | `<instance>.service-now.com` | 443 | SaaS, no fixed addresses |
 
-**1. Kubernetes NetworkPolicy.** `--allow-cidrs` (or `networkPolicy.enabled: true` by hand) renders a policy with no ingress and egress only to DNS, the relay IPs on 443, and the listed ranges (plus the egress proxy). Also:
+**1. Kubernetes NetworkPolicy.** `--allow-cidrs` (or by hand: `networkPolicy.enabled: true`, `relayCIDRs` the relay IPs below as `/32`, `upstreams` your ranges) renders a policy with no ingress and egress only to DNS, the relay IPs on 443, and the listed ranges (plus the egress proxy). Also:
 - The cluster must enforce NetworkPolicy (AKS `--network-policy azure`, `calico` or `cilium`); without it the policy is stored but does nothing.
 - Deny everything else in the namespace by default:
   ```yaml
@@ -134,11 +134,11 @@ In tunnel mode the proxy accepts no connections. With `--hosts` left at `*`, the
     egress:
       - toEndpoints: [{matchLabels: {k8s-app: kube-dns, io.kubernetes.pod.namespace: kube-system}}]
         toPorts: [{ports: [{port: "53", protocol: ANY}], rules: {dns: [{matchPattern: "*"}]}}]
-      - toFQDNs: [{matchName: "<instance>.service-now.com"}, {matchName: "metlife-tunnel.neubird.ai"}]
+      - toFQDNs: [{matchName: "<instance>.service-now.com"}, {matchName: "metlife-tunnel.cluster.neubird.ai"}]
         toPorts: [{ports: [{port: "443", protocol: TCP}]}]
   ```
 
-**2. Azure network.** Route the node subnet's outbound traffic (`0.0.0.0/0`) through Azure Firewall, with application rules for `metlife-tunnel.neubird.ai:443` and `<instance>.service-now.com:443` and network rules for internal systems such as Splunk on 8089. No TLS inspection on the relay host; inspecting ServiceNow also breaks it unless the inspection CA is added to `--upstream-ca`. No inbound rule, public IP or load balancer is needed. A dedicated node pool (taints and tolerations) keeps these rules from widening anything else.
+**2. Azure network.** Route the node subnet's outbound traffic (`0.0.0.0/0`) through Azure Firewall, with application rules for `metlife-tunnel.cluster.neubird.ai:443` and `<instance>.service-now.com:443` and network rules for internal systems such as Splunk on 8089. No TLS inspection on the relay host; inspecting ServiceNow also breaks it unless the inspection CA is added to `--upstream-ca`. No inbound rule, public IP or load balancer is needed. A dedicated node pool (taints and tolerations) keeps these rules from widening anything else.
 
 **3. The proxy itself**, whatever the network allows:
 - It calls only hosts matching `--hosts`; `*` and `*.domain` match names, never IP literals (an IP is reached only when listed). It never calls loopback, link-local (including the cloud metadata address 169.254.169.254) or unspecified addresses, whatever a name resolves to. Through an egress proxy, the egress proxy's own allowlist applies too.
