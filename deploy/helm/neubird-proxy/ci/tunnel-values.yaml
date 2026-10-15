@@ -24,5 +24,5 @@ config:
     hmac_key_env: REDACTION_HMAC_KEY
 networkPolicy:
   enabled: true
-  relayCIDRs: ["203.0.113.10/32"]
+  relayCIDRs: ["203.0.113.10", "198.51.100.0/30", "2001:db8::1"]
   upstreams: [{cidr: 10.20.0.0/16, ports: [8089]}]

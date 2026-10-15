@@ -40,5 +40,5 @@ config:
 # install.sh --allow-cidrs turns it on.
 networkPolicy:
   enabled: false
-  relayCIDRs: ["52.206.84.184/32", "23.23.64.142/32"]   # the relay's IPs
+  relayCIDRs: ["52.206.84.184", "23.23.64.142"]   # the relay's IPs
   relayPorts: [443]

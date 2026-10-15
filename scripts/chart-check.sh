@@ -51,7 +51,8 @@ grep -q 'identity: tenant acme, proxy aks-prod' "$W/validate.txt" || fail "tunne
 grep -q "join token: NEUBIRD_JOIN_TOKEN is empty" "$W/validate.txt" || fail "join_token_env not generated"
 grep -q 'upstream_ca_file:' "$W/config.yaml" || fail "upstreamCA did not set upstream_ca_file"
 grep -q 'name: HTTPS_PROXY' "$W/out.yaml" || fail "extraEnv not rendered into the Deployment"
-grep -A3 'ipBlock: {cidr: 203.0.113.10/32}' "$W/out.yaml" | grep -q 'port: 443' || fail "relay port not in the NetworkPolicy"
+grep -A5 'ipBlock: {cidr: "203.0.113.10/32"}' "$W/out.yaml" | grep -q 'port: 443' || fail "relay port not in the NetworkPolicy"
+for c in 198.51.100.0/30 2001:db8::1/128; do grep -qF "ipBlock: {cidr: \"$c\"}" "$W/out.yaml" || fail "relayCIDRs entry $c not rendered"; done
 echo "ok    chart renders a config this build accepts"
 
 for set in config.upstream_ca_file=/x image.repository= env.existingSecret= tunnelKey.generate=false networkPolicy.relayCIDRs=null tunnel.tenant=Bad_Name; do
