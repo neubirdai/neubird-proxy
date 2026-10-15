@@ -1,7 +1,7 @@
 # neubird-proxy at MetLife: Helm values for the chart's tunnel mode. The proxy
-# dials out to NeuBird's relay; nothing connects in. No proxy token
-# (client_auth: none). install.sh builds the values from this file; to install
-# by hand, review hosts below. See README.md.
+# dials out to NeuBird's relay; nothing connects in. No proxy token (mode
+# tunnel defaults to client_auth: none). install.sh builds the values from
+# this file; to install by hand, review hosts below. See README.md.
 #
 #   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
 #     --set-file relayCA.cert=relay-ca.crt
@@ -46,9 +46,6 @@ extraEnv: []
 config:
   max_body_bytes: 20971520
   neubird_destinations:
-    # No proxy token: requests are accepted because they come down this
-    # proxy's own tunnels.
-    client_auth: none
     # The systems the proxy will call: "*" is any host name it can reach
     # (never IP literals, loopback, link-local or metadata addresses), so limit
     # egress at the network, or list them, e.g. splunk.metlife.com:8089 (its
