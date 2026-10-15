@@ -81,7 +81,7 @@ ok "validate MetLife's rendered config"
 # never turn ready.
 docker run -d --name "$name" "${pod[@]}" "${mounts[@]}" -e NEUBIRD_JOIN_TOKEN="$token" \
   -p 127.0.0.1::9090 "$img" >/dev/null
-port=$(docker port "$name" 9090/tcp | head -1 | sed 's/.*://')
+port=$(docker port "$name" 9090/tcp | sed -n '1s/.*://p')
 for _ in $(seq 1 30); do
   curl -fsS -o /dev/null "http://127.0.0.1:$port/healthz" 2>/dev/null && break
   [ "$(docker inspect -f '{{.State.Running}}' "$name")" = true ] || { docker logs "$name"; fail "the proxy exited"; }
