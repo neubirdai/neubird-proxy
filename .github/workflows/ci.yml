@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:   # publish the image by hand (job publish)
 
 permissions:
   contents: read
@@ -40,9 +41,52 @@ jobs:
         run: make image VERSION=${{ github.sha }}
       - name: Image size
         run: docker image ls neubird-proxy:${{ github.sha }} --format '{{.Size}}'
+      - name: Scan image (fails on fixable HIGH or CRITICAL vulnerabilities)
+        run: make scan VERSION=${{ github.sha }}
       - name: SBOM
         run: make sbom VERSION=${{ github.sha }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom
           path: sbom.spdx.json
+
+  # On main, when the image's code changed (cmd/, internal/, go.mod, go.sum,
+  # Dockerfile), or by hand: build and scan, then push linux/amd64 and
+  # linux/arm64 to Docker Hub as :<short sha> and :latest with SBOM and
+  # provenance, and sign with cosign (secrets COSIGN_PRIVATE_KEY and
+  # COSIGN_PASSWORD; unsigned until they're set). Packages still pin a digest:
+  # update deploy/metlife/values.yaml to the digest in the job summary.
+  publish:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: image
+    runs-on: ubuntu-latest
+    concurrency: publish
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Did the image's code change?
+        id: changed
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+             || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- cmd internal go.mod go.sum Dockerfile; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"; echo "No image code changed: nothing to publish." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Log in to Docker Hub
+        if: steps.changed.outputs.publish == 'true'
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: printf '%s' "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+      - name: Build, scan, push, sign
+        if: steps.changed.outputs.publish == 'true'
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: scripts/publish-image.sh docker.io/neubirdai/neubird-proxy "${GITHUB_SHA::7}"

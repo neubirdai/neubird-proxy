@@ -1,7 +1,7 @@
 IMAGE   ?= neubird-proxy
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: chart-check chart-package build test lint vuln fuzz bench image sbom check-config clean
+.PHONY: chart-check chart-package build test lint vuln fuzz bench image sbom scan check-config clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/neubird-proxy ./cmd/neubird-proxy
@@ -33,6 +33,17 @@ image:
 sbom: image
 	docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02 \
 	  $(IMAGE):$(VERSION) -o spdx-json > sbom.spdx.json
+
+# Known vulnerabilities in an image (OS packages and the Go binary's modules),
+# failing on HIGH or CRITICAL ones that have a fix. Trivy runs in a pinned
+# container. SCAN_REF defaults to the image `make image` built; give a
+# registry reference to scan a pushed one, e.g.
+#   make scan SCAN_REF=docker.io/neubirdai/neubird-proxy@sha256:...
+SCAN_REF ?= $(IMAGE):$(VERSION)
+TRIVY ?= aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
+scan:
+	docker run --rm -v /var/run/docker.sock:/var/run/docker.sock $(TRIVY) image --quiet --scanners vuln \
+	  --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 $(SCAN_REF)
 
 # Validate a config without starting the proxy, e.g. before editing the
 # ConfigMap: make check-config CONFIG=deploy/config.example.yaml

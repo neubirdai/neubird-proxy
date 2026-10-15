@@ -117,7 +117,7 @@ pkgfile=$OUT/$name-with-token.tgz
 WORK=$HOME/.neubird-onboard/$TENANT
 
 step "checks"
-for c in git helm openssl python3 tar; do command -v "$c" >/dev/null 2>&1 || die "$c not found"; done
+for c in git helm openssl python3 tar docker; do command -v "$c" >/dev/null 2>&1 || die "$c not found"; done
 python3 -c 'import yaml' 2>/dev/null || die "python3 can't import yaml: pip3 install PyYAML"
 command -v go >/dev/null 2>&1 || die "go not found (the relay's join-token command runs from $RELAY_REPO)"
 [ -f "$RELAY_REPO/cmd/neubird-relay/jointoken.go" ] || die "--relay-repo $RELAY_REPO: not a neubird-relay checkout"
@@ -157,6 +157,28 @@ case $REF in origin/*) git -C "$repo" fetch -q origin ;; esac
 sha=$(git -C "$repo" rev-parse --short "$REF^{commit}") || die "--ref $REF: no such commit"
 ok "$(git -C "$repo" log -1 --format='%h %s' "$sha")"
 
+step "the proxy image"
+image=$(git -C "$repo" show "$sha:deploy/metlife/values.yaml" | python3 -c 'import sys,yaml; i=yaml.safe_load(sys.stdin)["image"]; print(i["repository"]+"@"+i["digest"])')
+[[ $image == *@sha256:* ]] || die "deploy/metlife/values.yaml at $sha doesn't pin the image by digest: $image"
+SYFT=anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02
+COSIGN=gcr.io/projectsigstore/cosign:v2.6.1@sha256:68839b7f13dac5a6744a5d8818e984dd39183374e37855c19e14d623d9bc9037
+ok "$image"
+# The signing key's public half, if this commit has one (cosign.pub at the
+# repo root); images published by CI are signed with it.
+cosign_pub=$(git -C "$repo" show "$sha:cosign.pub" 2>/dev/null || true)
+signed=
+if [ -n "$cosign_pub" ]; then
+  kd=$(mktemp -d); printf '%s\n' "$cosign_pub" > "$kd/cosign.pub"; chmod 755 "$kd"; chmod 644 "$kd/cosign.pub"
+  if docker run --rm -v "$kd:/k:ro" "$COSIGN" verify --key /k/cosign.pub "$image" >/dev/null 2>&1; then
+    signed=1; ok "signed with cosign.pub"
+  else
+    printf 'warn  %s has no valid signature from cosign.pub (images from before signing are unsigned)\n' "$image"
+  fi
+  rm -rf "$kd"
+else
+  printf -- '--    no cosign.pub at %s: signatures not checked\n' "$sha"
+fi
+
 step "join token for $TENANT/$PROXY"
 mkdir -p "$WORK" && chmod 700 "$WORK"
 umask 077
@@ -181,6 +203,10 @@ git -C "$repo" archive "$sha" deploy/helm deploy/metlife deploy/scripts | tar -x
 chart_tgz=$(cd "$P" && ls neubird-proxy-*.tgz)
 cp "$RELAY_CA" "$P/relay-ca.crt"; chmod 644 "$P/relay-ca.crt"
 install -m 600 "$WORK/join.token" "$P/join.token"
+# The image's SBOM (SPDX), for the customer's security review.
+docker run --rm "$SYFT" "$image" -q -o spdx-json > "$P/neubird-proxy-image.spdx.json" \
+  || die "couldn't make the image's SBOM (syft $image)"
+[ -z "$cosign_pub" ] || printf '%s\n' "$cosign_pub" > "$P/cosign.pub"
 until=$(python3 -c 'import sys,datetime; print(datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M UTC"))' "$expires")
 cat > "$P/$TENANT.env" <<EOF
 # Loaded by deploy/metlife/install.sh; you don't need to source it.
@@ -228,6 +254,7 @@ the ones you list in \`HOSTS\`. No proxy token.
 | \`$TENANT.env\` | The relay, tenant and IPs, and $mask_text masking (preset); loaded by install.sh |
 | \`join.token\` | The join token (secret, single use) |
 | \`relay-ca.crt\` | The $TENANT relay CA (public) |
+| \`neubird-proxy-image.spdx.json\` | The proxy image's SBOM (SPDX JSON): \`$image\` |$( [ -z "$cosign_pub" ] || printf '\n| `cosign.pub` | NeuBird'"'"'s image signing key (public), for the check below |')
 | \`deploy/metlife/install.sh\` | The installer: builds the values, installs and confirms (\`--help\`) |
 | \`deploy/scripts/install-tunnel.sh\` | Called by install.sh: Secret, install, enrollment, tests |
 
@@ -259,6 +286,18 @@ prints its key fingerprint.
 
 Requires kubectl, helm 3 or later and python3 with PyYAML.
 EOF
+if [ -n "$signed" ]; then
+  cat >> "$P/README.md" <<EOF
+
+## Checking the image (optional)
+
+The image is signed by NeuBird. To check it, or a copy in your registry:
+
+\`\`\`sh
+cosign verify --key $name/cosign.pub $image
+\`\`\`
+EOF
+fi
 ok "assembled from $sha"
 
 # Checked before the token is recorded: a package that doesn't work leaves
