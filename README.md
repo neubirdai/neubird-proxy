@@ -42,7 +42,8 @@ connection). In order; the first check that fails ends the request.
 4. **Destination.** The host must match `neubird_destinations.hosts`, or the
    request gets `403 destination_not_allowed`. This is checked after the
    token, so a caller without it learns nothing about the hosts.
-5. **Method allowlist.** GET and HEAD only, unless `methods` lists more.
+5. **Method allowlist.** GET and HEAD only, unless `methods` lists more
+   (`"*"`: GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS; never CONNECT or TRACE).
    Anything else gets a 405.
 6. **Rate limit.** Per pod, shared by every host, when `rate_limit` is set;
    over the limit gets a 429.
@@ -396,7 +397,7 @@ refuses to start. Unknown YAML fields are errors.
 | `max_concurrent_requests` | 256 | In-flight requests before the proxy returns 503 |
 | `max_concurrent_buffered` | 4 | Response bodies buffered for redaction at once; others wait |
 | `neubird_destinations.hosts` | `["*"]` | Host patterns NeuBird may name: `*`, `*.domain`, `host`, or an exact IP; each may end in `:port` |
-| `neubird_destinations.methods` | `[GET, HEAD]` | Allowed methods, for every host |
+| `neubird_destinations.methods` | `[GET, HEAD]` | Allowed methods, for every host; `"*"` is GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS |
 | `neubird_destinations.request_deny_patterns` | none | RE2 patterns; a match anywhere in the query or body, raw or URL-decoded, is refused |
 | `neubird_destinations.credential_headers` | `["*"]` | Headers NeuBird may set for the system, as `X-Neubird-Upstream-<Header>`: `"*"` is any header except those never allowed (`Host`, `Cookie`, `X-Forwarded-*`, `X-Neubird-*`, APIM trace and transport headers); a list allows only those |
 | `neubird_destinations.request_headers` | none | Client headers to forward in addition to the defaults (Accept, Content-Type, User-Agent, conditional and MCP headers). Credentials, cookies and APIM trace headers are refused |

@@ -54,7 +54,7 @@ config:
     # egress at the network, or list them, e.g. splunk.metlife.com:8089 (its
     # certificate must name that host) and <instance>.service-now.com.
     hosts: ["*"]
-    methods: [GET, HEAD, POST]    # POST for Splunk (MCP and searches)
+    methods: ["*"]                # GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS
     # SPL commands that write, send, delete or reach other systems
     # (rest calls Splunk's own REST API from inside a search).
     request_deny_patterns:

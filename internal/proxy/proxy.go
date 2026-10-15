@@ -571,7 +571,7 @@ func (s *Server) parseDestination(v string) (*url.URL, string) {
 
 func allowHeader(c *config.Connection) string {
 	var ms []string
-	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+	for _, m := range config.AllMethods {
 		if c.MethodSet[m] {
 			ms = append(ms, m)
 		}

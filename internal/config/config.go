@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,10 @@ const (
 // DefaultMethods is the method allowlist when a connection sets none:
 // read-only.
 var DefaultMethods = []string{"GET", "HEAD"}
+
+// AllMethods are the methods a connection may allow; "*" allows them all.
+// CONNECT and TRACE never cross the proxy.
+var AllMethods = []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
 // DefaultRequestHeaders are the client request headers forwarded upstream.
 // Everything else (cookies, APIM trace and debug headers, X-Forwarded-*,
@@ -696,8 +701,14 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		conn.MethodSet = map[string]bool{}
 		for _, m := range methods {
 			m = strings.ToUpper(m)
-			switch m {
-			case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+			switch {
+			case m == "*" && len(methods) > 1:
+				fail("%s: methods: \"*\" already allows every method; list it alone", where)
+			case m == "*":
+				for _, a := range AllMethods {
+					conn.MethodSet[a] = true
+				}
+			case slices.Contains(AllMethods, m):
 				conn.MethodSet[m] = true
 			default:
 				fail("%s: methods: unsupported method %q", where, m)

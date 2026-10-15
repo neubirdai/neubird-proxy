@@ -336,3 +336,27 @@ func TestHostMethods(t *testing.T) {
 		}
 	}
 }
+
+// methods "*" allows every supported method, and must stand alone.
+func TestMethodsAny(t *testing.T) {
+	e := env(map[string]string{"TOKEN": tok})
+	base := "client_token_env: TOKEN\nneubird_destinations:\n  hosts: ['*']\n"
+	c, err := Parse([]byte(base+"  methods: ['*']\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := c.NeubirdDestinations.Conn.MethodSet
+	for _, m := range AllMethods {
+		if !ms[m] {
+			t.Errorf("%s not allowed", m)
+		}
+	}
+	if len(ms) != len(AllMethods) || ms["CONNECT"] || ms["TRACE"] {
+		t.Errorf("methods: %v", ms)
+	}
+	for _, bad := range []string{"['*', GET]", "[CONNECT]", "[TRACE]"} {
+		if _, err := Parse([]byte(base+"  methods: "+bad+"\n"), e); err == nil {
+			t.Errorf("want an error for methods %s", bad)
+		}
+	}
+}
