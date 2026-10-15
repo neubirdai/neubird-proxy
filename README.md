@@ -708,12 +708,25 @@ To rotate the proxy token (inbound listener only; a tunnel-only proxy has none):
   is pinned in `go.mod` (`toolchain go1.26.8`). `make vuln` runs
   `govulncheck` and must pass.
 - CI (`.github/workflows/ci.yml`) runs lint, race tests, `govulncheck`, a
-  fuzz pass, the example-config check, the image build, and the SBOM. Its
-  actions are pinned by commit SHA.
+  fuzz pass, the example-config check and the chart check, then builds the
+  image, smoke-tests it (`make image-check`), scans it with Trivy (fails on
+  fixable HIGH or CRITICAL vulnerabilities) and makes its SBOM. Its actions
+  are pinned by commit SHA.
+- `make image-check` (`scripts/image-check.sh`) runs the image as the chart
+  does: no shell in it, nonroot, and with MetLife's values it starts on a
+  read-only root filesystem with no capabilities, reports its version, is
+  live but not ready without a tunnel, and doesn't log the join token.
+- On main, CI publishes the image (linux/amd64 and linux/arm64, SBOM and
+  provenance attached) to `docker.io/neubirdai/neubird-proxy` and signs it
+  with cosign; `cosign.pub` is the public key:
+  `cosign verify --key cosign.pub docker.io/neubirdai/neubird-proxy@sha256:...`
+- To have a cluster admit only signed images, apply
+  [`deploy/admission/kyverno-neubird-proxy-signed.yaml`](deploy/admission/kyverno-neubird-proxy-signed.yaml)
+  (Kyverno; it also refuses tags). On AKS without Kyverno, Ratify with Azure
+  Policy can check the same key.
 - Dependencies are the Go standard library, `gopkg.in/yaml.v3`, and
   `golang.org/x/net` (from the Go team; HTTP/2 and outbound proxy settings
   for the tunnel).
-- Image signing and a MetLife-side build are in the plan.
 
 ## Develop
 
@@ -724,6 +737,8 @@ make vuln    # govulncheck
 make fuzz    # FUZZTIME=5m for a longer run
 make bench
 make image   # distroless static, non-root
+make image-check   # smoke-test that image as the chart runs it
+make scan    # Trivy: fixable HIGH or CRITICAL vulnerabilities fail
 make sbom    # SPDX JSON via syft
 go test ./internal/proxy -run Golden -update   # regenerate golden files, then review the diff
 ```
