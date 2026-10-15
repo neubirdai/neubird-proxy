@@ -8,7 +8,7 @@
 
 image:
   repository: docker.io/neubirdai/neubird-proxy   # or your registry's copy, same digest
-  digest: sha256:73b214a0feed2727bdc4731724d4093acc6d5a76cdad67dc9fd58b973dce6675
+  digest: sha256:fa9f434bcc23410abc87622985b69332f1ed63cb3bd31249ef41fdfb130b83c7
 replicaCount: 2
 
 mode: tunnel
