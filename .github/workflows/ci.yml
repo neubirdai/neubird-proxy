@@ -66,6 +66,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # First: the change check reads :latest, and a private repository needs
+      # the login for that.
+      - name: Log in to Docker Hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: printf '%s' "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
       # Compared with the commit in :latest, not the previous push: a publish
       # that failed or was superseded while queued is picked up by the next.
       - name: Did the image's code change since :latest?
@@ -82,12 +89,6 @@ jobs:
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"; echo "No image code changed since :latest ($last): nothing to publish." >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Log in to Docker Hub
-        if: steps.changed.outputs.publish == 'true'
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        run: printf '%s' "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
       - name: Build, scan, push, sign
         if: steps.changed.outputs.publish == 'true'
         env:
