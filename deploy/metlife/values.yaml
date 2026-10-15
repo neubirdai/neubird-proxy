@@ -36,13 +36,6 @@ resources:
   requests: {cpu: 100m, memory: 128Mi}
   limits: {memory: 768Mi}
 
-# Optional: an outbound HTTP proxy for the relay tunnel and ServiceNow. A
-# forwarding proxy; one that inspects TLS breaks the tunnel. NO_PROXY keeps
-# Splunk direct.
-extraEnv: []
-#  - {name: HTTPS_PROXY, value: "http://<egress proxy>:3128"}
-#  - {name: NO_PROXY, value: "<splunk host>"}
-
 config:
   max_body_bytes: 20971520
   neubird_destinations:
