@@ -26,7 +26,7 @@ tunnel:
 #     ...
 
 env:
-  existingSecret: neubird-proxy-env   # NEUBIRD_JOIN_TOKEN until enrolled (and REDACTION_HMAC_KEY for mask: hmac)
+  existingSecret: neubird-proxy-env   # REDACTION_HMAC_KEY, and NEUBIRD_JOIN_TOKEN until enrolled
 
 # Responses are buffered up to max_body_bytes, sized from this limit (the
 # proxy refuses larger ones as body_too_large): 768Mi fits 20 MiB with either
@@ -58,7 +58,8 @@ config:
       - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
     rate_limit: {requests_per_second: 10, burst: 30}
   redaction:
-    mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
+    mask: hmac                    # or label (no key)
+    hmac_key_env: REDACTION_HMAC_KEY   # 32+ characters, in the Secret
 
 # Optional: lock egress down to DNS, the relay and your systems (see README,
 # Locking down the network). install.sh --allow-cidrs turns it on and fills

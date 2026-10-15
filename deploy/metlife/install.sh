@@ -66,7 +66,7 @@ Options:
                                  (needed with --allow-cidrs and --egress-proxy)
       --upstream-ca <file>       CA bundle for systems with internal-CA certificates
       --image-repo <repo>        your registry's copy of the image (same digest)
-      --mask <label|hmac>        how redacted values are masked (default: label,
+      --mask <hmac|label>        how redacted values are masked (default: hmac,
                                  or the package's preset)
       --timeout <seconds>        how long to wait for the tunnels (default: 300)
       --join-token-file <file>   NeuBird's join token, for the first install
@@ -173,7 +173,7 @@ if [ -n "${UNINSTALL:-}" ]; then
     esac
   done
 fi
-case ${MASK:-label} in label|hmac) ;; *) bad "--mask must be label or hmac" ;; esac
+case ${MASK:-hmac} in label|hmac) ;; *) bad "--mask must be label or hmac" ;; esac
 case ${TIMEOUT:-300} in ''|*[!0-9]*) bad "--timeout must be a number of seconds" ;; esac
 export KUBE_CONTEXT NAMESPACE
 origin() { [[ $from_env == *" $1"* ]] && printf ' (from $%s in your environment)' "$1"; return 0; }
@@ -418,7 +418,7 @@ trap 'rm -f "$values"' EXIT
 TENANT=$TENANT RELAY=$RELAY RELAY_IPS=$RELAY_IPS HOSTS=$HOSTS \
 EGRESS_PROXY=${EGRESS_PROXY:-} NO_PROXY_HOSTS=${EGRESS_NO_PROXY:-} \
 EGRESS_PROXY_CIDR=${EGRESS_PROXY_CIDR:-} IMAGE_REPO=${IMAGE_REPO:-} \
-PROXY_NAME=$PROXY_NAME MASK=${MASK:-label} ALLOW_CIDRS=${ALLOW_CIDRS:-} \
+PROXY_NAME=$PROXY_NAME MASK=${MASK:-hmac} ALLOW_CIDRS=${ALLOW_CIDRS:-} \
 python3 - "$here/values.yaml" "$values" <<'PY'
 import os, sys, yaml
 src, out = sys.argv[1], sys.argv[2]
@@ -438,6 +438,8 @@ if e["MASK"] not in ("label", "hmac"):
 v["config"]["redaction"]["mask"] = e["MASK"]
 if e["MASK"] == "hmac":
     v["config"]["redaction"]["hmac_key_env"] = "REDACTION_HMAC_KEY"
+else:
+    v["config"]["redaction"].pop("hmac_key_env", None)
 env = []
 if e["EGRESS_PROXY"]:
     env.append({"name": "HTTPS_PROXY", "value": e["EGRESS_PROXY"]})

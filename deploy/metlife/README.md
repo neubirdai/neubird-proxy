@@ -57,7 +57,7 @@ Send NeuBird the key fingerprint from that summary (it isn't secret): NeuBird ch
 | `--egress-no-proxy` | no | Hosts reached directly rather than through `--egress-proxy` (the pod's `NO_PROXY`), e.g. `splunk.metlife.com,.metlife.com`. Your shell's own `NO_PROXY` isn't used |
 | `--upstream-ca` | no | CA bundle for systems whose certificates come from MetLife's internal CA |
 | `--allow-cidrs` | no | Turns on the NetworkPolicy: ranges the proxy may reach besides DNS and the relay, as `cidr:port,...`, e.g. `10.20.0.0/16:8089`. With `--egress-proxy`, also `--egress-proxy-cidr` |
-| `--mask` | no | `label` (default) or `hmac` (below) |
+| `--mask` | no | `hmac` (default, below) or `label` |
 | `--image-repo` | no | Your registry's copy of the image, if the cluster can't pull from Docker Hub. Keep the digest |
 | `--relay-ca` | no | Path to the relay CA certificate (default `relay-ca.crt`) |
 | `--timeout` | no | Seconds to wait for the tunnels (default 300) |
@@ -83,7 +83,7 @@ Notes:
 - **Splunk's certificate** must name the host NeuBird uses. Splunk's default certificate on 8089 names none and fails verification; its CA goes in `--upstream-ca`.
 - **Memory:** the values set a 768 Mi limit, so responses up to the 20 MiB `max_body_bytes` fit with either `--mask`; at a lower limit the proxy refuses larger responses (`body_too_large`) and logs a `risky configuration` warning.
 
-**HMAC masking (optional).** The proxy masks sensitive values in responses. With `--mask label` each becomes a label such as `[EMAIL]`. With `--mask hmac` each becomes a keyed code, so the same value always masks the same way and NeuBird can correlate it without seeing it. The script generates the key (`REDACTION_HMAC_KEY` in the Secret) if it isn't there. Keep it in MetLife's secret store and never send it to NeuBird: anyone with the key can test guesses against masked values. Leave it in place; changing it changes every code.
+**HMAC masking (the default).** The proxy masks sensitive values in responses. With `--mask hmac` each becomes a keyed code, so the same value always masks the same way and NeuBird can correlate it without seeing it. The script generates the key (`REDACTION_HMAC_KEY` in the Secret) if it isn't there. Keep it in MetLife's secret store and never send it to NeuBird: anyone with the key can test guesses against masked values. Leave it in place; changing it changes every code. With `--mask label` each value becomes a label such as `[EMAIL]` instead, and no key is needed.
 
 ### Install by hand
 
@@ -92,7 +92,8 @@ The same install without the script:
 ```sh
 kubectl create namespace neubird
 read -rs JOIN   # paste the join token; it isn't echoed or kept in shell history
-kubectl -n neubird create secret generic neubird-proxy-env --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN"
+kubectl -n neubird create secret generic neubird-proxy-env --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN" \
+  --from-literal=REDACTION_HMAC_KEY="$(openssl rand -hex 32)"   # keep it; changing it changes every code
 unset JOIN
 helm install neubird-proxy deploy/helm/neubird-proxy -n neubird -f deploy/metlife/values.yaml \
   --set-file relayCA.cert=relay-ca.crt
