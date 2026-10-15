@@ -1108,6 +1108,15 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 				st.credentials = "neubird"
 			}
 		}
+		if c.CredentialHeaderAny {
+			for k, vs := range out.Header {
+				name, ok := strings.CutPrefix(k, config.UpstreamCredentialPrefix)
+				if name = http.CanonicalHeaderKey(name); ok && name != "" && config.CredentialHeaderAllowed(name) {
+					h[name] = vs
+					st.credentials = "neubird"
+				}
+			}
+		}
 	}
 	out.Header = h
 	// Request trailers would carry any header past the allowlist (the

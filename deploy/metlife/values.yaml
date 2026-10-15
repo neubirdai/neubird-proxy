@@ -54,9 +54,6 @@ config:
     # egress at the network, or list them, e.g. splunk.metlife.com:8089 (its
     # certificate must name that host) and <instance>.service-now.com.
     hosts: ["*"]
-    # Headers NeuBird's credentials travel in: Authorization (Splunk token,
-    # ServiceNow OAuth/basic) and x-sn-apikey (ServiceNow API key).
-    credential_headers: [Authorization, x-sn-apikey]
     methods: [GET, HEAD, POST]    # POST for Splunk (MCP and searches)
     # ServiceNow read-only: no POST, so no records can be created.
     host_methods:

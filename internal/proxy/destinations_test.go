@@ -76,6 +76,59 @@ func TestDestinationsForward(t *testing.T) {
 	}
 }
 
+// credential_headers "*" (the default) forwards any credential header
+// NeuBird sends, except the ones it may never set; a list limits it.
+func TestDestinationsCredentialHeaders(t *testing.T) {
+	destDialControl = nil
+	t.Cleanup(func() { destDialControl = refuseInternalAddresses })
+	sent := map[string]string{
+		"Authorization":                            "Bearer " + token,
+		"X-Neubird-Upstream-Authorization":         "Basic dTpw",
+		"X-Neubird-Upstream-x-sn-apikey":           "sn-key",
+		"X-Neubird-Upstream-Dd-Api-Key":            "dd",
+		"X-Neubird-Upstream-Cookie":                "smuggled",
+		"X-Neubird-Upstream-Host":                  "other.internal",
+		"X-Neubird-Upstream-X-Forwarded-User":      "admin",
+		"X-Neubird-Upstream-X-Neubird-Destination": "https://evil.example.com",
+		"X-Neubird-Upstream-Range":                 "bytes=0-1",
+	}
+	for _, tc := range []struct {
+		name, cfg string
+		want      map[string]string // upstream header: value ("" = absent)
+	}{
+		{"default *", "", map[string]string{
+			"Authorization": "Basic dTpw", "X-Sn-Apikey": "sn-key", "Dd-Api-Key": "dd",
+			"Cookie": "", "X-Forwarded-User": "", "X-Neubird-Destination": "", "Range": "",
+		}},
+		{"listed", "  credential_headers: [x-sn-apikey]\n", map[string]string{
+			"Authorization": "", "X-Sn-Apikey": "sn-key", "Dd-Api-Key": "", "Cookie": "",
+		}},
+	} {
+		f := newFixture(t, destinationsConfig+tc.cfg, func(w http.ResponseWriter, r *http.Request) {})
+		hdr := map[string]string{"X-Neubird-Destination": f.upstream}
+		for k, v := range sent {
+			hdr[k] = v
+		}
+		if resp, body := f.do(t, "GET", "/_neubird/dest/x", hdr); resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", tc.name, resp.StatusCode, body)
+		}
+		up := f.lastReq()
+		for k, v := range tc.want {
+			if got := up.Header.Get(k); got != v {
+				t.Errorf("%s: upstream %s = %q, want %q", tc.name, k, got, v)
+			}
+		}
+		if up.Host == "other.internal" {
+			t.Errorf("%s: Host was set by NeuBird", tc.name)
+		}
+		for k := range up.Header {
+			if strings.HasPrefix(k, "X-Neubird-") {
+				t.Errorf("%s: %s went upstream", tc.name, k)
+			}
+		}
+	}
+}
+
 func TestDestinationsRefused(t *testing.T) {
 	f := newFixture(t, destinationsConfig, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("request reached the upstream")
@@ -117,7 +170,8 @@ func TestDestinationsStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.Destinations == nil || st.Destinations.ClientAuth != "bearer" || strings.Join(st.Destinations.CredentialHeaders, ",") != "Authorization" {
+	// The default "*", with Authorization for agents that predate it.
+	if st.Destinations == nil || st.Destinations.ClientAuth != "bearer" || strings.Join(st.Destinations.CredentialHeaders, ",") != "*,Authorization" {
 		t.Fatalf("destinations: %+v", st.Destinations)
 	}
 	// Only how to send requests: no hosts, connections or upstreams.

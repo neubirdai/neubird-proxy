@@ -71,6 +71,11 @@ func (s *Server) serveStatus(w *recorder, r *http.Request) {
 	for h := range c.CredentialHeaderSet {
 		d.CredentialHeaders = append(d.CredentialHeaders, h)
 	}
+	if c.CredentialHeaderAny {
+		// "*", plus Authorization for NeuBird agents that predate "*": they
+		// move only the headers listed, so they still send that one.
+		d.CredentialHeaders = append(d.CredentialHeaders, "*", "Authorization")
+	}
 	sort.Strings(d.CredentialHeaders)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

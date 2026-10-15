@@ -193,8 +193,17 @@ func TestNeubirdDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := c.NeubirdDestinations
-	if !d.Conn.NeuBirdCredentials || !d.Conn.CredentialHeaderSet["Authorization"] || !d.AnyHost() {
+	// credential_headers defaults to "*", like hosts.
+	if !d.Conn.NeuBirdCredentials || !d.Conn.CredentialHeaderAny || len(d.Conn.CredentialHeaderSet) != 0 || !d.AnyHost() {
 		t.Fatalf("template: %+v", d.Conn)
+	}
+	// A list replaces the default.
+	c, err = Parse([]byte(base+"neubird_destinations:\n  hosts: ['*']\n  credential_headers: [Authorization, x-sn-apikey]\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn := c.NeubirdDestinations.Conn; cn.CredentialHeaderAny || !cn.CredentialHeaderSet["Authorization"] || !cn.CredentialHeaderSet["X-Sn-Apikey"] {
+		t.Fatalf("listed: %+v", cn)
 	}
 	// upstream_defaults.headers (the APIM key) must never reach other hosts.
 	if len(d.Conn.ResolvedHeaders) != 0 {
@@ -253,6 +262,8 @@ func TestNeubirdDestinations(t *testing.T) {
 		"bad port":        {"neubird_destinations:\n  hosts: ['x.y:99999']\n", "bad port"},
 		"nothing at all":  {"", "at least one connection (or neubird_destinations)"},
 		"customer header": {"neubird_destinations:\n  hosts: ['*']\n  credential_headers: [Cookie]\n", "cannot be set by NeuBird"},
+		"neubird header":  {"neubird_destinations:\n  hosts: ['*']\n  credential_headers: [X-Neubird-Destination]\n", "cannot be set by NeuBird"},
+		"star and more":   {"neubird_destinations:\n  hosts: ['*']\n  credential_headers: ['*', Authorization]\n", "list it alone"},
 	} {
 		_, err := Parse([]byte(base+tc.cfg), e)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
