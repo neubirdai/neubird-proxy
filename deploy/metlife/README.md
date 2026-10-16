@@ -116,7 +116,7 @@ In tunnel mode the proxy accepts no connections. With `--hosts` left at `*`, the
 | Outbound | Splunk (and other internal systems) | e.g. 8089 | Inside MetLife's network |
 | Outbound | `<instance>.service-now.com` | 443 | SaaS, no fixed addresses |
 
-**1. Kubernetes NetworkPolicy.** `--allow-cidrs` (or by hand: `networkPolicy.enabled: true`, `relayCIDRs` the relay IPs below as `/32`, `upstreams` your ranges) renders a policy with no ingress and egress only to DNS, the relay IPs on 443, and the listed ranges (plus the egress proxy). Also:
+**1. Kubernetes NetworkPolicy.** `--allow-cidrs` (or by hand: `networkPolicy.enabled: true`, uncomment `relayCIDRs` and `relayPorts` in `values.yaml`, `upstreams` your ranges) renders a policy with no ingress and egress only to DNS, the relay IPs on 443, and the listed ranges (plus the egress proxy). Also:
 - The cluster must enforce NetworkPolicy (AKS `--network-policy azure`, `calico` or `cilium`); without it the policy is stored but does nothing.
 - Deny everything else in the namespace by default:
   ```yaml
