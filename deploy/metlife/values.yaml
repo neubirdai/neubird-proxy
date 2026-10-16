@@ -6,7 +6,7 @@
 
 image:
   repository: docker.io/neubirdai/neubird-proxy
-  digest: sha256:fa9f434bcc23410abc87622985b69332f1ed63cb3bd31249ef41fdfb130b83c7
+  digest: sha256:d9890d66e909db238c6b6aa80226aa6691b8f7a56f17c68eaaafa7d56ee4bd64   # 4489ca0: accepts methods and credential_headers "*"
 replicaCount: 2
 
 mode: tunnel
