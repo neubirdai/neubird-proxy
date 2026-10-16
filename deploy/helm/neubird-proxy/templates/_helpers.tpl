@@ -1,3 +1,10 @@
+{{- /* An address for ipBlock.cidr: a bare IP becomes /32 (IPv4) or /128
+(IPv6); a CIDR is kept. */}}
+{{- define "neubird-proxy.cidr" -}}
+{{- $a := toString . | trim -}}
+{{- if contains "/" $a }}{{ $a }}{{ else if contains ":" $a }}{{ $a }}/128{{ else }}{{ $a }}/32{{ end -}}
+{{- end -}}
+
 {{- define "neubird-proxy.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

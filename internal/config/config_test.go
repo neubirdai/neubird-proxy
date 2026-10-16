@@ -193,8 +193,17 @@ func TestNeubirdDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := c.NeubirdDestinations
-	if !d.Conn.NeuBirdCredentials || !d.Conn.CredentialHeaderSet["Authorization"] || !d.AnyHost() {
+	// credential_headers defaults to "*", like hosts.
+	if !d.Conn.NeuBirdCredentials || !d.Conn.CredentialHeaderAny || len(d.Conn.CredentialHeaderSet) != 0 || !d.AnyHost() {
 		t.Fatalf("template: %+v", d.Conn)
+	}
+	// A list replaces the default.
+	c, err = Parse([]byte(base+"neubird_destinations:\n  hosts: ['*']\n  credential_headers: [Authorization, x-sn-apikey]\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn := c.NeubirdDestinations.Conn; cn.CredentialHeaderAny || !cn.CredentialHeaderSet["Authorization"] || !cn.CredentialHeaderSet["X-Sn-Apikey"] {
+		t.Fatalf("listed: %+v", cn)
 	}
 	// upstream_defaults.headers (the APIM key) must never reach other hosts.
 	if len(d.Conn.ResolvedHeaders) != 0 {
@@ -253,6 +262,8 @@ func TestNeubirdDestinations(t *testing.T) {
 		"bad port":        {"neubird_destinations:\n  hosts: ['x.y:99999']\n", "bad port"},
 		"nothing at all":  {"", "at least one connection (or neubird_destinations)"},
 		"customer header": {"neubird_destinations:\n  hosts: ['*']\n  credential_headers: [Cookie]\n", "cannot be set by NeuBird"},
+		"neubird header":  {"neubird_destinations:\n  hosts: ['*']\n  credential_headers: [X-Neubird-Destination]\n", "cannot be set by NeuBird"},
+		"star and more":   {"neubird_destinations:\n  hosts: ['*']\n  credential_headers: ['*', Authorization]\n", "list it alone"},
 	} {
 		_, err := Parse([]byte(base+tc.cfg), e)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -322,6 +333,30 @@ func TestHostMethods(t *testing.T) {
 	} {
 		if _, err := Parse([]byte(base+bad), e); err == nil {
 			t.Errorf("want an error for %q", bad)
+		}
+	}
+}
+
+// methods "*" allows every supported method, and must stand alone.
+func TestMethodsAny(t *testing.T) {
+	e := env(map[string]string{"TOKEN": tok})
+	base := "client_token_env: TOKEN\nneubird_destinations:\n  hosts: ['*']\n"
+	c, err := Parse([]byte(base+"  methods: ['*']\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := c.NeubirdDestinations.Conn.MethodSet
+	for _, m := range AllMethods {
+		if !ms[m] {
+			t.Errorf("%s not allowed", m)
+		}
+	}
+	if len(ms) != len(AllMethods) || ms["CONNECT"] || ms["TRACE"] {
+		t.Errorf("methods: %v", ms)
+	}
+	for _, bad := range []string{"['*', GET]", "[CONNECT]", "[TRACE]"} {
+		if _, err := Parse([]byte(base+"  methods: "+bad+"\n"), e); err == nil {
+			t.Errorf("want an error for methods %s", bad)
 		}
 	}
 }

@@ -123,10 +123,10 @@ podDisruptionBudget:
 # an outbound HTTP proxy if extraEnv sets one).
 networkPolicy:
   enabled: false
-  relayCIDRs: []           # mode tunnel: NeuBird's relay addresses, e.g. ["203.0.113.10/32"]
+  relayCIDRs: []           # mode tunnel: NeuBird's relay IPs (or CIDRs), e.g. ["203.0.113.10"]
   relayPorts: [443]        # mode tunnel: the relays' port(s)
   inboundFrom: []          # mode inbound: NetworkPolicyPeers allowed to reach 8443, e.g. [{ipBlock: {cidr: 10.30.0.0/24}}]
-  upstreams: []            # [{cidr: 10.20.0.0/16, ports: [443]}]
+  upstreams: []            # [{cidr: 10.20.0.0/16, ports: [443]}]; a bare IP is that one address
   metricsFrom: []          # NetworkPolicyPeers allowed to scrape :9090
   dnsPeers:                # where DNS is answered
     - namespaceSelector: {}

@@ -42,7 +42,8 @@ connection). In order; the first check that fails ends the request.
 4. **Destination.** The host must match `neubird_destinations.hosts`, or the
    request gets `403 destination_not_allowed`. This is checked after the
    token, so a caller without it learns nothing about the hosts.
-5. **Method allowlist.** GET and HEAD only, unless `methods` lists more.
+5. **Method allowlist.** GET and HEAD only, unless `methods` lists more
+   (`"*"`: GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS; never CONNECT or TRACE).
    Anything else gets a 405.
 6. **Rate limit.** Per pod, shared by every host, when `rate_limit` is set;
    over the limit gets a 429.
@@ -55,8 +56,9 @@ connection). In order; the first check that fails ends the request.
 8. **Headers.** Only allowlisted client headers go upstream. This drops the
    proxy token, cookies, `Ocp-Apim-Trace`, and `Accept-Encoding`/`Range`
    (bodies must arrive whole and uncompressed). The system's credentials
-   arrive as `X-Neubird-Upstream-<Header>` and are forwarded as `<Header>`,
-   only for the headers in `credential_headers`. The proxy adds an
+   arrive as `X-Neubird-Upstream-<Header>` and are forwarded as `<Header>`
+   (any header by default; only those listed if `credential_headers` lists
+   some). The proxy adds an
    `X-Request-Id`.
 9. **Connect.** Connections to loopback, link-local (including
    `169.254.169.254`), unspecified and multicast addresses, other cloud
@@ -226,11 +228,12 @@ NeuBird also knows the systems' hostnames: they're the URLs of its
 connections, and every request names one.
 
 How the proxy handles the systems' credentials:
-- **Only the headers you list.** NeuBird sends them as
-  `X-Neubird-Upstream-<Header>`; the proxy forwards only those in
-  `credential_headers` (default `Authorization`) and drops any other.
-  `Host`, `Cookie`, `X-Forwarded-*`, APIM trace headers and transport
-  headers can't be listed.
+- **Only as credential headers.** NeuBird sends them as
+  `X-Neubird-Upstream-<Header>` and the proxy forwards them as `<Header>`:
+  any header by default (`credential_headers: ["*"]`, like `hosts`), or
+  only those you list. `Host`, `Cookie`, `X-Forwarded-*`, `X-Neubird-*`,
+  APIM trace headers and transport headers are never forwarded, whatever
+  the setting.
 - **Only to allowed hosts.** A credential goes only to the host the request
   names, after the host check. The proxy never follows a redirect, so it
   never carries a credential to another host.
@@ -394,9 +397,9 @@ refuses to start. Unknown YAML fields are errors.
 | `max_concurrent_requests` | 256 | In-flight requests before the proxy returns 503 |
 | `max_concurrent_buffered` | 4 | Response bodies buffered for redaction at once; others wait |
 | `neubird_destinations.hosts` | `["*"]` | Host patterns NeuBird may name: `*`, `*.domain`, `host`, or an exact IP; each may end in `:port` |
-| `neubird_destinations.methods` | `[GET, HEAD]` | Allowed methods, for every host |
+| `neubird_destinations.methods` | `[GET, HEAD]` | Allowed methods, for every host; `"*"` is GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS |
 | `neubird_destinations.request_deny_patterns` | none | RE2 patterns; a match anywhere in the query or body, raw or URL-decoded, is refused |
-| `neubird_destinations.credential_headers` | `[Authorization]` | Headers NeuBird may set for the system, as `X-Neubird-Upstream-<Header>` |
+| `neubird_destinations.credential_headers` | `["*"]` | Headers NeuBird may set for the system, as `X-Neubird-Upstream-<Header>`: `"*"` is any header except those never allowed (`Host`, `Cookie`, `X-Forwarded-*`, `X-Neubird-*`, APIM trace and transport headers); a list allows only those |
 | `neubird_destinations.request_headers` | none | Client headers to forward in addition to the defaults (Accept, Content-Type, User-Agent, conditional and MCP headers). Credentials, cookies and APIM trace headers are refused |
 | `neubird_destinations.rate_limit` | none | `{requests_per_second, burst}` per pod, shared by every host |
 | `neubird_destinations.response_fields` | none | JSON field allowlist for every host's responses; see Redaction |

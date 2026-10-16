@@ -33,7 +33,7 @@ spec:
     {{- if not $inbound }}
     - to:
         {{- range $np.relayCIDRs }}
-        - ipBlock: {cidr: {{ . }}}
+        - ipBlock: {cidr: {{ include "neubird-proxy.cidr" . | quote }}}
         {{- end }}
       ports:
         {{- range ($np.relayPorts | default (list 443)) }}
@@ -41,7 +41,7 @@ spec:
         {{- end }}
     {{- end }}
     {{- range $np.upstreams }}
-    - to: [{ipBlock: {cidr: {{ .cidr }}}}]
+    - to: [{ipBlock: {cidr: {{ include "neubird-proxy.cidr" .cidr | quote }}}}]
       ports:
         {{- range .ports }}
         - {port: {{ . }}, protocol: TCP}

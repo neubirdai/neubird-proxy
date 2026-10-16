@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,10 @@ const (
 // DefaultMethods is the method allowlist when a connection sets none:
 // read-only.
 var DefaultMethods = []string{"GET", "HEAD"}
+
+// AllMethods are the methods a connection may allow; "*" allows them all.
+// CONNECT and TRACE never cross the proxy.
+var AllMethods = []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
 // DefaultRequestHeaders are the client request headers forwarded upstream.
 // Everything else (cookies, APIM trace and debug headers, X-Forwarded-*,
@@ -61,8 +66,9 @@ const (
 const UpstreamCredentialPrefix = "X-Neubird-Upstream-"
 
 // DefaultCredentialHeaders is what NeuBird may set in open mode when
-// neubird_destinations lists no credential_headers.
-var DefaultCredentialHeaders = []string{"Authorization"}
+// neubird_destinations lists no credential_headers: "*", any header
+// CredentialHeaderAllowed allows, as hosts defaults to any host.
+var DefaultCredentialHeaders = []string{"*"}
 
 // credentialHeaderDenied are headers NeuBird may never set, whatever
 // credential_headers says: they steer the transport, APIM or the audit trail.
@@ -72,6 +78,13 @@ var credentialHeaderDenied = map[string]bool{
 	"Upgrade": true, "Te": true, "Trailer": true, "X-Request-Id": true,
 	"Ocp-Apim-Trace": true, "Apim-Debug-Authorization": true,
 	"Accept-Encoding": true, "Range": true, "If-Range": true,
+}
+
+// CredentialHeaderAllowed reports whether NeuBird may set the canonical
+// header name ch upstream: never a denied header, X-Forwarded-* or one of
+// NeuBird's own X-Neubird-* headers, whatever credential_headers lists.
+func CredentialHeaderAllowed(ch string) bool {
+	return !credentialHeaderDenied[ch] && !strings.HasPrefix(ch, "X-Forwarded-") && !strings.HasPrefix(ch, "X-Neubird-")
 }
 
 const (
@@ -211,6 +224,9 @@ type Connection struct {
 	// CredentialHeaderSet holds the canonical upstream header names NeuBird
 	// may set (open mode only).
 	CredentialHeaderSet map[string]bool `yaml:"-"`
+	// CredentialHeaderAny: credential_headers is "*", so NeuBird may set
+	// any header CredentialHeaderAllowed allows (open mode only).
+	CredentialHeaderAny bool `yaml:"-"`
 }
 
 // NeubirdDestinations is open mode: requests to /_neubird/dest/<path> carry
@@ -685,8 +701,14 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		conn.MethodSet = map[string]bool{}
 		for _, m := range methods {
 			m = strings.ToUpper(m)
-			switch m {
-			case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+			switch {
+			case m == "*" && len(methods) > 1:
+				fail("%s: methods: \"*\" already allows every method; list it alone", where)
+			case m == "*":
+				for _, a := range AllMethods {
+					conn.MethodSet[a] = true
+				}
+			case slices.Contains(AllMethods, m):
 				conn.MethodSet[m] = true
 			default:
 				fail("%s: methods: unsupported method %q", where, m)
@@ -743,9 +765,14 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 			for _, h := range hs {
 				ch := http.CanonicalHeaderKey(h)
 				switch {
+				case h == "*" && len(hs) > 1:
+					fail("%s: credential_headers: \"*\" already allows every header; list it alone", where)
+				case h == "*":
+					conn.CredentialHeaderAny = true
+					continue
 				case !headerNameRe.MatchString(h):
 					fail("%s: credential_headers: %q is not a header name", where, h)
-				case credentialHeaderDenied[ch], strings.HasPrefix(ch, "X-Forwarded-"), strings.HasPrefix(ch, UpstreamCredentialPrefix):
+				case !CredentialHeaderAllowed(ch):
 					fail("%s: credential_headers: %s cannot be set by NeuBird", where, ch)
 				case conn.HeaderSet[ch]:
 					fail("%s: credential_headers: %s is also in request_headers", where, ch)

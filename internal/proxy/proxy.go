@@ -571,7 +571,7 @@ func (s *Server) parseDestination(v string) (*url.URL, string) {
 
 func allowHeader(c *config.Connection) string {
 	var ms []string
-	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+	for _, m := range config.AllMethods {
 		if c.MethodSet[m] {
 			ms = append(ms, m)
 		}
@@ -1106,6 +1106,15 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 			if vs := out.Header.Values(config.UpstreamCredentialPrefix + k); len(vs) > 0 {
 				h[k] = vs
 				st.credentials = "neubird"
+			}
+		}
+		if c.CredentialHeaderAny {
+			for k, vs := range out.Header {
+				name, ok := strings.CutPrefix(k, config.UpstreamCredentialPrefix)
+				if name = http.CanonicalHeaderKey(name); ok && name != "" && config.CredentialHeaderAllowed(name) {
+					h[name] = vs
+					st.credentials = "neubird"
+				}
 			}
 		}
 	}

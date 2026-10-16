@@ -57,7 +57,7 @@ Send NeuBird the key fingerprint from that summary (it isn't secret): NeuBird ch
 | `--egress-no-proxy` | no | Hosts reached directly rather than through `--egress-proxy` (the pod's `NO_PROXY`), e.g. `splunk.metlife.com,.metlife.com`. Your shell's own `NO_PROXY` isn't used |
 | `--upstream-ca` | no | CA bundle for systems whose certificates come from MetLife's internal CA |
 | `--allow-cidrs` | no | Turns on the NetworkPolicy: ranges the proxy may reach besides DNS and the relay, as `cidr:port,...`, e.g. `10.20.0.0/16:8089`. With `--egress-proxy`, also `--egress-proxy-cidr` |
-| `--mask` | no | `label` (default) or `hmac` (below) |
+| `--mask` | no | `hmac` (default, below) or `label` |
 | `--image-repo` | no | Your registry's copy of the image, if the cluster can't pull from Docker Hub. Keep the digest |
 | `--relay-ca` | no | Path to the relay CA certificate (default `relay-ca.crt`) |
 | `--timeout` | no | Seconds to wait for the tunnels (default 300) |
@@ -79,11 +79,11 @@ It passes when every confirmation line is `ok`; it exits non-zero otherwise. If 
 **Uninstalling.** `install.sh -c <ctx> -n neubird --uninstall` removes the proxy (the Helm release) and keeps two Secrets: the proxy's key (`neubird-proxy-tunnel-key`, its identity at the relay) and `neubird-proxy-env` (the HMAC key). A reinstall then needs no new join token, and the masking codes stay the same. `--uninstall --purge` deletes both Secrets too, after asking you to type the namespace (`--yes` skips the question, for scripts), and prints the key's fingerprint: send it to NeuBird so the relay revokes the key. A reinstall after a purge needs a new join token. Neither removes the namespace.
 
 Notes:
-- **ServiceNow** stays read-only: `*.service-now.com` is limited to GET and HEAD, under `*` too. Use a read-only API key (`x-sn-apikey`) or OAuth/basic auth.
+- **Methods:** every system may get any method (`"*"`: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS). Give each credential a read-only role (Splunk token, ServiceNow API key or OAuth/basic user): the roles, not the proxy, keep the systems read-only. The SPL deny patterns still apply.
 - **Splunk's certificate** must name the host NeuBird uses. Splunk's default certificate on 8089 names none and fails verification; its CA goes in `--upstream-ca`.
 - **Memory:** the values set a 768 Mi limit, so responses up to the 20 MiB `max_body_bytes` fit with either `--mask`; at a lower limit the proxy refuses larger responses (`body_too_large`) and logs a `risky configuration` warning.
 
-**HMAC masking (optional).** The proxy masks sensitive values in responses. With `--mask label` each becomes a label such as `[EMAIL]`. With `--mask hmac` each becomes a keyed code, so the same value always masks the same way and NeuBird can correlate it without seeing it. The script generates the key (`REDACTION_HMAC_KEY` in the Secret) if it isn't there. Keep it in MetLife's secret store and never send it to NeuBird: anyone with the key can test guesses against masked values. Leave it in place; changing it changes every code.
+**HMAC masking (the default).** The proxy masks sensitive values in responses. With `--mask hmac` each becomes a keyed code, so the same value always masks the same way and NeuBird can correlate it without seeing it. The script generates the key (`REDACTION_HMAC_KEY` in the Secret) if it isn't there. Keep it in MetLife's secret store and never send it to NeuBird: anyone with the key can test guesses against masked values. Leave it in place; changing it changes every code. With `--mask label` each value becomes a label such as `[EMAIL]` instead, and no key is needed.
 
 ### Install by hand
 
@@ -92,7 +92,8 @@ The same install without the script:
 ```sh
 kubectl create namespace neubird
 read -rs JOIN   # paste the join token; it isn't echoed or kept in shell history
-kubectl -n neubird create secret generic neubird-proxy-env --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN"
+kubectl -n neubird create secret generic neubird-proxy-env --from-literal=NEUBIRD_JOIN_TOKEN="$JOIN" \
+  --from-literal=REDACTION_HMAC_KEY="$(openssl rand -hex 32)"   # keep it; changing it changes every code
 unset JOIN
 helm install neubird-proxy deploy/helm/neubird-proxy -n neubird -f deploy/metlife/values.yaml \
   --set-file relayCA.cert=relay-ca.crt
@@ -115,7 +116,7 @@ In tunnel mode the proxy accepts no connections. With `--hosts` left at `*`, the
 | Outbound | Splunk (and other internal systems) | e.g. 8089 | Inside MetLife's network |
 | Outbound | `<instance>.service-now.com` | 443 | SaaS, no fixed addresses |
 
-**1. Kubernetes NetworkPolicy.** `--allow-cidrs` (or by hand: `networkPolicy.enabled: true`, `relayCIDRs` the relay IPs below as `/32`, `upstreams` your ranges) renders a policy with no ingress and egress only to DNS, the relay IPs on 443, and the listed ranges (plus the egress proxy). Also:
+**1. Kubernetes NetworkPolicy.** `--allow-cidrs` (or by hand: `networkPolicy.enabled: true`, uncomment `relayCIDRs` and `relayPorts` in `values.yaml`, `upstreams` your ranges) renders a policy with no ingress and egress only to DNS, the relay IPs on 443, and the listed ranges (plus the egress proxy). Also:
 - The cluster must enforce NetworkPolicy (AKS `--network-policy azure`, `calico` or `cilium`); without it the policy is stored but does nothing.
 - Deny everything else in the namespace by default:
   ```yaml

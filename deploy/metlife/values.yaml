@@ -1,13 +1,11 @@
-# neubird-proxy at MetLife: Helm values for the chart's tunnel mode. The proxy
-# dials out to NeuBird's relay; nothing connects in. No proxy token
-# (client_auth: none). install.sh builds the values from this file; to install
-# by hand, review hosts below. See README.md.
+# neubird-proxy at MetLife, tunnel mode: the proxy dials out to NeuBird's
+# relay; nothing connects in. install.sh builds the values from this file.
 #
 #   helm install neubird-proxy ./neubird-proxy -n neubird -f values.yaml \
 #     --set-file relayCA.cert=relay-ca.crt
 
 image:
-  repository: docker.io/neubirdai/neubird-proxy   # or your registry's copy, same digest
+  repository: docker.io/neubirdai/neubird-proxy
   digest: sha256:fa9f434bcc23410abc87622985b69332f1ed63cb3bd31249ef41fdfb130b83c7
 replicaCount: 2
 
@@ -15,62 +13,32 @@ mode: tunnel
 tunnel:
   relays: ["metlife-tunnel.cluster.neubird.ai:443"]
   tenant: metlife
-  proxy: metlife                  # named after the tenant; the join token is for it
+  proxy: metlife
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
-# Optional: MetLife's internal CA bundle, if Splunk's certificate comes from
-# it. It is added to the public CAs, so ServiceNow's certificate still verifies.
-# upstreamCA:
-#   cert: |
-#     -----BEGIN CERTIFICATE-----
-#     ...
-
 env:
-  existingSecret: neubird-proxy-env   # NEUBIRD_JOIN_TOKEN until enrolled (and REDACTION_HMAC_KEY for mask: hmac)
+  existingSecret: neubird-proxy-env   # REDACTION_HMAC_KEY; NEUBIRD_JOIN_TOKEN until enrolled
 
-# Responses are buffered up to max_body_bytes, sized from this limit (the
-# proxy refuses larger ones as body_too_large): 768Mi fits 20 MiB with either
-# mask, about 22 MiB with hmac and 28 MiB with label (640Mi stops at about
-# 18 MiB with hmac).
+# 768Mi fits 20 MiB responses (max_body_bytes).
 resources:
   requests: {cpu: 100m, memory: 128Mi}
   limits: {memory: 768Mi}
 
-# Optional: an outbound HTTP proxy for the relay tunnel and ServiceNow. A
-# forwarding proxy; one that inspects TLS breaks the tunnel. NO_PROXY keeps
-# Splunk direct.
-extraEnv: []
-#  - {name: HTTPS_PROXY, value: "http://<egress proxy>:3128"}
-#  - {name: NO_PROXY, value: "<splunk host>"}
-
 config:
   max_body_bytes: 20971520
   neubird_destinations:
-    # No proxy token: requests are accepted because they come down this
-    # proxy's own tunnels.
-    client_auth: none
-    # The systems the proxy will call: "*" is any host name it can reach
-    # (never IP literals, loopback, link-local or metadata addresses), so limit
-    # egress at the network, or list them, e.g. splunk.metlife.com:8089 (its
-    # certificate must name that host) and <instance>.service-now.com.
-    hosts: ["*"]
-    # Headers NeuBird's credentials travel in: Authorization (Splunk token,
-    # ServiceNow OAuth/basic) and x-sn-apikey (ServiceNow API key).
-    credential_headers: [Authorization, x-sn-apikey]
-    methods: [GET, HEAD, POST]    # POST for Splunk (MCP and searches)
-    # ServiceNow read-only: no POST, so no records can be created.
-    host_methods:
-      - {hosts: ["*.service-now.com"], methods: [GET, HEAD]}
-    # SPL commands that write, send, delete or reach other systems
-    # (rest calls Splunk's own REST API from inside a search).
+    hosts: ["*"]                  # any host name; limit egress at the network
+    methods: ["*"]
+    # SPL commands that write, send or reach other systems.
     request_deny_patterns:
       - "(?i)\\|\\s*(sendemail|sendalert|outputlookup|outputcsv|outputtext|collect|mcollect|meventcollect|tscollect|delete|script|run|runshellscript|map|rest|dbxoutput|dbxquery|sendresults)\\b"
     rate_limit: {requests_per_second: 10, burst: 30}
   redaction:
-    mask: label                   # or hmac, with REDACTION_HMAC_KEY (32+ characters) in the Secret
+    mask: hmac                    # or label (no key)
+    hmac_key_env: REDACTION_HMAC_KEY
 
-# Optional: lock egress down to DNS, the relay and your systems (see README,
-# Locking down the network). install.sh --allow-cidrs turns it on and fills
-# in the relay's IPs and your ranges.
+# install.sh --allow-cidrs turns it on.
 networkPolicy:
   enabled: false
+  # relayCIDRs: ["52.206.84.184", "23.23.64.142"]   # the relay's IPs
+  # relayPorts: [443]
