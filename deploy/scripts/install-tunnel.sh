@@ -98,14 +98,24 @@ step "enrollment and tunnels (up to ${TIMEOUT}s)"
 # records NeuBird just added take the relay up to a minute to load, so that
 # too fails only if it goes on for two minutes without an enrollment (a
 # minute to load, then the proxy's next try).
-end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""; ready=""; turned_away_at=""
+end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""; ready=""; turned_away_at=""; unknown_at=""
 while [ $SECONDS -lt $end ]; do
   logs=$(k logs -l "app.kubernetes.io/instance=$RELEASE" --tail=-1 2>/dev/null || true)
   grep -qE '"msg":"(enrolled with the join token|key already enrolled)"' <<<"$logs" && enrolled=1
   # "relay refused: <reason>" is the relay's answer; "relay refused the
   # enrollment (...)" is a connection error the proxy retries.
   r=$(grep -oE 'enrollment: relay refused: [^"]*' <<<"$logs" | tail -1 || true)
-  [ -n "$r" ] && [ -z "$enrolled" ] && die "$r (ask NeuBird for a new join token)"
+  if [ -n "$r" ] && [ -z "$enrolled" ]; then
+    # "unknown join token" can be a token NeuBird just recorded that this
+    # relay replica hasn't loaded yet (up to a minute; the proxy keeps
+    # trying): give it two minutes. Expired, used or another proxy's: final.
+    if [[ $r == *"unknown join token"* ]]; then
+      unknown_at=${unknown_at:-$SECONDS}
+      [ $((SECONDS - unknown_at)) -ge 120 ] && die "$r for two minutes (ask NeuBird to check the token is recorded, or for a new one)"
+    else
+      die "$r (ask NeuBird for a new join token)"
+    fi
+  fi
   a=$(grep -oE 'relay refused the enrollment \(is [^ ]+ in NeuBird' <<<"$logs" | tail -1 | sed -E 's/.*\(is ([^ ]+) in NeuBird/\1/' || true)
   if [ -n "$a" ] && [ -z "$enrolled" ]; then
     turned_away_at=${turned_away_at:-$SECONDS}
