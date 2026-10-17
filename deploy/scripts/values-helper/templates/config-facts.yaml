@@ -1,0 +1,6 @@
+{{- /* Fields of a running proxy's config.yaml (its ConfigMap), for
+       install.sh --confirm-only. */ -}}
+{{- $c := fromYaml (toYaml .Values) }}
+config_relays: {{ join "," (dig "tunnel" "relays" (list) $c) | b64enc | quote }}
+config_identity: {{ printf "%s/%s" (dig "tunnel" "tenant" "unknown" $c) (dig "tunnel" "proxy" "unknown" $c) | b64enc | quote }}
+config_hosts: {{ join "," (dig "neubird_destinations" "hosts" (list) $c) | b64enc | quote }}

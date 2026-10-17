@@ -1,0 +1,7 @@
+# Not installed: install.sh and install-tunnel.sh run `helm template` on it to
+# merge values files and read a few fields, so the installer needs nothing
+# beyond kubectl and helm (no Python or YAML tool).
+apiVersion: v2
+name: values-helper
+description: The installer's YAML helper (merge values, read fields); never installed
+version: 0.1.0

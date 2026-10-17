@@ -1,0 +1,14 @@
+{{- /* Fields of chart values (-f the chart's defaults, then the values),
+       one per line, base64 so any character survives a shell `read`. */ -}}
+{{- $v := fromYaml (toYaml .Values) }}
+{{- $d := dig "config" "neubird_destinations" (dict) $v }}
+{{- $proxy := "" }}
+{{- range (dig "extraEnv" (list) $v) }}{{ if eq (.name | default "") "HTTPS_PROXY" }}{{ $proxy = .value | default "" }}{{ end }}{{ end }}
+mode: {{ dig "mode" "" $v | toString | b64enc | quote }}
+secret: {{ dig "env" "existingSecret" "neubird-proxy-env" $v | toString | b64enc | quote }}
+relays: {{ join "," (dig "tunnel" "relays" (list) $v) | b64enc | quote }}
+token_env: {{ dig "tunnel" "joinTokenEnv" "" $v | toString | b64enc | quote }}
+mask: {{ dig "config" "redaction" "mask" "" $v | toString | b64enc | quote }}
+hosts: {{ join "," (dig "hosts" (list) $d) | b64enc | quote }}
+egress_proxy: {{ $proxy | toString | b64enc | quote }}
+network_policy: {{ dig "networkPolicy" "enabled" false $v | toString | b64enc | quote }}

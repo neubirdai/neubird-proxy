@@ -257,6 +257,7 @@ the ones you list in \`HOSTS\`. No proxy token.
 | \`neubird-proxy-image.spdx.json\` | The proxy image's SBOM (SPDX JSON): \`$image\` |$( [ -z "$cosign_pub" ] || printf '\n| `cosign.pub` | NeuBird'"'"'s image signing key (public), for the check below |')
 | \`deploy/metlife/install.sh\` | The installer: builds the values, installs and confirms (\`--help\`) |
 | \`deploy/scripts/install-tunnel.sh\` | Called by install.sh: Secret, install, enrollment, tests |
+| \`deploy/scripts/values.sh\`, \`values-helper/\` | Used by both: YAML through helm (a chart that's never installed) |
 
 **This package includes a secret:** \`join.token\`, a single-use join token for
 \`$TENANT/$PROXY\`, valid until $until.
@@ -288,7 +289,7 @@ The script waits for enrollment and the tunnels, tests the tunnel and each liste
 removes the spent join token from the Secret, then confirms the running proxy and
 prints its key fingerprint.
 
-Requires kubectl, helm 3 or later and python3 with PyYAML.
+Requires kubectl and helm 3 or later; nothing else (no Python).
 EOF
 if [ -n "$signed" ]; then
   cat >> "$P/README.md" <<EOF

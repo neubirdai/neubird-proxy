@@ -1,0 +1,3 @@
+{{- /* The values files, merged by Helm in order (later wins; maps merge, lists
+       are replaced). Shown with --show-only templates/merged.yaml. */ -}}
+{{- toYaml .Values }}
