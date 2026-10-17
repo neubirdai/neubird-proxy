@@ -32,7 +32,9 @@ host=${dest#oci://}; host=${host%%/*}
 echo "== $ref:$version"
 
 # One container does the login, the check and the push, so the login is
-# never written outside it. Exit 3 means the version is already there.
+# never written outside it. Exit 3 means the version is already there. Only
+# the container's own output is captured: docker's stderr (an image pull
+# prints its own Digest: line) goes straight to the log.
 rc=0
 out=$(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -e REGISTRY_USERNAME -e REGISTRY_PASSWORD -e DRY_RUN -e PLAIN_HTTP \
@@ -47,7 +49,7 @@ fi
 if helm show chart "$REF" --version "$VERSION" $plain >/dev/null 2>&1; then exit 3; fi
 if [ -n "${DRY_RUN:-}" ]; then echo "dry run: packaged, nothing pushed"; exit 0; fi
 helm push /tmp/out/*.tgz "$DEST" $plain 2>&1
-' 2>&1) || rc=$?
+') || rc=$?
 [ -z "$out" ] || printf '%s\n' "$out"
 
 case $rc in
@@ -61,7 +63,9 @@ case $rc in
 esac
 [ -z "${DRY_RUN:-}" ] || exit 0
 
-digest=$(printf '%s\n' "$out" | awk '$1 == "Digest:" {print $2; exit}')
+# helm push prints Pushed: <ref> then Digest: <chart digest>.
+digest=$(printf '%s\n' "$out" | awk '$1 == "Pushed:" {p = 1} p && $1 == "Digest:" {print $2; exit}')
+[ -n "$digest" ] || { echo "$0: helm push printed no digest" >&2; exit 1; }
 echo "ok    $ref:$version ($digest)"
 summary "### Published chart $ref:$version"
 summary ""
