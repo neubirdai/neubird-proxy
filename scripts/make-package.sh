@@ -307,7 +307,9 @@ First edit \`config.neubird_destinations.hosts\` in \`$TENANT-values.yaml\` if
 NeuBird should reach only some systems (default \`*\`: any host name). \`--wait\`
 returns once the proxy has enrolled its key and its tunnels are up (a pod is
 ready only with a tunnel up); \`helm test\` checks the tunnel and each listed host
-from inside the cluster. The join token is spent after that: your next
+from inside the cluster (if it says "not in the tenant records" within a minute
+of NeuBird making this package, the relay hasn't loaded the token yet: run it
+again). The join token is spent after that: your next
 \`helm upgrade ... -f $TENANT-values.yaml\` (without \`--set-file joinToken\`) drops it.
 \`helm uninstall\` keeps the proxy's key and HMAC key (two Secrets), so a
 reinstall needs no new token.

@@ -42,6 +42,10 @@ The replicas turn Ready once their tunnels are up: with a join token,
 
    helm test {{ .Release.Name }} -n {{ $ns }}
 
+(Within a minute of NeuBird recording your join token, the test can land on
+a relay replica that hasn't loaded it yet: "not in the tenant records". Run
+it again.)
+
 The tunnels and enrollment in the log:
 
    kubectl -n {{ $ns }} logs -l app.kubernetes.io/instance={{ .Release.Name }} --tail=-1 --prefix \
