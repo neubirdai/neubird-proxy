@@ -7,7 +7,8 @@
 #   JOIN_TOKEN_FILE=join.token deploy/scripts/install-tunnel.sh
 #
 # Optional: NAMESPACE (neubird), RELEASE (neubird-proxy), CHART (this repo's
-# chart, or a packaged .tgz), UPSTREAM_CA (a CA bundle for upstreamCA),
+# chart, a packaged .tgz, or an oci:// reference, with CHART_VERSION),
+# UPSTREAM_CA (a CA bundle for upstreamCA),
 # TIMEOUT (seconds to wait for the tunnels, 300). Nothing secret is printed.
 set -euo pipefail
 : "${KUBE_CONTEXT:?}" "${VALUES:?}" "${RELAY_CA:?}"
@@ -19,7 +20,9 @@ VALUES=$(abs "$VALUES"); RELAY_CA=$(abs "$RELAY_CA")
 NAMESPACE=${NAMESPACE:-neubird}
 RELEASE=${RELEASE:-neubird-proxy}
 CHART=${CHART:-$(CDPATH='' cd -P -- "$(dirname -- "$0")/../helm/neubird-proxy" >/dev/null && pwd -P)}
-[ -d "$CHART" ] || [ -f "$CHART" ] || CHART=$(abs "$CHART")
+case $CHART in oci://*) ;; *) [ -d "$CHART" ] || [ -f "$CHART" ] || CHART=$(abs "$CHART") ;; esac
+# --version for a chart in a registry; a directory or .tgz is one version.
+ver=(); [ -z "${CHART_VERSION:-}" ] || ver=(--version "$CHART_VERSION")
 TIMEOUT=${TIMEOUT:-300}
 # shellcheck source-path=SCRIPTDIR source=values.sh
 . "$(dirname -- "$0")/values.sh"
@@ -31,11 +34,11 @@ args=(-f "$VALUES" --set-file "relayCA.cert=$RELAY_CA")
 [ -n "${UPSTREAM_CA:-}" ] && args+=(--set-file "upstreamCA.cert=$UPSTREAM_CA")
 
 step "render"
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${args[@]}" >/dev/null || die "the values don't render"
+helm template "$RELEASE" "$CHART" ${ver[@]+"${ver[@]}"} -n "$NAMESPACE" "${args[@]}" >/dev/null || die "the values don't render"
 # The fields used below, from the chart's defaults overlaid with the values
 # (as helm merges them for the install), read through helm: no YAML tool.
 defaults=$(mktemp); trap 'rm -f "$defaults"' EXIT
-helm show values "$CHART" > "$defaults" || die "can't read the chart's default values"
+helm show values "$CHART" ${ver[@]+"${ver[@]}"} > "$defaults" || die "can't read the chart's default values"
 read_facts values-facts "$defaults" "$VALUES" || die "can't read the values (helm template)"
 SECRET=$fact_secret
 [ "$fact_mode" = tunnel ] || die "not a tunnel-only proxy (mode: tunnel)"
@@ -79,7 +82,7 @@ step "helm upgrade --install $RELEASE"
 # The pod template before the upgrade: if the upgrade leaves it unchanged, no
 # pod restarts (a replicaCount change bumps the generation but restarts none).
 tmpl_before=""; [ -n "$existed" ] && tmpl_before=$(k get "deploy/$existed" -o jsonpath='{.spec.template}')
-helm --kube-context "$KUBE_CONTEXT" upgrade --install "$RELEASE" "$CHART" -n "$NAMESPACE" "${args[@]}" >/dev/null
+helm --kube-context "$KUBE_CONTEXT" upgrade --install "$RELEASE" "$CHART" ${ver[@]+"${ver[@]}"} -n "$NAMESPACE" "${args[@]}" >/dev/null
 ok "installed"
 dep=$(find_dep); [ -n "$dep" ] || die "no Deployment for release $RELEASE"
 # Pods read the Secret only at start, and a Secret change alone doesn't roll

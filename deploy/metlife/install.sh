@@ -10,6 +10,8 @@ set -euo pipefail
 here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 pkg=$(dirname -- "$(dirname -- "$here")")
 orig=$(pwd -P)
+# The chart: this repo's, or (a package from NeuBird) CHART and
+# CHART_VERSION from the package's .env, an oci:// reference.
 chart=$here/../helm/neubird-proxy
 # shellcheck source-path=SCRIPTDIR source=../scripts/values.sh
 . "$here/../scripts/values.sh"
@@ -112,9 +114,13 @@ EOF
 }
 
 version() {
-  printf 'neubird-proxy chart %s (app %s)\n' \
-    "$(sed -nE 's/^version: *//p' "$chart/Chart.yaml")" \
-    "$(sed -nE 's/^appVersion: *"?([^"]*)"?.*/\1/p' "$chart/Chart.yaml")"
+  if [ -n "$(preset CHART)" ]; then
+    printf 'neubird-proxy chart %s, version %s\n' "$(preset CHART)" "$(preset CHART_VERSION)"
+  else
+    printf 'neubird-proxy chart %s (app %s)\n' \
+      "$(sed -nE 's/^version: *//p' "$chart/Chart.yaml")" \
+      "$(sed -nE 's/^appVersion: *"?([^"]*)"?.*/\1/p' "$chart/Chart.yaml")"
+  fi
   if [ -n "$envfile" ]; then
     printf 'package: tenant %s, relay %s\n' "$(preset TENANT)" "$(preset RELAY)"
   fi
@@ -505,7 +511,9 @@ printf '   hosts: %s\n   egress proxy: %s\n   network policy: %s | mask: %s\n' \
 if [ -n "${DRY_RUN:-}" ]; then
   args=(-f "$values" --set-file "relayCA.cert=$RELAY_CA")
   [ -n "${UPSTREAM_CA:-}" ] && args+=(--set-file "upstreamCA.cert=$UPSTREAM_CA")
-  helm template neubird-proxy "$chart" -n "$NAMESPACE" "${args[@]}" >/dev/null
+  ver=(); [ -z "${CHART_VERSION:-}" ] || ver=(--version "$CHART_VERSION")
+  helm template neubird-proxy "${CHART:-$chart}" ${ver[@]+"${ver[@]}"} -n "$NAMESPACE" "${args[@]}" >/dev/null \
+    || die "the values don't render (chart ${CHART:-$chart}${CHART_VERSION:+ $CHART_VERSION})"
   cp "$values" "$orig/neubird-proxy-values.yaml"
   echo "ok    renders; values written to $orig/neubird-proxy-values.yaml (dry run: nothing installed)"
   exit 0
