@@ -43,11 +43,14 @@ Install NeuBird's proxy (neubird-proxy) in a Kubernetes cluster and confirm it
 works. The proxy dials out to NeuBird's relay; nothing connects in.
 
 Usage:
-  $0 --kube-context <context> --namespace <namespace> [options]
+  $0 [--kube-context <context>] [--namespace <namespace>] [options]
 
-Required:
-  -c, --kube-context <context>   kubectl context of the cluster to install in
-  -n, --namespace <namespace>    namespace to install in (created if missing)
+Where:
+  -c, --kube-context <context>   kubectl context of the cluster to install in.
+                                 Default: the current context, after you
+                                 confirm it (required when not interactive)
+  -n, --namespace <namespace>    namespace to install in, created if missing.
+                                 Default: neubird
 
 Options:
       --hosts <list>             systems NeuBird may reach, comma-separated:
@@ -92,6 +95,7 @@ A package's presets (its .env file) win over the environment. --uninstall,
 --purge and --yes are taken only from the command line.
 
 Examples:
+  $0                                    # current context (asks first), namespace neubird
   $0 -c prod-aks -n neubird --join-token-file join.token
   $0 -c prod-aks -n neubird --hosts splunk.metlife.com:8089,metlife.service-now.com
   $0 -c prod-aks -n neubird --dry-run
@@ -159,8 +163,18 @@ apply() {
   for kv in ${opts[@]+"${opts[@]}"}; do printf -v "${kv%%=*}" '%s' "${kv#*=}"; export "${kv%%=*}"; done
 }
 apply
-[ -n "${KUBE_CONTEXT:-}" ] || bad "--kube-context is required"
-[ -n "${NAMESPACE:-}" ] || bad "--namespace is required"
+# Defaults: namespace neubird, and the current kubectl context once the
+# person running this confirms it (below, after the context is checked). A
+# script must name the context: the current one could be any cluster.
+defaulted=
+[ -n "${NAMESPACE:-}" ] || { NAMESPACE=neubird; defaulted+=" NAMESPACE"; }
+if [ -z "${KUBE_CONTEXT:-}" ] && [ -z "${DRY_RUN:-}" ]; then
+  command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
+  KUBE_CONTEXT=$(kubectl config current-context 2>/dev/null) || KUBE_CONTEXT=
+  [ -n "$KUBE_CONTEXT" ] || bad "kubectl has no current context: choose one with --kube-context"
+  [ -t 0 ] || bad "--kube-context is required when not running interactively (the current context is $KUBE_CONTEXT)"
+  defaulted+=" KUBE_CONTEXT"
+fi
 [ -z "${DRY_RUN:-}" ] || [ -z "${CONFIRM_ONLY:-}" ] || bad "--dry-run and --confirm-only don't go together"
 [ -z "${PURGE:-}" ] || [ -n "${UNINSTALL:-}" ] || bad "--purge goes with --uninstall"
 [ -z "${YES:-}" ] || [ -n "${PURGE:-}" ] || bad "--yes goes with --uninstall --purge"
@@ -176,8 +190,14 @@ fi
 case ${MASK:-hmac} in label|hmac) ;; *) bad "--mask must be label or hmac" ;; esac
 case ${TIMEOUT:-300} in ''|*[!0-9]*) bad "--timeout must be a number of seconds" ;; esac
 export KUBE_CONTEXT NAMESPACE
-origin() { [[ $from_env == *" $1"* ]] && printf ' (from $%s in your environment)' "$1"; return 0; }
-printf '== context %s%s, namespace %s%s\n' "$KUBE_CONTEXT" "$(origin KUBE_CONTEXT)" "$NAMESPACE" "$(origin NAMESPACE)"
+origin() {
+  if [[ $from_env == *" $1"* ]]; then printf ' (from $%s in your environment)' "$1"
+  elif [[ $defaulted == *" $1"* ]]; then
+    case $1 in KUBE_CONTEXT) printf ' (the current context)' ;; *) printf ' (the default)' ;; esac
+  fi
+  return 0
+}
+printf '== context %s%s, namespace %s%s\n' "${KUBE_CONTEXT:-(none: dry run)}" "$(origin KUBE_CONTEXT)" "$NAMESPACE" "$(origin NAMESPACE)"
 
 # Files given by the caller are relative to where they ran this; the script
 # works from the package directory, so make them absolute first.
@@ -238,6 +258,15 @@ if [ -z "${DRY_RUN:-}" ]; then
     printf 'FAIL  no kubectl context named %s%s\n      kubectl (KUBECONFIG=%s) has:\n' "$KUBE_CONTEXT" "$(origin KUBE_CONTEXT)" "${KUBECONFIG:-~/.kube/config}" >&2
     sed 's/^/        /' <<<"${contexts:-(none)}" >&2
     exit 1
+  fi
+  # The current context wasn't named: show where it points and ask, once,
+  # before anything is read or changed (--confirm-only changes nothing).
+  if [[ $defaulted == *" KUBE_CONTEXT"* ]] && [ -z "${CONFIRM_ONLY:-}" ]; then
+    server=$(kubectl config view --minify --context "$KUBE_CONTEXT" -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
+    printf '\nNo --kube-context given: use the current context %s (%s), namespace %s? [y/N] ' \
+      "$KUBE_CONTEXT" "${server:-server unknown}" "$NAMESPACE"
+    read -r answer || answer=
+    case $answer in y|Y|yes|Yes|YES) ;; *) die "not confirmed; nothing changed. Choose with --kube-context and --namespace" ;; esac
   fi
 fi
 

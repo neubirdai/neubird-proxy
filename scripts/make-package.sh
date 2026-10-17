@@ -266,8 +266,12 @@ the ones you list in \`HOSTS\`. No proxy token.
 
 \`\`\`sh
 tar xzf $name-with-token.tgz
-$name/deploy/metlife/install.sh --kube-context <context> --namespace <namespace>
+$name/deploy/metlife/install.sh
 \`\`\`
+
+It installs in your current kubectl context (it shows the context and asks
+first) and namespace \`neubird\`. To choose: \`--kube-context <context>\` and
+\`--namespace <namespace>\` (a script must give \`--kube-context\`).
 
 Common options (all of them: \`install.sh --help\`):
 
