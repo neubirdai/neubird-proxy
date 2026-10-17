@@ -204,3 +204,34 @@ an enrollment refusal minutes later. */}}
 {{- range (ternary (get ($nd | default dict) "hosts") (list) (kindIs "map" $nd) | default (list)) }}{{ if not (contains "*" .) }}{{ $urls = append $urls (printf "https://%s" .) }}{{ end }}{{ end -}}
 {{- join " " $urls -}}
 {{- end -}}
+
+{{- /* One container of the helm test pod. Args: ctx (the root), name, urls
+(space-separated https URLs; empty checks the tunnel). */}}
+{{- define "neubird-proxy.testContainer" -}}
+{{- $ := .ctx -}}
+- name: {{ .name }}
+  image: {{ include "neubird-proxy.image" $ }}
+  imagePullPolicy: {{ $.Values.image.pullPolicy }}
+  command: [/neubird-proxy]
+  args: [test, -config, /etc/neubird-proxy/config.yaml{{ range splitList " " .urls }}{{ if . }}, {{ . | quote }}{{ end }}{{ end }}]
+  envFrom:
+    - secretRef: {name: {{ include "neubird-proxy.envSecret" $ }}}
+  {{- with $.Values.extraEnv }}
+  env: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities: {drop: [ALL]}
+  volumeMounts:
+    - {name: config, mountPath: /etc/neubird-proxy/config.yaml, subPath: config.yaml, readOnly: true}
+    - {name: tunnel, mountPath: /etc/neubird-proxy/tunnel, readOnly: true}
+    - {name: ca, mountPath: /etc/neubird-proxy/ca, readOnly: true}
+    {{- if or $.Values.upstreamCA.cert $.Values.upstreamCA.existingConfigMap }}
+    - {name: upstream-ca, mountPath: /etc/neubird-proxy/upstream-ca, readOnly: true}
+    {{- end }}
+{{- end -}}

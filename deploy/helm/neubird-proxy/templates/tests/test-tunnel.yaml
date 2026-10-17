@@ -1,7 +1,7 @@
 {{- /* helm test <release>: the proxy's own check from a pod with the same
 config, key, CA and environment: the tunnel (mutual TLS accepted by the
 relay) and each listed host (DNS, TCP, TLS). No request is sent. Kept after
-it runs: kubectl logs <release>-test shows the result. */}}
+it runs: kubectl logs <release>-test --all-containers shows the result. */}}
 {{- if not (include "neubird-proxy.inbound" .) }}
 apiVersion: v1
 kind: Pod
@@ -28,32 +28,20 @@ spec:
     runAsGroup: 65532
     fsGroup: 65532
     seccompProfile: {type: RuntimeDefault}
+  {{- $urls := include "neubird-proxy.testURLs" . }}
+  {{- /* `neubird-proxy test` checks the tunnel only when given no hosts, so
+         the tunnel runs first (an init container: if it fails, the pod
+         fails), then the listed hosts. */}}
+  {{- if $urls }}
+  initContainers:
+    {{- include "neubird-proxy.testContainer" (dict "ctx" . "name" "tunnel" "urls" "") | nindent 4 }}
+  {{- end }}
   containers:
-    - name: test
-      image: {{ include "neubird-proxy.image" . }}
-      imagePullPolicy: {{ .Values.image.pullPolicy }}
-      command: [/neubird-proxy]
-      args: [test, -config, /etc/neubird-proxy/config.yaml{{ range splitList " " (include "neubird-proxy.testURLs" .) }}{{ if . }}, {{ . | quote }}{{ end }}{{ end }}]
-      envFrom:
-        - secretRef: {name: {{ include "neubird-proxy.envSecret" . }}}
-      {{- with .Values.extraEnv }}
-      env: {{- toYaml . | nindent 8 }}
-      {{- end }}
-      resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities: {drop: [ALL]}
-      volumeMounts:
-        - {name: config, mountPath: /etc/neubird-proxy/config.yaml, subPath: config.yaml, readOnly: true}
-        - {name: tunnel, mountPath: /etc/neubird-proxy/tunnel, readOnly: true}
-        - {name: ca, mountPath: /etc/neubird-proxy/ca, readOnly: true}
-        {{- if or .Values.upstreamCA.cert .Values.upstreamCA.existingConfigMap }}
-        - {name: upstream-ca, mountPath: /etc/neubird-proxy/upstream-ca, readOnly: true}
-        {{- end }}
+    {{- if $urls }}
+    {{- include "neubird-proxy.testContainer" (dict "ctx" . "name" "hosts" "urls" $urls) | nindent 4 }}
+    {{- else }}
+    {{- include "neubird-proxy.testContainer" (dict "ctx" . "name" "tunnel" "urls" "") | nindent 4 }}
+    {{- end }}
   volumes:
     - name: config
       configMap: {name: {{ include "neubird-proxy.fullname" . }}}

@@ -69,11 +69,16 @@ helm template p /chart "${args[@]}" --set env.existingSecret= --set joinToken="$
 grep -q '^  name: p-neubird-proxy-env$' "$W/own.yaml" || fail "no Secret p-neubird-proxy-env"
 grep -q "^  NEUBIRD_JOIN_TOKEN: $(printf '%s' "$tok" | base64 | tr -d '\n')$" "$W/own.yaml" || fail "join token not in the chart's Secret"
 grep -qE '^  REDACTION_HMAC_KEY: [A-Za-z0-9+/=]{20,}$' "$W/own.yaml" || fail "no generated REDACTION_HMAC_KEY with mask hmac"
-[ "$(grep -c 'secretRef: {name: p-neubird-proxy-env}' "$W/own.yaml")" = 2 ] || fail "the Deployment and the test pod must both read p-neubird-proxy-env"
+[ "$(grep -c 'secretRef: {name: p-neubird-proxy-env}' "$W/own.yaml")" -ge 2 ] || fail "the Deployment and the test pod must both read p-neubird-proxy-env"
 grep -q 'checksum/join-token:' "$W/own.yaml" || fail "no checksum/join-token on the pods"
 helm template p /chart "${args[@]}" --set env.existingSecret= --set config.redaction.mask=label > "$W/label.yaml" || fail "helm template (label mask)"
 ! grep -q 'REDACTION_HMAC_KEY:' "$W/label.yaml" || fail "a REDACTION_HMAC_KEY with mask label"
 grep -q 'helm.sh/hook: test' "$W/out.yaml" || fail "no helm test pod"
+# `neubird-proxy test` checks the tunnel only without host arguments: with
+# hosts listed, the tunnel must still be checked (an init container).
+grep -qE '^  initContainers:$' "$W/out.yaml" || fail "helm test: hosts listed but no tunnel init container"
+grep -qE '^      args: \[test, -config, /etc/neubird-proxy/config.yaml\]$' "$W/out.yaml" || fail "helm test: no tunnel check (test with no host arguments)"
+grep -qE '^      args: \[test, -config, /etc/neubird-proxy/config.yaml, "https://splunk.example.com:8089"\]$' "$W/out.yaml" || fail "helm test: listed hosts not checked"
 echo "ok    chart's own env Secret (join token, hmac key) and helm test"
 
 # Mode inbound: a listener with TLS and client certificates, no tunnel.
