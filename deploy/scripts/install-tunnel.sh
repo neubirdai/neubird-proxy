@@ -133,7 +133,15 @@ step "test the tunnel and each system"
 # Judge by the test's exit status; the filter only drops kubectl's websocket noise.
 ptest() { local out rc=0; out=$(k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml "$@" 2>&1) || rc=$?
   grep -v 'Unknown stream id' <<<"$out" || true; return $rc; }
-ptest || die "tunnel test failed"
+# A relay replica can refuse a just-recorded proxy for up to a minute (its
+# records reload): retry the tunnel test that long before failing.
+tries=0
+until out=$(ptest 2>&1); do
+  tries=$((tries + 1))
+  if [ "$tries" -ge 12 ] || ! grep -q 'relay refused' <<<"$out"; then printf '%s\n' "$out"; die "tunnel test failed"; fi
+  sleep 5
+done
+printf '%s\n' "$out"
 urls=; IFS=, read -r -a hosts <<<"$fact_hosts"
 for h in ${hosts[@]+"${hosts[@]}"}; do [[ $h == *'*'* ]] || urls+=${urls:+ }https://$h; done
 if [ -n "$urls" ]; then
