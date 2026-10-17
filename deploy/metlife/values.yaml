@@ -12,6 +12,8 @@ replicaCount: 2
 mode: tunnel
 tunnel:
   relays: ["metlife-tunnel.cluster.neubird.ai:443"]
+  # Still named until the pinned image is one that can leave them out (and
+  # the relays run neubird-relay #30): the image above requires them.
   tenant: metlife
   proxy: metlife
   joinTokenEnv: NEUBIRD_JOIN_TOKEN

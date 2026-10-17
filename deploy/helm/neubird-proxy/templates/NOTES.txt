@@ -33,7 +33,7 @@ the token at startup.
 {{- $envSecret := include "neubird-proxy.envSecret" . -}}
 {{- $proxyEnv := "" -}}
 {{- range .Values.extraEnv }}{{ if eq (upper .name) "HTTPS_PROXY" }}{{ $proxyEnv = .value }}{{ end }}{{ end -}}
-neubird-proxy: tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, relays {{ join ", " .Values.tunnel.relays }}.
+neubird-proxy: {{ if .Values.tunnel.tenant }}tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, {{ end }}relays {{ join ", " .Values.tunnel.relays }}.
 Image: {{ include "neubird-proxy.image" . }}
 
 The replicas turn Ready once their tunnels are up: with a join token,

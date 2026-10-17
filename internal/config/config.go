@@ -521,8 +521,11 @@ func (c *Config) resolve(lookupEnv func(string) (string, bool)) error {
 		if t.KeyFile == "" || t.CAFile == "" {
 			fail("tunnel: key_file and ca_file are required")
 		}
-		if t.CertFile == "" && (t.Tenant == "" || t.Proxy == "") {
-			fail("tunnel: tenant and proxy are required (or a cert_file naming them)")
+		// Optional: the relay knows the proxy by its key (and, enrolling, by
+		// its join token's record). Set, they're named in the certificate
+		// and the relay checks its records agree.
+		if (t.Tenant == "") != (t.Proxy == "") {
+			fail("tunnel: set both tenant and proxy, or neither (the relay then names the proxy from its records)")
 		}
 		if t.ConnectionsPerRelay == 0 {
 			t.ConnectionsPerRelay = DefaultTunnelConnectionsPerRelay

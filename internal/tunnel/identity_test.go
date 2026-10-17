@@ -34,6 +34,16 @@ func TestLoadMintsFromKey(t *testing.T) {
 	if !id.Minted || id.Tenant != "metlife" || id.Proxy != "aks-prod" {
 		t.Fatalf("identity %+v", id)
 	}
+	// Without tenant and proxy the minted certificate names nothing (no
+	// URI SAN): the relay knows the proxy by its key.
+	anon, err := Load(&config.Tunnel{KeyFile: cfg.KeyFile, CAFile: p.caFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if anon.Tenant != "" || anon.Proxy != "" || !anon.Minted || len(anon.Leaf.URIs) != 0 ||
+		anon.Leaf.Subject.CommonName != "neubird-proxy" || anon.Fingerprint != id.Fingerprint || !hasClientAuth(anon.Leaf) {
+		t.Fatalf("unnamed: %+v", anon)
+	}
 	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != "spiffe://neubird.ai/tenant/metlife/proxy/aks-prod" ||
 		len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth || leaf.IsCA {
 		t.Fatalf("minted: URIs %v EKU %v CA %v", leaf.URIs, leaf.ExtKeyUsage, leaf.IsCA)
