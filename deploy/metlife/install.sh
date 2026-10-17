@@ -448,6 +448,9 @@ trap 'rm -f "$values"' EXIT
 # The package's values.yaml plus these options, merged by helm (no YAML tool
 # needed): the options go in a small JSON values file, which Helm reads as
 # YAML; maps merge and lists are replaced, so each list here is complete.
+for v in TENANT PROXY_NAME RELAY RELAY_IPS HOSTS MASK EGRESS_PROXY EGRESS_NO_PROXY ALLOW_CIDRS EGRESS_PROXY_CIDR IMAGE_REPO; do
+  case ${!v:-} in *[[:cntrl:]]*) die "$v has a control character" ;; esac
+done
 hosts=(); h=
 IFS=, read -r -a parts <<<"$HOSTS"
 for h in ${parts[@]+"${parts[@]}"}; do
@@ -499,6 +502,9 @@ cat > "$overlay" <<EOF
  "networkPolicy": {$np_json}}
 EOF
 merge_values "$values" "$here/values.yaml" "$overlay" || die "can't merge the values (helm template)"
+# Label masking sets hmac_key_env to null in the options: drop the key, as
+# the chart's default would be dropped.
+[ "$hmac_env" != null ] || { sed '/^    hmac_key_env: null$/d' "$values" > "$values.tmp" && mv "$values.tmp" "$values"; }
 
 printf '== values for tenant %s, proxy %s, relay %s\n' "$TENANT" "$PROXY_NAME" "$RELAY"
 read_facts values-facts "$values" || die "can't read the values (helm template)"
