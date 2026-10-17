@@ -26,7 +26,17 @@ Allow outbound TCP 443 to the relay IPs **without TLS inspection**: the tunnel i
 
 ## Install
 
-Requires kubectl and helm 3 or later (nothing else: no Python), from a checkout with `relay-ca.crt` and the join token (in a file, e.g. `join.token`) next to it:
+**With helm alone** (a package from NeuBird): it ships `<tenant>-values.yaml` with the relay, tenant, CA and image preset. Set `config.neubird_destinations.hosts` there if NeuBird should reach only some systems, then:
+
+```sh
+helm install neubird-proxy neubird-proxy-<version>.tgz -n neubird --create-namespace \
+  -f <tenant>-values.yaml --set-file joinToken=join.token --wait
+helm test neubird-proxy -n neubird
+```
+
+The chart puts the join token (and, with hmac masking, a key it generates once and keeps) in Secret `neubird-proxy-env`; `--wait` returns once the key is enrolled and the tunnels are up, and `helm test` checks the tunnel and each listed host from inside the cluster. Later upgrades use `-f <tenant>-values.yaml` without the token, which drops it (it's spent). `helm uninstall` keeps the key and HMAC key Secrets, so a reinstall needs no new token. Argo CD or `helm template` can't see existing Secrets: set `tunnelKey.existingSecret` and `hmacKey` yourself there.
+
+**With the guided installer**, which adds clear messages for each failure, the host tests, removing the spent token and `--purge`. Requires kubectl and helm 3 or later (nothing else: no Python), from a checkout with `relay-ca.crt` and the join token (in a file, e.g. `join.token`) next to it:
 
 ```sh
 deploy/metlife/install.sh --kube-context <ctx> --namespace neubird --join-token-file join.token

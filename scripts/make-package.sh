@@ -252,6 +252,9 @@ src, ca, out, tenant, chart, sha = sys.argv[1:]
 v = yaml.safe_load(open(src))
 v.pop("env", None)                       # the chart's own Secret
 v["relayCA"] = {"cert": open(ca).read()}
+# NeuBird's presets first, then what the customer may change.
+first = ["image", "mode", "tunnel", "relayCA", "config", "extraEnv", "networkPolicy", "replicaCount", "resources"]
+v = {k: v[k] for k in first if k in v} | {k: x for k, x in v.items() if k not in first}
 class D(yaml.SafeDumper): pass
 D.add_representer(str, lambda d, s: d.represent_scalar("tag:yaml.org,2002:str", s, style="|" if "\n" in s else None))
 head = f"""# neubird-proxy for {tenant}, from NeuBird (package {sha[:7]}). Install:
