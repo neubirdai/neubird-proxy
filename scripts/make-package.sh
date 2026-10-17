@@ -297,7 +297,7 @@ head = f"""# neubird-proxy for {tenant}, from NeuBird (package {sha[:7]}). Insta
 # Always give --kube-context: without it helm uses the current context,
 # which could be any cluster.
 #
-# Preset by NeuBird, don't change: image, tunnel (relay, tenant, proxy) and
+# Preset by NeuBird, don't change: image, tunnel (the relay) and
 # relayCA. Yours to set: config.neubird_destinations.hosts (the systems
 # NeuBird may reach; "*" is any host name), and, added here when you need
 # them, extraEnv (an outbound HTTP proxy: HTTPS_PROXY, NO_PROXY),
@@ -319,7 +319,7 @@ the ones you list in \`HOSTS\`. No proxy token.
 
 | File | What |
 |---|---|
-| \`$TENANT-values.yaml\` | The chart's values for $TENANT: relay, tenant, CA and image preset; hosts and egress yours to set |
+| \`$TENANT-values.yaml\` | The chart's values for $TENANT: relay, CA and image preset; hosts and egress yours to set |
 | \`$TENANT.env\` | The relay, tenant and IPs, the chart, and $mask_text masking (preset); loaded by install.sh |
 | \`join.token\` | The join token (secret, single use) |
 | \`relay-ca.crt\` | The $TENANT relay CA (public) |
