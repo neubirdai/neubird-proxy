@@ -448,7 +448,6 @@ for h in ${parts[@]+"${parts[@]}"}; do
   [ -z "$h" ] || hosts+=("$h")
 done
 [ ${#hosts[@]} -gt 0 ] || die "HOSTS is empty"
-case ${MASK:-hmac} in hmac) hmac_env='"REDACTION_HMAC_KEY"' ;; *) hmac_env=null ;; esac
 [ -n "${EGRESS_PROXY:-}" ] || [ -z "${EGRESS_NO_PROXY:-}" ] || die "EGRESS_NO_PROXY is only used with EGRESS_PROXY"
 env_json=
 if [ -n "${EGRESS_PROXY:-}" ]; then
@@ -481,6 +480,12 @@ if [ -n "${ALLOW_CIDRS:-}" ]; then
   fi
   np_json="\"enabled\":true,\"relayCIDRs\":$(json_list "${relay_cidrs[@]}"),\"upstreams\":[$up]"
 fi
+# extraEnv and networkPolicy only when set: the chart's defaults (none, off)
+# don't need repeating in the values.
+extra_json=; [ -z "$env_json" ] || extra_json=",
+ \"extraEnv\": [$env_json]"
+if [ "$np_json" = '"enabled":false' ]; then np_json=; else np_json=",
+ \"networkPolicy\": {$np_json}"; fi
 image_json=; [ -z "${IMAGE_REPO:-}" ] || image_json="\"image\":{\"repository\":$(json_str "$IMAGE_REPO")},"
 overlay=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-options.XXXXXX")
 trap 'rm -f "$values" "$overlay"' EXIT
@@ -488,14 +493,9 @@ cat > "$overlay" <<EOF
 {${image_json}
  "tunnel": {"relays": $(json_list "$RELAY"), "tenant": $(json_str "$TENANT"), "proxy": $(json_str "$PROXY_NAME")},
  "config": {"neubird_destinations": {"hosts": $(json_list "${hosts[@]}")},
-            "redaction": {"mask": $(json_str "${MASK:-hmac}"), "hmac_key_env": $hmac_env}},
- "extraEnv": [$env_json],
- "networkPolicy": {$np_json}}
+            "redaction": {"mask": $(json_str "${MASK:-hmac}")}}${extra_json}${np_json}}
 EOF
 merge_values "$values" "$here/values.yaml" "$overlay" || die "can't merge the values (helm template)"
-# Label masking sets hmac_key_env to null in the options: drop the key, as
-# the chart's default would be dropped.
-[ "$hmac_env" != null ] || { sed '/^    hmac_key_env: null$/d' "$values" > "$values.tmp" && mv "$values.tmp" "$values"; }
 
 printf '== values for tenant %s, proxy %s, relay %s\n' "$TENANT" "$PROXY_NAME" "$RELAY"
 read_facts values-facts "$values" || die "can't read the values (helm template)"

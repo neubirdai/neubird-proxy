@@ -268,8 +268,10 @@ head = f"""# neubird-proxy for {tenant}, from NeuBird (package {sha[:7]}). Insta
 #
 # Preset by NeuBird, don't change: image, tunnel (relay, tenant, proxy) and
 # relayCA. Yours to set: config.neubird_destinations.hosts (the systems
-# NeuBird may reach; "*" is any host name), extraEnv (an outbound HTTP
-# proxy: HTTPS_PROXY, NO_PROXY), networkPolicy, resources, replicaCount.
+# NeuBird may reach; "*" is any host name), and, added here when you need
+# them, extraEnv (an outbound HTTP proxy: HTTPS_PROXY, NO_PROXY),
+# networkPolicy, resources, replicaCount. Only values that differ from the
+# chart's defaults are listed.
 """
 open(out, "w").write(head + yaml.dump(v, Dumper=D, sort_keys=False, default_flow_style=False))
 PY
