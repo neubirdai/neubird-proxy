@@ -21,7 +21,8 @@ RELEASE=${RELEASE:-neubird-proxy}
 CHART=${CHART:-$(CDPATH='' cd -P -- "$(dirname -- "$0")/../helm/neubird-proxy" >/dev/null && pwd -P)}
 [ -d "$CHART" ] || [ -f "$CHART" ] || CHART=$(abs "$CHART")
 TIMEOUT=${TIMEOUT:-300}
-SECRET=$(python3 -c "import yaml,sys; print((yaml.safe_load(open(sys.argv[1])).get('env') or {}).get('existingSecret') or 'neubird-proxy-env')" "$VALUES")
+# shellcheck source-path=SCRIPTDIR source=values.sh
+. "$(dirname -- "$0")/values.sh"
 k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
 step() { printf '\n== %s\n' "$*"; }
 ok() { printf 'ok    %s\n' "$*"; }
@@ -30,15 +31,17 @@ args=(-f "$VALUES" --set-file "relayCA.cert=$RELAY_CA")
 [ -n "${UPSTREAM_CA:-}" ] && args+=(--set-file "upstreamCA.cert=$UPSTREAM_CA")
 
 step "render"
-rendered=$(helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${args[@]}") || die "the values don't render"
-config=$(echo "$rendered" | python3 -c "
-import sys,yaml
-for d in yaml.safe_load_all(sys.stdin):
-    if d and d.get('kind')=='ConfigMap' and 'config.yaml' in (d.get('data') or {}): print(d['data']['config.yaml'])")
-grep -q '^listen: "off"' <<<"$config" || die "not a tunnel-only proxy (mode: tunnel)"
-ok "tunnel mode; relays $(python3 -c "import sys,yaml; print(', '.join(yaml.safe_load(sys.stdin)['tunnel']['relays']))" <<<"$config")"
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${args[@]}" >/dev/null || die "the values don't render"
+# The fields used below, from the chart's defaults overlaid with the values
+# (as helm merges them for the install), read through helm: no YAML tool.
+defaults=$(mktemp); trap 'rm -f "$defaults"' EXIT
+helm show values "$CHART" > "$defaults" || die "can't read the chart's default values"
+read_facts values-facts "$defaults" "$VALUES" || die "can't read the values (helm template)"
+SECRET=$fact_secret
+[ "$fact_mode" = tunnel ] || die "not a tunnel-only proxy (mode: tunnel)"
+ok "tunnel mode; relays ${fact_relays//,/, }"
 # The variable the proxy reads its join token from (tunnel.joinTokenEnv).
-TOKEN_ENV=$(python3 -c "import sys,yaml; print(yaml.safe_load(sys.stdin)['tunnel'].get('join_token_env') or '')" <<<"$config")
+TOKEN_ENV=$fact_token_env
 if [ -n "${JOIN_TOKEN_FILE:-}" ] && [ -z "$TOKEN_ENV" ]; then
   die "the values have no tunnel.joinTokenEnv, so the proxy would ignore the join token: set tunnel.joinTokenEnv: NEUBIRD_JOIN_TOKEN"
 fi
@@ -61,11 +64,13 @@ if [ -n "${JOIN_TOKEN_FILE:-}" ]; then
   grep -qE '^nbjt_[A-Za-z0-9_-]{43}$' "$JOIN_TOKEN_FILE" || die "$JOIN_TOKEN_FILE doesn't hold a join token"
   put "$TOKEN_ENV" "$JOIN_TOKEN_FILE"; ok "join token added as $TOKEN_ENV"; token_added=1
 fi
-if grep -q 'mask: hmac' <<<"$config"; then
+if [ "$fact_mask" = hmac ]; then
   have=$(k get secret "$SECRET" -o jsonpath='{.data.REDACTION_HMAC_KEY}')
   if [ -z "$have" ]; then
-    # python3 (already needed here), not openssl, which may not be installed.
-    t=$(mktemp); python3 -c 'import secrets,sys; sys.stdout.write(secrets.token_hex(32))' > "$t"
+    # 32 random bytes as hex, from the kernel (od and /dev/urandom are
+    # everywhere; openssl may not be installed).
+    t=$(mktemp); chmod 600 "$t"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$t"
+    [ "$(wc -c < "$t" | tr -d ' ')" = 64 ] || die "couldn't generate REDACTION_HMAC_KEY"
     put REDACTION_HMAC_KEY "$t"; rm -f "$t"; ok "REDACTION_HMAC_KEY generated"
   fi
 fi
@@ -93,14 +98,24 @@ step "enrollment and tunnels (up to ${TIMEOUT}s)"
 # records NeuBird just added take the relay up to a minute to load, so that
 # too fails only if it goes on for two minutes without an enrollment (a
 # minute to load, then the proxy's next try).
-end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""; ready=""; turned_away_at=""
+end=$((SECONDS + TIMEOUT)); enrolled=""; connected=0; refused_at=""; ready=""; turned_away_at=""; unknown_at=""
 while [ $SECONDS -lt $end ]; do
   logs=$(k logs -l "app.kubernetes.io/instance=$RELEASE" --tail=-1 2>/dev/null || true)
   grep -qE '"msg":"(enrolled with the join token|key already enrolled)"' <<<"$logs" && enrolled=1
   # "relay refused: <reason>" is the relay's answer; "relay refused the
   # enrollment (...)" is a connection error the proxy retries.
   r=$(grep -oE 'enrollment: relay refused: [^"]*' <<<"$logs" | tail -1 || true)
-  [ -n "$r" ] && [ -z "$enrolled" ] && die "$r (ask NeuBird for a new join token)"
+  if [ -n "$r" ] && [ -z "$enrolled" ]; then
+    # "unknown join token" can be a token NeuBird just recorded that this
+    # relay replica hasn't loaded yet (up to a minute; the proxy keeps
+    # trying): give it two minutes. Expired, used or another proxy's: final.
+    if [[ $r == *"unknown join token"* ]]; then
+      unknown_at=${unknown_at:-$SECONDS}
+      [ $((SECONDS - unknown_at)) -ge 120 ] && die "$r for two minutes (ask NeuBird to check the token is recorded, or for a new one)"
+    else
+      die "$r (ask NeuBird for a new join token)"
+    fi
+  fi
   a=$(grep -oE 'relay refused the enrollment \(is [^ ]+ in NeuBird' <<<"$logs" | tail -1 | sed -E 's/.*\(is ([^ ]+) in NeuBird/\1/' || true)
   if [ -n "$a" ] && [ -z "$enrolled" ]; then
     turned_away_at=${turned_away_at:-$SECONDS}
@@ -128,11 +143,17 @@ step "test the tunnel and each system"
 # Judge by the test's exit status; the filter only drops kubectl's websocket noise.
 ptest() { local out rc=0; out=$(k exec "deploy/$dep" -- /neubird-proxy test -config /etc/neubird-proxy/config.yaml "$@" 2>&1) || rc=$?
   grep -v 'Unknown stream id' <<<"$out" || true; return $rc; }
-ptest || die "tunnel test failed"
-urls=$(python3 -c "
-import sys,yaml
-c=yaml.safe_load(sys.stdin); h=(c.get('neubird_destinations') or {}).get('hosts') or []
-print(' '.join('https://'+x for x in h if '*' not in x))" <<<"$config")
+# A relay replica can refuse a just-recorded proxy for up to a minute (its
+# records reload): retry the tunnel test that long before failing.
+tries=0
+until out=$(ptest 2>&1); do
+  tries=$((tries + 1))
+  if [ "$tries" -ge 12 ] || ! grep -q 'relay refused' <<<"$out"; then printf '%s\n' "$out"; die "tunnel test failed"; fi
+  sleep 5
+done
+printf '%s\n' "$out"
+urls=; IFS=, read -r -a hosts <<<"$fact_hosts"
+for h in ${hosts[@]+"${hosts[@]}"}; do [[ $h == *'*'* ]] || urls+=${urls:+ }https://$h; done
 if [ -n "$urls" ]; then
   # shellcheck disable=SC2086
   ptest $urls || die "a system failed its test"

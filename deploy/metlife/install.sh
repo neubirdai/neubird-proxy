@@ -11,6 +11,8 @@ here=$(CDPATH='' cd -P -- "$(dirname -- "$0")" >/dev/null && pwd -P)
 pkg=$(dirname -- "$(dirname -- "$here")")
 orig=$(pwd -P)
 chart=$here/../helm/neubird-proxy
+# shellcheck source-path=SCRIPTDIR source=../scripts/values.sh
+. "$here/../scripts/values.sh"
 
 # A package from NeuBird presets the relay, tenant, CA and join token in
 # <tenant>.env next to deploy/; it's loaded below, so nothing is sourced by hand.
@@ -101,7 +103,7 @@ Examples:
   $0 -c prod-aks -n neubird --dry-run
   $0 -c prod-aks -n neubird --uninstall
 
-Requires kubectl, helm 3 or later and python3 with PyYAML.
+Requires kubectl and helm 3 or later.
 EOF
   if [ -n "$envfile" ]; then
     printf '\nThis package: tenant %s, relay %s, mask %s\n' "$(preset TENANT)" "$(preset RELAY)" "$(preset MASK)"
@@ -241,10 +243,6 @@ fi
 if [ -z "${CONFIRM_ONLY:-}${UNINSTALL:-}" ]; then
   [ -z "${UPSTREAM_CA:-}" ] || [ -f "$UPSTREAM_CA" ] || die "--upstream-ca $UPSTREAM_CA: no such file"
   [ -z "${JOIN_TOKEN_FILE:-}" ] || [ -f "$JOIN_TOKEN_FILE" ] || die "--join-token-file $JOIN_TOKEN_FILE: no such file"
-fi
-if [ -z "${UNINSTALL:-}" ]; then
-  command -v python3 >/dev/null 2>&1 || die "python3 not found"
-  python3 -c 'import yaml' 2>/dev/null || die "python3 can't import yaml: pip3 install PyYAML"
 fi
 [ -z "${PURGE:-}" ] || command -v openssl >/dev/null 2>&1 || die "openssl not found (--purge needs it for the key's fingerprint)"
 command -v helm >/dev/null 2>&1 || die "helm not found: https://helm.sh/docs/intro/install/"
@@ -399,13 +397,16 @@ confirm() {
   # Every lookup below may come back empty on a broken install: none may stop
   # the script (set -e), so each failure is reported as a FAIL line instead.
   cfg=$(k get configmap -l app.kubernetes.io/instance=neubird-proxy -o jsonpath='{range .items[*]}{.data.config\.yaml}{end}' 2>/dev/null || true)
-  read -r relay ident tested < <(python3 -c '
-import sys,yaml
-try:
-    c=yaml.safe_load(sys.stdin) or {}; t=c["tunnel"]; h=(c.get("neubird_destinations") or {}).get("hosts") or []
-    print(",".join(t["relays"]), t["tenant"]+"/"+t["proxy"], ",".join(x for x in h if "*" not in x) or "-")
-except Exception:
-    print("unknown unknown -")' <<<"$cfg") || true
+  relay=unknown ident=unknown tested=-
+  local cfgfile h hosts=(); cfgfile=$(mktemp)
+  printf '%s\n' "$cfg" > "$cfgfile"
+  if [ -n "$cfg" ] && read_facts config-facts "$cfgfile" 2>/dev/null; then
+    relay=${fact_config_relays:-unknown} ident=$fact_config_identity
+    IFS=, read -r -a hosts <<<"$fact_config_hosts"
+    tested=; for h in ${hosts[@]+"${hosts[@]}"}; do [[ $h == *'*'* ]] || tested+=${tested:+,}$h; done
+    tested=${tested:--}
+  fi
+  rm -f "$cfgfile"
   check() { if [ "$1" = ok ]; then printf '  ok    %s\n' "$2"; else printf '  FAIL  %s\n' "$2"; fails=$((fails + 1)); fi; }
   printf '\n== confirm (namespace %s)\n' "$NAMESPACE"
   want=$(k get "deploy/$dep" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
@@ -444,69 +445,71 @@ if [ -n "${CONFIRM_ONLY:-}" ]; then confirm; exit; fi
 
 values=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-values.XXXXXX")
 trap 'rm -f "$values"' EXIT
-TENANT=$TENANT RELAY=$RELAY RELAY_IPS=$RELAY_IPS HOSTS=$HOSTS \
-EGRESS_PROXY=${EGRESS_PROXY:-} NO_PROXY_HOSTS=${EGRESS_NO_PROXY:-} \
-EGRESS_PROXY_CIDR=${EGRESS_PROXY_CIDR:-} IMAGE_REPO=${IMAGE_REPO:-} \
-PROXY_NAME=$PROXY_NAME MASK=${MASK:-hmac} ALLOW_CIDRS=${ALLOW_CIDRS:-} \
-python3 - "$here/values.yaml" "$values" <<'PY'
-import os, sys, yaml
-src, out = sys.argv[1], sys.argv[2]
-e = os.environ
-def fail(msg): sys.exit("FAIL  " + msg)
-v = yaml.safe_load(open(src))
-if e["IMAGE_REPO"]:
-    v["image"]["repository"] = e["IMAGE_REPO"]
-v["tunnel"].update(relays=[e["RELAY"]], tenant=e["TENANT"], proxy=e["PROXY_NAME"])
-d = v["config"]["neubird_destinations"]
-hosts = [h.strip().lower() for h in e["HOSTS"].split(",") if h.strip()]
-if not hosts:
-    fail("HOSTS is empty")
-d["hosts"] = hosts
-if e["MASK"] not in ("label", "hmac"):
-    fail("MASK must be label or hmac")
-v["config"]["redaction"]["mask"] = e["MASK"]
-if e["MASK"] == "hmac":
-    v["config"]["redaction"]["hmac_key_env"] = "REDACTION_HMAC_KEY"
-else:
-    v["config"]["redaction"].pop("hmac_key_env", None)
-env = []
-if e["EGRESS_PROXY"]:
-    env.append({"name": "HTTPS_PROXY", "value": e["EGRESS_PROXY"]})
-    if e["NO_PROXY_HOSTS"]:
-        env.append({"name": "NO_PROXY", "value": e["NO_PROXY_HOSTS"]})
-elif e["NO_PROXY_HOSTS"]:
-    fail("EGRESS_NO_PROXY is only used with EGRESS_PROXY")
-v["extraEnv"] = env
-np = v.setdefault("networkPolicy", {})
-np["relayCIDRs"] = [ip.strip() + "/32" for ip in e["RELAY_IPS"].split(",") if ip.strip()]
-if e["ALLOW_CIDRS"]:
-    np["enabled"] = True
-    up = []
-    for item in e["ALLOW_CIDRS"].split(","):
-        item = item.strip()
-        if not item:
-            continue
-        cidr, sep, port = item.rpartition(":")
-        if not sep or "/" not in cidr or not port.isdigit():
-            fail(f"ALLOW_CIDRS entry {item!r}: expected cidr:port, e.g. 10.20.0.0/16:8089")
-        up.append({"cidr": cidr, "ports": [int(port)]})
-    if e["EGRESS_PROXY"]:
-        from urllib.parse import urlsplit
-        up.append({"cidr": e["EGRESS_PROXY_CIDR"], "ports": [urlsplit(e["EGRESS_PROXY"]).port or 3128]})
-    elif any(h.startswith("*") for h in hosts):
-        print("warn  wildcard HOSTS with the NetworkPolicy on and no EGRESS_PROXY: only names resolving into ALLOW_CIDRS are reachable", file=sys.stderr)
-    np["upstreams"] = up
-else:
-    np["enabled"] = False
-yaml.safe_dump(v, open(out, "w"), sort_keys=False)
-PY
+# The package's values.yaml plus these options, merged by helm (no YAML tool
+# needed): the options go in a small JSON values file, which Helm reads as
+# YAML; maps merge and lists are replaced, so each list here is complete.
+for v in TENANT PROXY_NAME RELAY RELAY_IPS HOSTS MASK EGRESS_PROXY EGRESS_NO_PROXY ALLOW_CIDRS EGRESS_PROXY_CIDR IMAGE_REPO; do
+  case ${!v:-} in *[[:cntrl:]]*) die "$v has a control character" ;; esac
+done
+hosts=(); h=
+IFS=, read -r -a parts <<<"$HOSTS"
+for h in ${parts[@]+"${parts[@]}"}; do
+  h=$(printf '%s' "$h" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  [ -z "$h" ] || hosts+=("$h")
+done
+[ ${#hosts[@]} -gt 0 ] || die "HOSTS is empty"
+case ${MASK:-hmac} in hmac) hmac_env='"REDACTION_HMAC_KEY"' ;; *) hmac_env=null ;; esac
+[ -n "${EGRESS_PROXY:-}" ] || [ -z "${EGRESS_NO_PROXY:-}" ] || die "EGRESS_NO_PROXY is only used with EGRESS_PROXY"
+env_json=
+if [ -n "${EGRESS_PROXY:-}" ]; then
+  env_json="{\"name\":\"HTTPS_PROXY\",\"value\":$(json_str "$EGRESS_PROXY")}"
+  [ -z "${EGRESS_NO_PROXY:-}" ] || env_json+=",{\"name\":\"NO_PROXY\",\"value\":$(json_str "$EGRESS_NO_PROXY")}"
+fi
+relay_cidrs=(); IFS=, read -r -a parts <<<"$RELAY_IPS"
+for h in ${parts[@]+"${parts[@]}"}; do h=$(printf '%s' "$h" | tr -d '[:space:]'); [ -z "$h" ] || relay_cidrs+=("$h/32"); done
+np_json="\"relayCIDRs\":$(json_list ${relay_cidrs[@]+"${relay_cidrs[@]}"})"
+if [ -n "${ALLOW_CIDRS:-}" ]; then
+  up=; IFS=, read -r -a parts <<<"$ALLOW_CIDRS"
+  for h in ${parts[@]+"${parts[@]}"}; do
+    h=$(printf '%s' "$h" | tr -d '[:space:]'); [ -n "$h" ] || continue
+    cidr=${h%:*} port=${h##*:}
+    [[ $h == *:* && $cidr == */* && $port =~ ^[0-9]+$ ]] || die "ALLOW_CIDRS entry '$h': expected cidr:port, e.g. 10.20.0.0/16:8089"
+    up+=${up:+,}"{\"cidr\":$(json_str "$cidr"),\"ports\":[$port]}"
+  done
+  if [ -n "${EGRESS_PROXY:-}" ]; then
+    [ -n "${EGRESS_PROXY_CIDR:-}" ] || die "--egress-proxy-cidr is needed with --allow-cidrs and --egress-proxy"
+    hp=${EGRESS_PROXY#*://}; hp=${hp%%/*}; hp=${hp##*@}; port=3128
+    [[ $hp =~ :([0-9]+)$ ]] && port=${BASH_REMATCH[1]}
+    up+=${up:+,}"{\"cidr\":$(json_str "$EGRESS_PROXY_CIDR"),\"ports\":[$port]}"
+  else
+    for h in "${hosts[@]}"; do
+      if [[ $h == '*'* ]]; then echo "warn  wildcard HOSTS with the NetworkPolicy on and no EGRESS_PROXY: only names resolving into ALLOW_CIDRS are reachable" >&2; break; fi
+    done
+  fi
+  np_json+=",\"enabled\":true,\"upstreams\":[$up]"
+else
+  np_json+=",\"enabled\":false"
+fi
+image_json=; [ -z "${IMAGE_REPO:-}" ] || image_json="\"image\":{\"repository\":$(json_str "$IMAGE_REPO")},"
+overlay=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-options.XXXXXX")
+trap 'rm -f "$values" "$overlay"' EXIT
+cat > "$overlay" <<EOF
+{${image_json}
+ "tunnel": {"relays": $(json_list "$RELAY"), "tenant": $(json_str "$TENANT"), "proxy": $(json_str "$PROXY_NAME")},
+ "config": {"neubird_destinations": {"hosts": $(json_list "${hosts[@]}")},
+            "redaction": {"mask": $(json_str "${MASK:-hmac}"), "hmac_key_env": $hmac_env}},
+ "extraEnv": [$env_json],
+ "networkPolicy": {$np_json}}
+EOF
+merge_values "$values" "$here/values.yaml" "$overlay" || die "can't merge the values (helm template)"
+# Label masking sets hmac_key_env to null in the options: drop the key, as
+# the chart's default would be dropped.
+[ "$hmac_env" != null ] || { sed '/^    hmac_key_env: null$/d' "$values" > "$values.tmp" && mv "$values.tmp" "$values"; }
 
 printf '== values for tenant %s, proxy %s, relay %s\n' "$TENANT" "$PROXY_NAME" "$RELAY"
-python3 -c "
-import sys,yaml; v=yaml.safe_load(open(sys.argv[1])); d=v['config']['neubird_destinations']
-print('   hosts:', ', '.join(d['hosts']))
-print('   egress proxy:', next((x['value'] for x in v['extraEnv'] if x['name']=='HTTPS_PROXY'), 'none'))
-print('   network policy:', 'on' if v['networkPolicy']['enabled'] else 'off', '| mask:', v['config']['redaction']['mask'])" "$values"
+read_facts values-facts "$values" || die "can't read the values (helm template)"
+printf '   hosts: %s\n   egress proxy: %s\n   network policy: %s | mask: %s\n' \
+  "${fact_hosts//,/, }" "${fact_egress_proxy:-none}" "$([ "$fact_network_policy" = true ] && echo on || echo off)" "$fact_mask"
 
 if [ -n "${DRY_RUN:-}" ]; then
   args=(-f "$values" --set-file "relayCA.cert=$RELAY_CA")

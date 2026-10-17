@@ -26,7 +26,7 @@ Allow outbound TCP 443 to the relay IPs **without TLS inspection**: the tunnel i
 
 ## Install
 
-Requires kubectl, helm 3 or later and python3 with PyYAML, from a checkout with `relay-ca.crt` and the join token (in a file, e.g. `join.token`) next to it:
+Requires kubectl and helm 3 or later (nothing else: no Python), from a checkout with `relay-ca.crt` and the join token (in a file, e.g. `join.token`) next to it:
 
 ```sh
 deploy/metlife/install.sh --kube-context <ctx> --namespace neubird --join-token-file join.token
