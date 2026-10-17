@@ -266,7 +266,7 @@ head = f"""# neubird-proxy for {tenant}, from NeuBird (package {sha[:7]}). Insta
 # Always give --kube-context: without it helm uses the current context,
 # which could be any cluster.
 #
-# Preset by NeuBird, don't change: image, tunnel (the relay) and
+# Preset by NeuBird, don't change: image, tunnel (relay, tenant, proxy) and
 # relayCA. Yours to set: config.neubird_destinations.hosts (the systems
 # NeuBird may reach; "*" is any host name), extraEnv (an outbound HTTP
 # proxy: HTTPS_PROXY, NO_PROXY), networkPolicy, resources, replicaCount.
