@@ -29,10 +29,12 @@ Allow outbound TCP 443 to the relay IPs **without TLS inspection**: the tunnel i
 **With helm alone** (a package from NeuBird): it ships `<tenant>-values.yaml` with the relay, tenant, CA and image preset. Set `config.neubird_destinations.hosts` there if NeuBird should reach only some systems, then:
 
 ```sh
-helm install neubird-proxy neubird-proxy-<version>.tgz -n neubird --create-namespace \
+helm install neubird-proxy neubird-proxy-<version>.tgz --kube-context <ctx> -n neubird --create-namespace \
   -f <tenant>-values.yaml --set-file joinToken=join.token --wait
-helm test neubird-proxy -n neubird
+helm test neubird-proxy --kube-context <ctx> -n neubird
 ```
+
+Always give `--kube-context`: without it helm uses whatever context is current.
 
 The chart puts the join token (and, with hmac masking, a key it generates once and keeps) in Secret `neubird-proxy-env`; `--wait` returns once the key is enrolled and the tunnels are up, and `helm test` checks the tunnel and each listed host from inside the cluster. Later upgrades use `-f <tenant>-values.yaml` without the token, which drops it (it's spent). `helm uninstall` keeps the key and HMAC key Secrets, so a reinstall needs no new token. Argo CD or `helm template` can't see existing Secrets: set `tunnelKey.existingSecret` and `hmacKey` yourself there.
 
@@ -42,7 +44,7 @@ The chart puts the join token (and, with hmac masking, a key it generates once a
 deploy/metlife/install.sh --kube-context <ctx> --namespace neubird --join-token-file join.token
 ```
 
-In a package from NeuBird, the relay, CA and join token are preset in its `<tenant>.env`, which the script loads itself: run `install.sh` with no options, from any directory, and it installs in your current kubectl context (after showing it and asking) and namespace `neubird`; `--kube-context` and `--namespace` choose others. `install.sh --help` lists every option.
+In a package from NeuBird, the relay, CA and join token are preset in its `<tenant>.env`, which the script loads itself: run `install.sh --kube-context <ctx>` from any directory (the namespace defaults to `neubird`; `--namespace` chooses another). `--kube-context` is always required: the current context is never used by default. `install.sh --help` lists every option.
 
 The script builds the values, creates the namespace and Secret, installs the chart, waits until the key is enrolled and the tunnels are up, tests the tunnel and each listed system, and removes the spent join token from the Secret. It then confirms the running proxy and ends with a summary:
 
@@ -59,7 +61,7 @@ Send NeuBird the key fingerprint from that summary (it isn't secret): NeuBird ch
 
 | Option | Required / default | What |
 |---|---|---|
-| `-c`, `--kube-context` | the current context, after you confirm it | kubectl context of the cluster; required when not running interactively (a script) |
+| `-c`, `--kube-context` | yes | kubectl context of the cluster (`kubectl config get-contexts`); never the current one by default |
 | `-n`, `--namespace` | `neubird` | Namespace to install in (created if missing) |
 | `--join-token-file` | first install | File holding the join token |
 | `--hosts` | no | The systems NeuBird may reach, comma-separated: `host[:port]`, `*.domain[:port]` or an IP; port 443 if omitted. Default `*`: any host name the proxy can reach (see Locking down the network) |

@@ -3,9 +3,10 @@
 #
 # A package from NeuBird ships <tenant>-values.yaml with all of that set, so
 # the first install is:
-#   helm install neubird-proxy neubird-proxy-<version>.tgz -n neubird --create-namespace \
-#     -f <tenant>-values.yaml --set-file joinToken=join.token --wait
-#   helm test neubird-proxy -n neubird
+#   helm install neubird-proxy neubird-proxy-<version>.tgz --kube-context <context> -n neubird \
+#     --create-namespace -f <tenant>-values.yaml --set-file joinToken=join.token --wait
+#   helm test neubird-proxy --kube-context <context> -n neubird
+# (always --kube-context: helm otherwise uses whatever context is current)
 
 # The image is shipped to you separately: load it into your registry and
 # point here, by digest (preferred) or tag.

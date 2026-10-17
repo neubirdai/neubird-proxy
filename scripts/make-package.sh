@@ -259,9 +259,12 @@ class D(yaml.SafeDumper): pass
 D.add_representer(str, lambda d, s: d.represent_scalar("tag:yaml.org,2002:str", s, style="|" if "\n" in s else None))
 head = f"""# neubird-proxy for {tenant}, from NeuBird (package {sha[:7]}). Install:
 #
-#   helm install neubird-proxy {chart} -n neubird --create-namespace \\
+#   helm install neubird-proxy {chart} --kube-context <context> -n neubird --create-namespace \\
 #     -f {tenant}-values.yaml --set-file joinToken=join.token --wait
-#   helm test neubird-proxy -n neubird
+#   helm test neubird-proxy --kube-context <context> -n neubird
+#
+# Always give --kube-context: without it helm uses the current context,
+# which could be any cluster.
 #
 # Preset by NeuBird, don't change: image, tunnel (relay, tenant, proxy) and
 # relayCA. Yours to set: config.neubird_destinations.hosts (the systems
@@ -301,10 +304,13 @@ the ones you list in \`HOSTS\`. No proxy token.
 
 \`\`\`sh
 tar xzf $name-with-token.tgz && cd $name
-helm install neubird-proxy $chart_tgz -n neubird --create-namespace \\
+helm install neubird-proxy $chart_tgz --kube-context <context> -n neubird --create-namespace \\
   -f $TENANT-values.yaml --set-file joinToken=join.token --wait
-helm test neubird-proxy -n neubird
+helm test neubird-proxy --kube-context <context> -n neubird
 \`\`\`
+
+Always give \`--kube-context\` (\`kubectl config get-contexts\` lists them):
+without it helm uses whatever context is current, which could be any cluster.
 
 First edit \`config.neubird_destinations.hosts\` in \`$TENANT-values.yaml\` if
 NeuBird should reach only some systems (default \`*\`: any host name). \`--wait\`
@@ -313,19 +319,18 @@ ready only with a tunnel up); \`helm test\` checks the tunnel and each listed ho
 from inside the cluster (if it says "not in the tenant records" within a minute
 of NeuBird making this package, the relay hasn't loaded the token yet: run it
 again). The join token is spent after that: your next
-\`helm upgrade ... -f $TENANT-values.yaml\` (without \`--set-file joinToken\`) drops it.
+\`helm upgrade ... --kube-context <context> -f $TENANT-values.yaml\` (without \`--set-file joinToken\`) drops it.
 \`helm uninstall\` keeps the proxy's key and HMAC key (two Secrets), so a
 reinstall needs no new token.
 
 ## Or the guided installer
 
 \`\`\`sh
-$name/deploy/metlife/install.sh
+$name/deploy/metlife/install.sh --kube-context <context>
 \`\`\`
 
-It installs in your current kubectl context (it shows the context and asks
-first) and namespace \`neubird\`. To choose: \`--kube-context <context>\` and
-\`--namespace <namespace>\` (a script must give \`--kube-context\`).
+\`--kube-context\` is required; the namespace defaults to \`neubird\`
+(\`--namespace\` to choose another).
 
 Common options (all of them: \`install.sh --help\`):
 
