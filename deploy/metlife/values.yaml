@@ -7,27 +7,25 @@
 image:
   repository: docker.io/neubirdai/neubird-proxy
   digest: sha256:d9890d66e909db238c6b6aa80226aa6691b8f7a56f17c68eaaafa7d56ee4bd64   # 4489ca0: accepts methods and credential_headers "*"
-replicaCount: 2
 
-mode: tunnel
+# Only what differs from the chart's defaults (mode tunnel, 2 replicas,
+# joinTokenEnv NEUBIRD_JOIN_TOKEN, NetworkPolicy off) and the proxy's
+# (max_body_bytes 20 MiB, hmac_key_env REDACTION_HMAC_KEY).
 tunnel:
   relays: ["metlife-tunnel.cluster.neubird.ai:443"]
   # Still named until the pinned image is one that can leave them out (and
   # the relays run neubird-relay #30): the image above requires them.
   tenant: metlife
   proxy: metlife
-  joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
 env:
   existingSecret: neubird-proxy-env   # REDACTION_HMAC_KEY; NEUBIRD_JOIN_TOKEN until enrolled
 
 # 768Mi fits 20 MiB responses (max_body_bytes).
 resources:
-  requests: {cpu: 100m, memory: 128Mi}
   limits: {memory: 768Mi}
 
 config:
-  max_body_bytes: 20971520
   neubird_destinations:
     hosts: ["*"]                  # any host name; limit egress at the network
     methods: ["*"]
@@ -37,8 +35,6 @@ config:
     rate_limit: {requests_per_second: 10, burst: 30}
   redaction:
     mask: hmac                    # or label (no key)
-    hmac_key_env: REDACTION_HMAC_KEY
 
-# install.sh --allow-cidrs turns it on (and adds the relay's IPs).
-networkPolicy:
-  enabled: false
+# The NetworkPolicy is off; install.sh --allow-cidrs turns it on (and adds the
+# relay's IPs).
