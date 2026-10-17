@@ -1,0 +1,69 @@
+{{- /* helm test <release>: the proxy's own check from a pod with the same
+config, key, CA and environment: the tunnel (mutual TLS accepted by the
+relay) and each listed host (DNS, TCP, TLS). No request is sent. Kept after
+it runs: kubectl logs <release>-test --all-containers shows the result. */}}
+{{- if not (include "neubird-proxy.inbound" .) }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "neubird-proxy.fullname" . }}-test
+  labels:
+    {{- include "neubird-proxy.labels" . | nindent 4 }}
+    # The proxy's NetworkPolicy selects these labels, so the test gets the
+    # same egress as the proxy.
+    app: {{ include "neubird-proxy.name" . }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "neubird-proxy.serviceAccountName" . }}
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile: {type: RuntimeDefault}
+  {{- $urls := include "neubird-proxy.testURLs" . }}
+  {{- /* `neubird-proxy test` checks the tunnel only when given no hosts, so
+         the tunnel runs first (an init container: if it fails, the pod
+         fails), then the listed hosts. */}}
+  {{- if $urls }}
+  initContainers:
+    {{- include "neubird-proxy.testContainer" (dict "ctx" . "name" "tunnel" "urls" "") | nindent 4 }}
+  {{- end }}
+  containers:
+    {{- if $urls }}
+    {{- include "neubird-proxy.testContainer" (dict "ctx" . "name" "hosts" "urls" $urls) | nindent 4 }}
+    {{- else }}
+    {{- include "neubird-proxy.testContainer" (dict "ctx" . "name" "tunnel" "urls" "") | nindent 4 }}
+    {{- end }}
+  volumes:
+    - name: config
+      configMap: {name: {{ include "neubird-proxy.fullname" . }}}
+    - name: tunnel
+      secret:
+        secretName: {{ include "neubird-proxy.keySecret" . }}
+        items: [{key: tunnel.key, path: tunnel.key}]
+        defaultMode: 0440
+    - name: ca
+      configMap:
+        name: {{ include "neubird-proxy.caConfigMap" . }}
+        items: [{key: relay-ca.crt, path: relay-ca.crt}]
+    {{- if or .Values.upstreamCA.cert .Values.upstreamCA.existingConfigMap }}
+    - name: upstream-ca
+      configMap:
+        name: {{ include "neubird-proxy.upstreamCAConfigMap" . }}
+        items: [{key: ca.crt, path: ca.crt}]
+    {{- end }}
+  {{- with .Values.nodeSelector }}
+  nodeSelector: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.tolerations }}
+  tolerations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
