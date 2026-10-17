@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Build the install package NeuBird sends a customer for a tenant: the proxy
-# chart, deploy/metlife/install.sh and its guide, <tenant>.env with the relay
-# preset, the relay CA, and a fresh join token for <tenant>/<tenant> that is
-# recorded on the tenant's relay first. NeuBird-internal; it isn't shipped.
+# Build the install package NeuBird sends a customer for a tenant:
+# <tenant>-values.yaml, deploy/metlife/install.sh and its guide, <tenant>.env
+# with the relay preset, the relay CA, and a fresh join token for
+# <tenant>/<tenant> that is recorded on the tenant's relay first. The chart
+# isn't in it: the customer installs it from its registry (--chart), at the
+# version this commit's Chart.yaml names, which must be published and match
+# this commit's chart. NeuBird-internal; it isn't shipped.
 #
 #   scripts/make-package.sh -t <tenant>
 #
@@ -49,6 +52,8 @@ Options:
                                  (default: what the relay's host name resolves to)
       --mask <hmac|label>        the package's masking preset (default: hmac)
       --ttl <duration>           how long the join token is valid (default: 72h)
+      --chart <oci://...>        the published chart (default:
+                                 oci://ghcr.io/neubirdai/charts/neubird-proxy)
       --ref <git ref>            the commit of this repo to package
                                  (default: origin/main, fetched first)
       --relay-repo <dir>         a neubird-relay checkout, for its join-token
@@ -64,6 +69,7 @@ EOF
 
 TENANT= RELAY_CA= RELAY_CONTEXT= RELAY_NS= RELAY= RELAY_IPS= MASK=hmac TTL=72h
 REF=origin/main RELAY_REPO=$HOME/git/neubird-relay OUT=$HOME/Downloads NO_RECORD= YES=
+CHART=oci://ghcr.io/neubirdai/charts/neubird-proxy
 while [ $# -gt 0 ]; do
   arg=$1; shift
   case $arg in
@@ -83,6 +89,7 @@ while [ $# -gt 0 ]; do
     --mask) MASK=$1 ;;
     --ttl) TTL=$1 ;;
     --ref) REF=$1 ;;
+    --chart) CHART=${1%/} ;;
     --relay-repo) RELAY_REPO=$1 ;;
     --out) OUT=$1 ;;
     *) bad "unknown option: $arg" ;;
@@ -103,6 +110,7 @@ fi
 [ -n "$RELAY_CA" ] || bad "--relay-ca is required ($cust/ca/relay-ca.crt doesn't exist: set the relay up with neubird-relay's scripts/setup-relay.sh)"
 [ -n "$NO_RECORD" ] || [ -n "$RELAY_CONTEXT" ] || bad "--relay-context is required (or --no-record): no $cust/relay.env"
 case $MASK in hmac|label) ;; *) bad "--mask must be hmac or label" ;; esac
+case $CHART in oci://*) ;; *) bad "--chart must be an oci:// reference" ;; esac
 [[ $RELAY_CA == /* ]] || RELAY_CA=$orig/$RELAY_CA
 [[ $OUT == /* ]] || OUT=$orig/$OUT
 RELAY_NS=${RELAY_NS:-$TENANT}
@@ -157,6 +165,26 @@ case $REF in origin/*) git -C "$repo" fetch -q origin ;; esac
 sha=$(git -C "$repo" rev-parse --short "$REF^{commit}") || die "--ref $REF: no such commit"
 ok "$(git -C "$repo" log -1 --format='%h %s' "$sha")"
 
+step "the chart"
+# The package names a published chart version, so that version must be this
+# commit's chart: pull it and compare it, file by file, with this commit's
+# chart packaged the same way (helm package rewrites Chart.yaml, so that one
+# is compared by name, version and appVersion).
+CHART_VERSION=$(git -C "$repo" show "$sha:deploy/helm/neubird-proxy/Chart.yaml" | sed -nE 's/^version: *"?([^"]*)"?.*/\1/p')
+[ -n "$CHART_VERSION" ] || die "no version in deploy/helm/neubird-proxy/Chart.yaml at $sha"
+C=$(mktemp -d); mkdir -p "$C/pub" "$C/src" "$C/ours"
+out=$(helm pull "$CHART" --version "$CHART_VERSION" -d "$C/pub" --untar 2>&1) \
+  || die "can't pull $CHART $CHART_VERSION (published? while the package is private: gh auth token | helm registry login ghcr.io -u <you> --password-stdin): $out"
+git -C "$repo" archive "$sha" deploy/helm/neubird-proxy | tar -x -C "$C/src"
+helm package "$C/src/deploy/helm/neubird-proxy" -d "$C/src" >/dev/null && tar -xzf "$C/src"/neubird-proxy-*.tgz -C "$C/ours"
+chartfacts() { sed -nE 's/^(name|version|appVersion): *"?([^"]*)"?.*/\1=\2/p' "$1/neubird-proxy/Chart.yaml" | sort; }
+if ! diff -r -x Chart.yaml "$C/pub/neubird-proxy" "$C/ours/neubird-proxy" >/dev/null || [ "$(chartfacts "$C/pub")" != "$(chartfacts "$C/ours")" ]; then
+  rm -rf "$C"
+  die "$CHART $CHART_VERSION isn't the chart at $sha: bump version in deploy/helm/neubird-proxy/Chart.yaml and let CI publish it, or package an older --ref"
+fi
+rm -rf "$C"
+ok "$CHART $CHART_VERSION is this commit's chart"
+
 step "the proxy image"
 image=$(git -C "$repo" show "$sha:deploy/metlife/values.yaml" | python3 -c 'import sys,yaml; i=yaml.safe_load(sys.stdin)["image"]; print(i["repository"]+"@"+i["digest"])')
 [[ $image == *@sha256:* ]] || die "deploy/metlife/values.yaml at $sha doesn't pin the image by digest: $image"
@@ -198,9 +226,7 @@ step "build the package"
 umask 022   # the package's files readable as usual; join.token stays 600
 B=$(mktemp -d); trap 'rm -rf "$B"' EXIT
 P=$B/$name; mkdir -p "$P"
-git -C "$repo" archive "$sha" deploy/helm deploy/metlife deploy/scripts | tar -x -C "$P"
-(cd "$P" && helm package deploy/helm/neubird-proxy >/dev/null)
-chart_tgz=$(cd "$P" && ls neubird-proxy-*.tgz)
+git -C "$repo" archive "$sha" deploy/metlife deploy/scripts | tar -x -C "$P"
 cp "$RELAY_CA" "$P/relay-ca.crt"; chmod 644 "$P/relay-ca.crt"
 install -m 600 "$WORK/join.token" "$P/join.token"
 # The image's SBOM (SPDX), for the customer's security review.
@@ -217,6 +243,10 @@ export RELAY='$RELAY'
 export RELAY_IPS='$RELAY_IPS'
 export RELAY_CA=relay-ca.crt
 # The proxy is $TENANT/$PROXY (named after the tenant); the join token is for it.
+
+# The chart, from NeuBird's registry.
+export CHART='$CHART'
+export CHART_VERSION='$CHART_VERSION'
 
 # The join token, included in this package (secret, single use).
 export JOIN_TOKEN_FILE=join.token
@@ -246,9 +276,9 @@ printf '\n# Everything else is an option of deploy/metlife/install.sh (see --hel
 G=$B/gen; mkdir -p "$G"; cp -Rp "$P" "$G/"
 out=$(cd "$G" && env -u KUBE_CONTEXT -u NAMESPACE -u MASK -u TENANT -u RELAY -u RELAY_IPS -u RELAY_CA -u JOIN_TOKEN_FILE -u HOSTS \
   "$G/$name/deploy/metlife/install.sh" -c values -n values --dry-run 2>&1) || die "couldn't build $TENANT-values.yaml (install.sh --dry-run): $out"
-python3 - "$G/neubird-proxy-values.yaml" "$P/relay-ca.crt" "$P/$TENANT-values.yaml" "$TENANT" "$chart_tgz" "$sha" <<'PY'
+python3 - "$G/neubird-proxy-values.yaml" "$P/relay-ca.crt" "$P/$TENANT-values.yaml" "$TENANT" "$CHART" "$CHART_VERSION" "$sha" <<'PY'
 import sys, yaml
-src, ca, out, tenant, chart, sha = sys.argv[1:]
+src, ca, out, tenant, chart, chart_version, sha = sys.argv[1:]
 v = yaml.safe_load(open(src))
 v.pop("env", None)                       # the chart's own Secret
 v["relayCA"] = {"cert": open(ca).read()}
@@ -259,7 +289,8 @@ class D(yaml.SafeDumper): pass
 D.add_representer(str, lambda d, s: d.represent_scalar("tag:yaml.org,2002:str", s, style="|" if "\n" in s else None))
 head = f"""# neubird-proxy for {tenant}, from NeuBird (package {sha[:7]}). Install:
 #
-#   helm install neubird-proxy {chart} --kube-context <context> -n neubird --create-namespace \\
+#   helm install neubird-proxy {chart} --version {chart_version} \\
+#     --kube-context <context> -n neubird --create-namespace \\
 #     -f {tenant}-values.yaml --set-file joinToken=join.token --wait
 #   helm test neubird-proxy --kube-context <context> -n neubird
 #
@@ -288,15 +319,17 @@ the ones you list in \`HOSTS\`. No proxy token.
 
 | File | What |
 |---|---|
-| \`$chart_tgz\` | The Helm chart, packaged (also unpacked under \`deploy/helm/\`) |
 | \`$TENANT-values.yaml\` | The chart's values for $TENANT: relay, tenant, CA and image preset; hosts and egress yours to set |
-| \`$TENANT.env\` | The relay, tenant and IPs, and $mask_text masking (preset); loaded by install.sh |
+| \`$TENANT.env\` | The relay, tenant and IPs, the chart, and $mask_text masking (preset); loaded by install.sh |
 | \`join.token\` | The join token (secret, single use) |
 | \`relay-ca.crt\` | The $TENANT relay CA (public) |
 | \`neubird-proxy-image.spdx.json\` | The proxy image's SBOM (SPDX JSON): \`$image\` |$( [ -z "$cosign_pub" ] || printf '\n| `cosign.pub` | NeuBird'"'"'s image signing key (public), for the check below |')
 | \`deploy/metlife/install.sh\` | The installer: builds the values, installs and confirms (\`--help\`) |
 | \`deploy/scripts/install-tunnel.sh\` | Called by install.sh: Secret, install, enrollment, tests |
 | \`deploy/scripts/values.sh\`, \`values-helper/\` | Used by both: YAML through helm (a chart that's never installed) |
+
+The chart isn't in the package: helm installs it from NeuBird's registry,
+\`$CHART\` version \`$CHART_VERSION\`.
 
 **This package includes a secret:** \`join.token\`, a single-use join token for
 \`$TENANT/$PROXY\`, valid until $until.
@@ -306,7 +339,8 @@ the ones you list in \`HOSTS\`. No proxy token.
 
 \`\`\`sh
 tar xzf $name-with-token.tgz && cd $name
-helm install neubird-proxy $chart_tgz --kube-context <context> -n neubird --create-namespace \\
+helm install neubird-proxy $CHART --version $CHART_VERSION \\
+  --kube-context <context> -n neubird --create-namespace \\
   -f $TENANT-values.yaml --set-file joinToken=join.token --wait
 helm test neubird-proxy --kube-context <context> -n neubird
 \`\`\`
@@ -349,7 +383,8 @@ The script waits for enrollment and the tunnels, tests the tunnel and each liste
 removes the spent join token from the Secret, then confirms the running proxy and
 prints its key fingerprint.
 
-Requires kubectl and helm 3 or later; nothing else (no Python).
+Requires kubectl and helm 3.8 or later (for charts from a registry);
+nothing else (no Python).
 EOF
 if [ -n "$signed" ]; then
   cat >> "$P/README.md" <<EOF
@@ -375,7 +410,7 @@ out=$(cd "$T" && env -u KUBE_CONTEXT -u NAMESPACE -u MASK -u TENANT -u RELAY -u 
 grep -q "values for tenant $TENANT, proxy $PROXY, relay $RELAY" <<<"$out" || die "the package's dry run didn't pick up its presets: $out"
 grep -q "mask: $MASK" <<<"$out" || die "the package's dry run has the wrong mask: $out"
 ok "a dry run from the package builds $TENANT's values (mask: $MASK)"
-out=$(helm template neubird-proxy "$T/$name/$chart_tgz" -n neubird -f "$T/$name/$TENANT-values.yaml" --set-file joinToken="$T/$name/join.token" 2>&1) \
+out=$(helm template neubird-proxy "$CHART" --version "$CHART_VERSION" -n neubird -f "$T/$name/$TENANT-values.yaml" --set-file joinToken="$T/$name/join.token" 2>&1) \
   || die "the package's helm install wouldn't render: $out"
 grep -q 'name: neubird-proxy-env' <<<"$out" && grep -q "NEUBIRD_JOIN_TOKEN:" <<<"$out" \
   || die "the helm install's env Secret has no join token"
