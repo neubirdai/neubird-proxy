@@ -6,16 +6,12 @@
 
 image:
   repository: docker.io/neubirdai/neubird-proxy
-  digest: sha256:d9890d66e909db238c6b6aa80226aa6691b8f7a56f17c68eaaafa7d56ee4bd64   # 4489ca0: accepts methods and credential_headers "*"
+  digest: sha256:65ec6cf7db3dd3b28905804355999ebd1d0bc28692abaa5231bd32f6941ca4fc   # c6addbe: no tenant/proxy needed (the relay names it)
 replicaCount: 2
 
 mode: tunnel
 tunnel:
   relays: ["metlife-tunnel.cluster.neubird.ai:443"]
-  # Still named until the pinned image is one that can leave them out (and
-  # the relays run neubird-relay #30): the image above requires them.
-  tenant: metlife
-  proxy: metlife
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
 env:
