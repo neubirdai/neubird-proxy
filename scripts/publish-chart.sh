@@ -8,7 +8,9 @@
 #   e.g. scripts/publish-chart.sh oci://ghcr.io/neubirdai/charts
 #
 # Customers then install with
-#   helm install neubird-proxy oci://ghcr.io/neubirdai/charts/neubird-proxy --version <version> ...
+#   helm install neubird-proxy oci://ghcr.io/neubirdai/charts/neubird-proxy --version <version> \
+#     --kube-context <context> -n neubird --create-namespace -f <tenant>-values.yaml \
+#     --set-file joinToken=join.token --wait
 #
 # Optional: REGISTRY_USERNAME and REGISTRY_PASSWORD (the registry login; CI
 # uses GITHUB_TOKEN), DRY_RUN=1 (package and check, push nothing),
@@ -64,4 +66,4 @@ echo "ok    $ref:$version ($digest)"
 summary "### Published chart $ref:$version"
 summary ""
 summary "- digest: \`$digest\`"
-summary "- install: \`helm install neubird-proxy $ref --version $version ...\`"
+summary "- install: \`helm install neubird-proxy $ref --version $version --kube-context <context> -n neubird --create-namespace -f <tenant>-values.yaml --set-file joinToken=join.token --wait\`"
