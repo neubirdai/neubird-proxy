@@ -497,7 +497,7 @@ overlay=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-options.XXXXXX")
 trap 'rm -f "$values" "$overlay"' EXIT
 cat > "$overlay" <<EOF
 {${image_json}
- "tunnel": {"relays": $(json_list "$RELAY"), "tenant": $(json_str "$TENANT"), "proxy": $(json_str "$PROXY_NAME")},
+ "tunnel": {"relays": $(json_list "$RELAY")},
  "config": {"neubird_destinations": {"hosts": $(json_list "${hosts[@]}")},
             "redaction": {"mask": $(json_str "${MASK:-hmac}")}}${extra_json}${np_json}}
 EOF

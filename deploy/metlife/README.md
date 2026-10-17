@@ -26,7 +26,7 @@ Allow outbound TCP 443 to the relay IPs **without TLS inspection**: the tunnel i
 
 ## Install
 
-**With helm alone** (a package from NeuBird): it ships `<tenant>-values.yaml` with the relay, tenant, CA and image preset. Set `config.neubird_destinations.hosts` there if NeuBird should reach only some systems, then:
+**With helm alone** (a package from NeuBird): it ships `<tenant>-values.yaml` with the relay, CA and image preset. Set `config.neubird_destinations.hosts` there if NeuBird should reach only some systems, then:
 
 ```sh
 helm install neubird-proxy oci://ghcr.io/neubirdai/charts/neubird-proxy --version <version> \
