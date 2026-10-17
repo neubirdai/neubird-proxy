@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:   # publish the image by hand (job publish)
+  workflow_dispatch:   # publish the image and the chart by hand (jobs publish, chart)
 
 permissions:
   contents: read
@@ -90,3 +90,39 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: scripts/publish-image.sh docker.io/neubirdai/neubird-proxy "${GITHUB_SHA::7}"
+
+  # On main, when the chart changed (deploy/helm/neubird-proxy), or by hand:
+  # package the chart and push it to GHCR as
+  # oci://ghcr.io/neubirdai/charts/neubird-proxy:<version in Chart.yaml>, so
+  # customers install it from there instead of a tarball in their package.
+  # A version already there is left alone (with a warning): bump version in
+  # Chart.yaml to publish a change.
+  chart:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency: publish-chart
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Did the chart change?
+        id: changed
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+             || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- deploy/helm/neubird-proxy; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"; echo "The chart didn't change: nothing to publish." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Package and push the chart
+        if: steps.changed.outputs.publish == 'true'
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/publish-chart.sh oci://ghcr.io/neubirdai/charts
