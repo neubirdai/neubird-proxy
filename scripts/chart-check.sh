@@ -55,10 +55,26 @@ grep -A5 'ipBlock: {cidr: "203.0.113.10/32"}' "$W/out.yaml" | grep -q 'port: 443
 for c in 198.51.100.0/30 2001:db8::1/128; do grep -qF "ipBlock: {cidr: \"$c\"}" "$W/out.yaml" || fail "relayCIDRs entry $c not rendered"; done
 echo "ok    chart renders a config this build accepts"
 
-for set in config.upstream_ca_file=/x image.repository= env.existingSecret= tunnelKey.generate=false networkPolicy.relayCIDRs=null tunnel.tenant=Bad_Name; do
+for set in config.upstream_ca_file=/x image.repository= tunnelKey.generate=false networkPolicy.relayCIDRs=null tunnel.tenant=Bad_Name joinToken=not-a-token \
+           env.existingSecret=,config.neubird_destinations.client_auth=bearer; do
   if helm template p /chart "${args[@]}" --set "$set" >/dev/null 2>&1; then fail "rendered with --set $set"; fi
 done
 echo "ok    missing or invalid required values are refused"
+
+# No env.existingSecret (the package's one-line helm install): the chart's own
+# Secret holds the join token and a generated hmac key, the pods and the
+# helm test pod read it, and a new token rolls the pods.
+tok=nbjt_$(printf 'a%.0s' $(seq 43))
+helm template p /chart "${args[@]}" --set env.existingSecret= --set joinToken="$tok" > "$W/own.yaml" || fail "helm template (chart's own env Secret)"
+grep -q '^  name: p-neubird-proxy-env$' "$W/own.yaml" || fail "no Secret p-neubird-proxy-env"
+grep -q "^  NEUBIRD_JOIN_TOKEN: $(printf '%s' "$tok" | base64 | tr -d '\n')$" "$W/own.yaml" || fail "join token not in the chart's Secret"
+grep -qE '^  REDACTION_HMAC_KEY: [A-Za-z0-9+/=]{20,}$' "$W/own.yaml" || fail "no generated REDACTION_HMAC_KEY with mask hmac"
+[ "$(grep -c 'secretRef: {name: p-neubird-proxy-env}' "$W/own.yaml")" = 2 ] || fail "the Deployment and the test pod must both read p-neubird-proxy-env"
+grep -q 'checksum/join-token:' "$W/own.yaml" || fail "no checksum/join-token on the pods"
+helm template p /chart "${args[@]}" --set env.existingSecret= --set config.redaction.mask=label > "$W/label.yaml" || fail "helm template (label mask)"
+! grep -q 'REDACTION_HMAC_KEY:' "$W/label.yaml" || fail "a REDACTION_HMAC_KEY with mask label"
+grep -q 'helm.sh/hook: test' "$W/out.yaml" || fail "no helm test pod"
+echo "ok    chart's own env Secret (join token, hmac key) and helm test"
 
 # Mode inbound: a listener with TLS and client certificates, no tunnel.
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
@@ -94,7 +110,7 @@ grep -q 'port: 8443' "$W/in.yaml" || fail "NetworkPolicy does not open 8443"
 if grep -q '^kind: Service$' "$W/out.yaml"; then fail "mode tunnel rendered a Service"; fi
 echo "ok    mode inbound renders a config this build accepts, with no tunnel"
 
-for set in mode=bogus inbound.tls.existingSecret= networkPolicy.inboundFrom=null 'tunnel.relays={r.example.com:443}' config.listen=:9443; do
+for set in mode=bogus env.existingSecret= inbound.tls.existingSecret= networkPolicy.inboundFrom=null 'tunnel.relays={r.example.com:443}' config.listen=:9443; do
   if helm template p /chart "${iargs[@]}" --set "$set" >/dev/null 2>&1; then fail "inbound rendered with --set $set"; fi
 done
 helm template p /chart -f /chart/ci/inbound-values.yaml --set inbound.tls.existingSecret= --set inbound.allowPlainHTTP=true >/dev/null \

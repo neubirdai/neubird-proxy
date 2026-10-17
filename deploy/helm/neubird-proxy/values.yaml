@@ -1,5 +1,11 @@
-# neubird-proxy chart values. Required: image, env, and for mode tunnel
-# (the default) tunnel and relayCA; for mode inbound, inbound.tls.
+# neubird-proxy chart values. Required: image, and for mode tunnel (the
+# default) tunnel and relayCA; for mode inbound, inbound.tls and env.
+#
+# A package from NeuBird ships <tenant>-values.yaml with all of that set, so
+# the first install is:
+#   helm install neubird-proxy neubird-proxy-<version>.tgz -n neubird --create-namespace \
+#     -f <tenant>-values.yaml --set-file joinToken=join.token --wait
+#   helm test neubird-proxy -n neubird
 
 # The image is shipped to you separately: load it into your registry and
 # point here, by digest (preferred) or tag.
@@ -46,10 +52,24 @@ tunnel:
   tenant: ""              # your NeuBird tenant
   proxy: ""               # a name for this deployment, e.g. aks-prod
   connectionsPerRelay: 2  # tunnels per replica; NeuBird monitors replicas × this
-  # The env var (in env.existingSecret) holding the join token NeuBird gave
-  # you. With it, the proxy enrolls its own key on first connect: nothing to
-  # send back. Without it (or empty), send NeuBird the key's fingerprint.
+  # The env var holding the join token (joinToken below, or your
+  # env.existingSecret). With it, the proxy enrolls its own key on first
+  # connect: nothing to send back. Without one, send NeuBird the key's
+  # fingerprint.
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
+
+# The join token NeuBird gave you, for the first install:
+# --set-file joinToken=join.token. Single use; once the key is enrolled it's
+# spent, and an upgrade without it drops it. Used when env.existingSecret is
+# empty (the chart's own Secret, below).
+joinToken: ""
+
+# hmac masking (config.redaction.mask: hmac) with the chart's own Secret: the
+# key is generated at install and kept across upgrades and reinstalls, so the
+# masking codes stay the same. Set it yourself only where the chart can't see
+# the existing Secret (helm template, Argo CD), or every render would make a
+# new key and change the codes.
+hmacKey: ""
 
 # The relay CA certificate NeuBird sends you (public). The proxy only
 # connects to a relay whose certificate this CA signed.
@@ -76,11 +96,15 @@ tunnelKey:
   generate: true
   existingSecret: ""      # a Secret with key tunnel.key
 
-# A Secret you create, loaded as environment: NEUBIRD_JOIN_TOKEN (until the
-# key is enrolled), REDACTION_HMAC_KEY if config.redaction uses hmac, and
-# NEUBIRD_PROXY_TOKEN in mode inbound (the token your gateway sends). Mode
-# tunnel needs no proxy token: every request comes down the proxy's own
-# tunnel, and neubird_destinations defaults to client_auth: none.
+# The proxy's secret environment: NEUBIRD_JOIN_TOKEN (until the key is
+# enrolled), REDACTION_HMAC_KEY if config.redaction uses hmac, and
+# NEUBIRD_PROXY_TOKEN when client_auth needs a token (always in mode inbound:
+# the token your gateway sends). Mode tunnel needs no proxy token: every
+# request comes down the proxy's own tunnel (client_auth: none).
+#
+# Empty (mode tunnel with client_auth none): the chart creates Secret
+# <fullname>-env from joinToken and hmacKey (kept on uninstall, so a
+# reinstall keeps the masking codes). Otherwise name a Secret you create.
 env:
   existingSecret: ""
 

@@ -1,5 +1,6 @@
-{{- if not .Values.env.existingSecret }}{{ fail "env.existingSecret is required: a Secret with NEUBIRD_PROXY_TOKEN (unless client_auth: none) and your connections' credentials" }}{{ end }}
 {{- $inbound := include "neubird-proxy.inbound" . }}
+{{- $envSecret := include "neubird-proxy.envSecret" . }}
+{{- if and .Values.env.existingSecret .Values.joinToken }}{{ fail (printf "joinToken goes into the chart's own Secret, which env.existingSecret (%s) replaces: put the token in that Secret as %s, or leave env.existingSecret empty" .Values.env.existingSecret .Values.tunnel.joinTokenEnv) }}{{ end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,6 +28,10 @@ spec:
         checksum/client-ca: {{ .Values.inbound.clientCA.cert | sha256sum }}
         {{- end }}
         checksum/upstream-ca: {{ .Values.upstreamCA.cert | sha256sum }}
+        {{- if not .Values.env.existingSecret }}
+        # Pods read the env Secret at start: a new join token rolls them.
+        checksum/join-token: {{ include "neubird-proxy.joinToken" . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{ end }}
     spec:
       serviceAccountName: {{ include "neubird-proxy.serviceAccountName" . }}
@@ -55,7 +60,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: [-config, /etc/neubird-proxy/config.yaml]
           envFrom:
-            - secretRef: {name: {{ .Values.env.existingSecret }}}
+            - secretRef: {name: {{ $envSecret }}}
           {{- with .Values.extraEnv }}
           env: {{- toYaml . | nindent 12 }}
           {{- end }}

@@ -30,24 +30,35 @@ the token at startup.
 {{- else -}}
 {{- $ns := .Release.Namespace -}}
 {{- $deploy := include "neubird-proxy.fullname" . -}}
+{{- $envSecret := include "neubird-proxy.envSecret" . -}}
 {{- $proxyEnv := "" -}}
 {{- range .Values.extraEnv }}{{ if eq (upper .name) "HTTPS_PROXY" }}{{ $proxyEnv = .value }}{{ end }}{{ end -}}
 neubird-proxy: tenant {{ .Values.tunnel.tenant }}, proxy {{ .Values.tunnel.proxy }}, relays {{ join ", " .Values.tunnel.relays }}.
 Image: {{ include "neubird-proxy.image" . }}
 
-The replicas turn Ready once their tunnels are up (don't use --wait the first
-time if NeuBird still has to record the key). Check the tunnels and enrollment:
+The replicas turn Ready once their tunnels are up: with a join token,
+--wait waits for the enrollment and the tunnels (without one, don't use
+--wait until NeuBird has recorded the key). Then check it end to end:
+
+   helm test {{ .Release.Name }} -n {{ $ns }}
+
+The tunnels and enrollment in the log:
 
    kubectl -n {{ $ns }} logs -l app.kubernetes.io/instance={{ .Release.Name }} --tail=-1 --prefix \
      | grep -E '"msg":"(starting|enrolled with the join token|key already enrolled|tunnel connected|tunnel connect failed|risky configuration)"'
 {{- if .Values.tunnel.joinTokenEnv }}
 
-With the join token ({{ .Values.tunnel.joinTokenEnv }} in Secret {{ .Values.env.existingSecret }}), the proxy
+With the join token ({{ .Values.tunnel.joinTokenEnv }} in Secret {{ $envSecret }}), the proxy
 enrolls its own key: nothing to send NeuBird. Once you see "enrolled with the
-join token" or "key already enrolled", remove it (it can't be used again):
+join token" or "key already enrolled", the token is spent (it can't be used
+again).
+{{- if .Values.env.existingSecret }} Remove it:
 
-   kubectl -n {{ $ns }} patch secret {{ .Values.env.existingSecret }} --type=json \
+   kubectl -n {{ $ns }} patch secret {{ $envSecret }} --type=json \
      -p '[{"op":"remove","path":"/data/{{ .Values.tunnel.joinTokenEnv }}"}]'
+{{- else }} Your next helm upgrade without --set-file joinToken drops it
+(use -f with your values file; --reuse-values would keep the token).
+{{- end }}
 
 If enrollment is refused (token expired or already used), ask NeuBird for a
 new token, or send them the key's fingerprint instead:
@@ -93,7 +104,7 @@ NeuBird to revoke the tunnel key at the relay.
 {{- else }}
 
 Then, in NeuBird's UI, create each connection with the URL NeuBird gives you,
-and the auth token = NEUBIRD_PROXY_TOKEN in Secret {{ .Values.env.existingSecret }}.
+and the auth token = NEUBIRD_PROXY_TOKEN in Secret {{ $envSecret }}.
 
 Revoke access at any time by scaling this Deployment to 0, or by changing
 NEUBIRD_PROXY_TOKEN and restarting it (kubectl rollout restart): pods read

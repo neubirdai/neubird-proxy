@@ -170,3 +170,37 @@ client_auth_header). */ -}}
 {{- end -}}
 {{- toYaml $cfg -}}
 {{- end -}}
+
+{{- /* The proxy's env Secret: env.existingSecret, or the chart's own
+(templates/secret-env.yaml), which mode tunnel with client_auth none can
+use. Anything needing a proxy token must name a Secret holding it. */}}
+{{- define "neubird-proxy.envSecret" -}}
+{{- if .Values.env.existingSecret -}}
+{{- .Values.env.existingSecret -}}
+{{- else if include "neubird-proxy.inbound" . -}}
+{{- fail "env.existingSecret is required in mode inbound: a Secret with NEUBIRD_PROXY_TOKEN, the token your gateway sends" -}}
+{{- else if not (include "neubird-proxy.noToken" .) -}}
+{{- fail "env.existingSecret is required: config.neubird_destinations.client_auth needs a proxy token (NEUBIRD_PROXY_TOKEN in a Secret you create)" -}}
+{{- else -}}
+{{- printf "%s-env" (include "neubird-proxy.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* The join token, trimmed and checked: a wrong file fails here, not as
+an enrollment refusal minutes later. */}}
+{{- define "neubird-proxy.joinToken" -}}
+{{- $t := .Values.joinToken | default "" | trim -}}
+{{- if $t -}}
+{{- if not (regexMatch "^nbjt_[A-Za-z0-9_-]{43}$" $t) -}}{{- fail "joinToken doesn't look like a NeuBird join token (nbjt_...): pass the join.token file from your package with --set-file joinToken=join.token" -}}{{- end -}}
+{{- if not .Values.tunnel.joinTokenEnv -}}{{- fail "joinToken is set but tunnel.joinTokenEnv is empty, so the proxy would never read it" -}}{{- end -}}
+{{- end -}}
+{{- $t -}}
+{{- end -}}
+
+{{- /* Non-wildcard neubird_destinations hosts as https URLs, for tests. */}}
+{{- define "neubird-proxy.testURLs" -}}
+{{- $urls := list -}}
+{{- $nd := get (.Values.config | default dict) "neubird_destinations" -}}
+{{- range (ternary (get ($nd | default dict) "hosts") (list) (kindIs "map" $nd) | default (list)) }}{{ if not (contains "*" .) }}{{ $urls = append $urls (printf "https://%s" .) }}{{ end }}{{ end -}}
+{{- join " " $urls -}}
+{{- end -}}
