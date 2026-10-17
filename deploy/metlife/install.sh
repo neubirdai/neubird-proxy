@@ -455,10 +455,13 @@ if [ -n "${EGRESS_PROXY:-}" ]; then
   env_json="{\"name\":\"HTTPS_PROXY\",\"value\":$(json_str "$EGRESS_PROXY")}"
   [ -z "${EGRESS_NO_PROXY:-}" ] || env_json+=",{\"name\":\"NO_PROXY\",\"value\":$(json_str "$EGRESS_NO_PROXY")}"
 fi
-relay_cidrs=(); IFS=, read -r -a parts <<<"$RELAY_IPS"
-for h in ${parts[@]+"${parts[@]}"}; do h=$(printf '%s' "$h" | tr -d '[:space:]'); [ -z "$h" ] || relay_cidrs+=("$h/32"); done
-np_json="\"relayCIDRs\":$(json_list ${relay_cidrs[@]+"${relay_cidrs[@]}"})"
+# The relay's IPs go in the values only with the NetworkPolicy on: off, they'd
+# be our addresses in the customer's values for nothing.
+np_json='"enabled":false'
 if [ -n "${ALLOW_CIDRS:-}" ]; then
+  relay_cidrs=(); IFS=, read -r -a parts <<<"$RELAY_IPS"
+  for h in ${parts[@]+"${parts[@]}"}; do h=$(printf '%s' "$h" | tr -d '[:space:]'); [ -z "$h" ] || relay_cidrs+=("$h/32"); done
+  [ ${#relay_cidrs[@]} -gt 0 ] || die "RELAY_IPS is empty: the NetworkPolicy (--allow-cidrs) needs the relay's IPs"
   up=; IFS=, read -r -a parts <<<"$ALLOW_CIDRS"
   for h in ${parts[@]+"${parts[@]}"}; do
     h=$(printf '%s' "$h" | tr -d '[:space:]'); [ -n "$h" ] || continue
@@ -476,9 +479,7 @@ if [ -n "${ALLOW_CIDRS:-}" ]; then
       if [[ $h == '*'* ]]; then echo "warn  wildcard HOSTS with the NetworkPolicy on and no EGRESS_PROXY: only names resolving into ALLOW_CIDRS are reachable" >&2; break; fi
     done
   fi
-  np_json+=",\"enabled\":true,\"upstreams\":[$up]"
-else
-  np_json+=",\"enabled\":false"
+  np_json="\"enabled\":true,\"relayCIDRs\":$(json_list "${relay_cidrs[@]}"),\"upstreams\":[$up]"
 fi
 image_json=; [ -z "${IMAGE_REPO:-}" ] || image_json="\"image\":{\"repository\":$(json_str "$IMAGE_REPO")},"
 overlay=$(mktemp "${TMPDIR:-/tmp}/neubird-proxy-options.XXXXXX")
