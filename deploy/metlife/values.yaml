@@ -39,8 +39,6 @@ config:
     mask: hmac                    # or label (no key)
     hmac_key_env: REDACTION_HMAC_KEY
 
-# install.sh --allow-cidrs turns it on.
+# install.sh --allow-cidrs turns it on (and adds the relay's IPs).
 networkPolicy:
   enabled: false
-  # relayCIDRs: ["52.206.84.184", "23.23.64.142"]   # the relay's IPs
-  # relayPorts: [443]
