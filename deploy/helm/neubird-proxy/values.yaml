@@ -50,8 +50,11 @@ inbound:
 # mode: tunnel only. Your dedicated relay, from NeuBird.
 tunnel:
   relays: []              # ["<tenant>.tunnel.neubird.ai:443"]
-  tenant: ""              # your NeuBird tenant
-  proxy: ""               # a name for this deployment, e.g. aks-prod
+  # Optional, and best left empty: the relay knows this proxy by its key
+  # (on first connect, by its join token's record). Set both and the
+  # proxy's certificate names them; the relay's records must then agree.
+  tenant: ""
+  proxy: ""
   connectionsPerRelay: 2  # tunnels per replica; NeuBird monitors replicas × this
   # The env var holding the join token (joinToken below, or your
   # env.existingSecret). With it, the proxy enrolls its own key on first

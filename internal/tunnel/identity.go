@@ -91,9 +91,11 @@ func Load(cfg *config.Tunnel) (*Identity, error) {
 		if err != nil {
 			return nil, err
 		}
-		id, err := FormatID(cfg.Tenant, cfg.Proxy)
-		if err != nil {
-			return nil, fmt.Errorf("tunnel: %w", err)
+		id := "" // no names: the relay identifies the proxy by its key
+		if cfg.Tenant != "" || cfg.Proxy != "" {
+			if id, err = FormatID(cfg.Tenant, cfg.Proxy); err != nil {
+				return nil, fmt.Errorf("tunnel: %w", err)
+			}
 		}
 		if cert, err = Mint(key, id, time.Now()); err != nil {
 			return nil, fmt.Errorf("tunnel certificate: %w", err)
@@ -109,12 +111,15 @@ func Load(cfg *config.Tunnel) (*Identity, error) {
 		return nil, fmt.Errorf("tunnel certificate: %w", err)
 	}
 	cert.Leaf = leaf
-	if len(leaf.URIs) != 1 {
-		return nil, fmt.Errorf("tunnel certificate must have exactly one URI SAN (the SPIFFE ID), has %d", len(leaf.URIs))
-	}
-	tenant, proxy, err := ParseID(leaf.URIs[0].String())
-	if err != nil {
-		return nil, fmt.Errorf("tunnel certificate: %w", err)
+	var tenant, proxy string
+	switch len(leaf.URIs) {
+	case 0: // names nothing: the relay's records say who it is
+	case 1:
+		if tenant, proxy, err = ParseID(leaf.URIs[0].String()); err != nil {
+			return nil, fmt.Errorf("tunnel certificate: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("tunnel certificate must have at most one URI SAN (the SPIFFE ID), has %d", len(leaf.URIs))
 	}
 	if (cfg.Tenant != "" && cfg.Tenant != tenant) || (cfg.Proxy != "" && cfg.Proxy != proxy) {
 		return nil, fmt.Errorf("tunnel: tenant/proxy %s/%s, but cert_file is for %s/%s", cfg.Tenant, cfg.Proxy, tenant, proxy)
@@ -141,12 +146,27 @@ func Load(cfg *config.Tunnel) (*Identity, error) {
 	return &Identity{Certificate: cert, Leaf: leaf, RelayCAs: pool, Tenant: tenant, Proxy: proxy, Fingerprint: fp, Minted: minted}, nil
 }
 
-// Mint makes a self-signed client certificate for the SPIFFE ID id, from
-// key, valid from an hour before now for mintValidity.
+// Name is how the identity reads in logs and messages: tenant/proxy, or a
+// note that the relay's records name it.
+func (id *Identity) Name() string {
+	if id.Tenant == "" {
+		return "named by NeuBird's records"
+	}
+	return id.Tenant + "/" + id.Proxy
+}
+
+// Mint makes a self-signed client certificate from key, valid from an hour
+// before now for mintValidity, naming the SPIFFE ID id, or nothing when id
+// is empty (the relay then identifies the proxy by its key).
 func Mint(key crypto.Signer, id string, now time.Time) (tls.Certificate, error) {
-	uri, err := url.Parse(id)
-	if err != nil {
-		return tls.Certificate{}, err
+	var uris []*url.URL
+	cn := "neubird-proxy"
+	if id != "" {
+		uri, err := url.Parse(id)
+		if err != nil {
+			return tls.Certificate{}, err
+		}
+		uris, cn = []*url.URL{uri}, strings.TrimPrefix(id, "spiffe://"+trustDomain+"/")
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
@@ -154,8 +174,8 @@ func Mint(key crypto.Signer, id string, now time.Time) (tls.Certificate, error) 
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: strings.TrimPrefix(id, "spiffe://"+trustDomain+"/")},
-		URIs:         []*url.URL{uri},
+		Subject:      pkix.Name{CommonName: cn},
+		URIs:         uris,
 		NotBefore:    now.Add(-time.Hour),
 		NotAfter:     now.Add(mintValidity),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

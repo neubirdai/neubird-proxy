@@ -28,17 +28,25 @@ and its reasons are in [outbound-tunnel-design.md](outbound-tunnel-design.md).
 
 ## Identity
 
-The proxy's certificate carries exactly one URI SAN:
+The relay identifies a proxy by its key: the fingerprint is recorded under
+the proxy's tenant and name, and on first connect the join token's record
+names the proxy the key is recorded under. So the proxy's certificate needs
+no names: it may carry **no URI SAN** (the relay takes tenant and proxy from
+its records) or **exactly one**:
 
 ```
 spiffe://neubird.ai/tenant/<tenant>/proxy/<proxy>
 ```
 
+which the relay checks against its records (a key recorded under another
+tenant or proxy is refused).
+
 Both `<tenant>` and `<proxy>` match `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`:
 a valid DNS label. That's why they can appear in relay hostnames,
 `<proxy>.<tenant>.relay.neubird.ai`. Anything else is rejected: other URI
 SANs, more than one, another trust domain, extra path segments, upper case,
-a query or fragment.
+a query or fragment. A relay older than this rule needs the SPIFFE ID: run
+current relays before proxies stop naming themselves.
 
 ### Test vectors
 

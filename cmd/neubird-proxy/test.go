@@ -505,9 +505,9 @@ func (t *tester) tunnel() bool {
 		status = "warn"
 	}
 	if id.Minted {
-		t.line(status, "identity", "tenant %s, proxy %s; key %s (NeuBird must have this fingerprint on record)", id.Tenant, id.Proxy, id.Fingerprint)
+		t.line(status, "identity", "%s; key %s (NeuBird must have this fingerprint on record)", identityText(id), id.Fingerprint)
 	} else {
-		t.line(status, "identity", "tenant %s, proxy %s; key %s; certificate expires in %d days", id.Tenant, id.Proxy, id.Fingerprint, int(id.DaysLeft()))
+		t.line(status, "identity", "%s; key %s; certificate expires in %d days", identityText(id), id.Fingerprint, int(id.DaysLeft()))
 	}
 	client := tunnel.New(tc, id, http.NotFoundHandler(), discardLog, &metrics.Registry{})
 	for _, relay := range tc.Relays {
@@ -538,4 +538,13 @@ func (t *tester) tunnel() bool {
 			int(time.Until(cert.NotAfter).Hours()/24))
 	}
 	return t.ok
+}
+
+// identityText is the identity line's first part: the names the
+// certificate carries, or that the relay names the proxy from its records.
+func identityText(id *tunnel.Identity) string {
+	if id.Tenant == "" {
+		return "no tenant or proxy name (the relay names it from its records, by key)"
+	}
+	return "tenant " + id.Tenant + ", proxy " + id.Proxy
 }

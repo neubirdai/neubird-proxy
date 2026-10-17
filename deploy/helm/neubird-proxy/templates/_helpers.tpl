@@ -145,15 +145,14 @@ leave out the default client_token_env, which nothing would read. */ -}}
 {{- else -}}
 {{- $t := .Values.tunnel -}}
 {{- if not $t.relays -}}{{- fail "tunnel.relays is required: your relay's address from NeuBird" -}}{{- end -}}
-{{- if not (and $t.tenant $t.proxy) -}}{{- fail "tunnel.tenant and tunnel.proxy are required" -}}{{- end -}}
+{{- if ne (empty $t.tenant) (empty $t.proxy) -}}{{- fail "tunnel.tenant and tunnel.proxy: set both, or neither (the relay then names the proxy from its records)" -}}{{- end -}}
 {{- $tunnel := dict
   "relays" $t.relays
-  "tenant" $t.tenant
-  "proxy" $t.proxy
   "key_file" "/etc/neubird-proxy/tunnel/tunnel.key"
   "ca_file" "/etc/neubird-proxy/ca/relay-ca.crt"
   "connections_per_relay" $t.connectionsPerRelay
   "join_token_env" ($t.joinTokenEnv | default "") -}}
+{{- if $t.tenant }}{{ $_ := set $tunnel "tenant" $t.tenant }}{{ $_ := set $tunnel "proxy" $t.proxy }}{{ end -}}
 {{- $_ := set $cfg "tunnel" $tunnel -}}
 {{- /* Mode tunnel: NeuBird sends no proxy token (the tunnel authenticates
 every request), so neubird_destinations defaults to client_auth: none, unless

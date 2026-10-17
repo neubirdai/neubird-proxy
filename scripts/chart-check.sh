@@ -55,7 +55,19 @@ grep -A5 'ipBlock: {cidr: "203.0.113.10/32"}' "$W/out.yaml" | grep -q 'port: 443
 for c in 198.51.100.0/30 2001:db8::1/128; do grep -qF "ipBlock: {cidr: \"$c\"}" "$W/out.yaml" || fail "relayCIDRs entry $c not rendered"; done
 echo "ok    chart renders a config this build accepts"
 
-for set in config.upstream_ca_file=/x image.repository= tunnelKey.generate=false networkPolicy.relayCIDRs=null tunnel.tenant=Bad_Name joinToken=not-a-token \
+# No tenant or proxy name (the default for packages): the config names none,
+# this build accepts it, and the proxy mints a certificate naming nothing.
+helm template p /chart "${args[@]}" --set tunnel.tenant= --set tunnel.proxy= > "$W/unnamed.yaml" || fail "helm template (no tenant or proxy)"
+awk '/^  config.yaml: \|$/{f=1;next} f&&/^  [^ ]/{f=0} f{sub(/^    /,"");print}' "$W/unnamed.yaml" \
+  | sed -e "s|/etc/neubird-proxy/tunnel/tunnel.key|$W/tunnel.key|" -e "s|/etc/neubird-proxy/ca/relay-ca.crt|$W/ca.crt|" \
+        -e "s|/etc/neubird-proxy/upstream-ca/ca.crt|$W/ca.crt|" > "$W/unnamed-local.yaml"
+! grep -qE '^  (tenant|proxy):' "$W/unnamed-local.yaml" || fail "tenant/proxy rendered though unset"
+NEUBIRD_PROXY_TOKEN=$T REDACTION_HMAC_KEY=$T SPLUNK_TOKEN=x \
+  "$W/neubird-proxy" validate -config "$W/unnamed-local.yaml" > "$W/unnamed.txt" || { cat "$W/unnamed.txt"; fail "config without tenant or proxy invalid"; }
+grep -q 'identity: no tenant or proxy name' "$W/unnamed.txt" || { cat "$W/unnamed.txt"; fail "unnamed identity not reported"; }
+echo "ok    chart without tenant or proxy: the relay names the proxy from its records"
+
+for set in config.upstream_ca_file=/x image.repository= tunnelKey.generate=false networkPolicy.relayCIDRs=null tunnel.tenant=Bad_Name tunnel.proxy= joinToken=not-a-token \
            env.existingSecret=,config.neubird_destinations.client_auth=bearer; do
   if helm template p /chart "${args[@]}" --set "$set" >/dev/null 2>&1; then fail "rendered with --set $set"; fi
 done

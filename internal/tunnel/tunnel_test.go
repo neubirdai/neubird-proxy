@@ -152,8 +152,7 @@ func TestLoad(t *testing.T) {
 		o    leafOpts
 		want string
 	}{
-		"no SPIFFE ID":  {leafOpts{}, "exactly one URI SAN"},
-		"two IDs":       {leafOpts{uris: []string{"spiffe://neubird.ai/tenant/a/proxy/b", "spiffe://neubird.ai/tenant/c/proxy/d"}}, "exactly one URI SAN"},
+		"two IDs":       {leafOpts{uris: []string{"spiffe://neubird.ai/tenant/a/proxy/b", "spiffe://neubird.ai/tenant/c/proxy/d"}}, "at most one URI SAN"},
 		"bad ID":        {leafOpts{uris: []string{"spiffe://neubird.ai/tenant/A/proxy/b"}}, "SPIFFE ID must be"},
 		"no clientAuth": {leafOpts{uris: []string{"spiffe://neubird.ai/tenant/a/proxy/b"}, noAuth: true}, "clientAuth"},
 		"expired": {leafOpts{uris: []string{"spiffe://neubird.ai/tenant/a/proxy/b"},
@@ -166,6 +165,12 @@ func TestLoad(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, c.want)
 			}
 		})
+	}
+	// A certificate naming nothing is fine: the relay names the proxy from
+	// its records, by key.
+	_, cert, key := p.leaf(t, "no-spiffe-id", leafOpts{})
+	if id, err := Load(&config.Tunnel{CertFile: cert, KeyFile: key, CAFile: p.caFile}); err != nil || id.Tenant != "" || id.Name() != "named by NeuBird's records" {
+		t.Fatalf("certificate without a SPIFFE ID: %+v %v", id, err)
 	}
 	if _, err := Load(&config.Tunnel{CertFile: cfg.CertFile, KeyFile: cfg.KeyFile, CAFile: cfg.CertFile + ".missing"}); err == nil {
 		t.Fatal("missing CA file accepted")

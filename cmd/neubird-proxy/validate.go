@@ -133,7 +133,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "INVALID tunnel: %v\n", err)
 			return 1
 		} else {
-			fmt.Fprintf(stdout, "  identity: tenant %s, proxy %s; certificate expires in %d days\n", id.Tenant, id.Proxy, int(id.DaysLeft()))
+			fmt.Fprintf(stdout, "  identity: %s; key %s; certificate expires in %d days\n", identityText(id), id.Fingerprint, int(id.DaysLeft()))
 			if id.DaysLeft() < 30 {
 				fmt.Fprintln(stdout, "  warning: renew the tunnel certificate soon")
 			}

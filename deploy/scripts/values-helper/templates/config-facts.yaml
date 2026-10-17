@@ -2,5 +2,6 @@
        install.sh --confirm-only. */ -}}
 {{- $c := fromYaml (toYaml .Values) }}
 config_relays: {{ join "," (dig "tunnel" "relays" (list) $c) | b64enc | quote }}
-config_identity: {{ printf "%s/%s" (dig "tunnel" "tenant" "unknown" $c) (dig "tunnel" "proxy" "unknown" $c) | b64enc | quote }}
+{{- $t := dig "tunnel" "tenant" "" $c }}
+config_identity: {{ ternary (printf "%s/%s" $t (dig "tunnel" "proxy" "" $c)) "named by NeuBird's records" (ne $t "") | b64enc | quote }}
 config_hosts: {{ join "," (dig "neubird_destinations" "hosts" (list) $c) | b64enc | quote }}

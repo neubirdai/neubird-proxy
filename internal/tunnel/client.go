@@ -126,7 +126,7 @@ func New(cfg *config.Tunnel, id *Identity, handler http.Handler, log *slog.Logge
 // requests, so pass a context that outlives the shutdown signal).
 func (c *Client) Start(ctx context.Context) {
 	if id, err := c.identity(); err == nil {
-		c.log.Info("tunnel starting", "tenant", id.Tenant, "proxy", id.Proxy, "relays", c.cfg.Relays,
+		c.log.Info("tunnel starting", "identity", id.Name(), "relays", c.cfg.Relays,
 			"connections_per_relay", c.cfg.ConnectionsPerRelay, "key", id.Fingerprint, "cert_expires", id.Leaf.NotAfter.Format(time.RFC3339),
 			"join_token", c.cfg.JoinToken != "")
 	}
@@ -432,7 +432,11 @@ func (c *Client) enroll(ctx context.Context, relay string, id *Identity) (string
 	case strings.HasPrefix(line, "error "):
 		return "", fmt.Errorf("relay refused: %s", strings.TrimPrefix(line, "error "))
 	case err != nil:
-		return "", fmt.Errorf("relay refused the enrollment (is %s/%s in NeuBird's records?): %w", id.Tenant, id.Proxy, err)
+		who := "this proxy's join token"
+		if id.Tenant != "" {
+			who = id.Tenant + "/" + id.Proxy
+		}
+		return "", fmt.Errorf("relay refused the enrollment (is %s in NeuBird's records?): %w", who, err)
 	default:
 		return "", fmt.Errorf("unexpected answer from the relay: %q", line)
 	}

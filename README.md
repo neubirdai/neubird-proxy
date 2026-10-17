@@ -109,11 +109,14 @@ tunnel:
 
 **Identity.** The proxy has its own key and NeuBird records the key's
 fingerprint; nothing is signed. On every connect the proxy mints a
-short-lived self-signed certificate from the key, carrying a SPIFFE ID, for
-example `spiffe://neubird.ai/tenant/acme/proxy/aks-prod`. SPIFFE is an open
-standard (CNCF) for naming workloads in certificates, the way a website
-certificate names a domain. The relay accepts the connection only if the
-key is the one recorded for that customer (`acme`) and proxy (`aks-prod`).
+short-lived self-signed certificate from the key. The relay accepts the
+connection only if the key is recorded, and takes the customer (`acme`) and
+proxy (`aks-prod`) from that record, so the proxy needs no name of its own;
+on its first connect the join token's record names it. A proxy may still
+name itself with a SPIFFE ID (`tunnel.tenant`, `tunnel.proxy`), for example
+`spiffe://neubird.ai/tenant/acme/proxy/aks-prod`; the records must then
+agree. SPIFFE is an open standard (CNCF) for naming workloads in
+certificates, the way a website certificate names a domain.
 
 **Setting it up.** The key is created here and never leaves. There are two
 ways for NeuBird to learn it.
@@ -407,7 +410,7 @@ refuses to start. Unknown YAML fields are errors.
 | `neubird_destinations.client_auth_header` | none | Header name when `client_auth: header` |
 | `neubird_destinations.client_token_env` | top-level | A token for this section instead of the top-level one |
 | `tunnel.relays` | none | Relay `host:port` addresses; setting `tunnel` enables the outbound tunnel |
-| `tunnel.tenant`, `tunnel.proxy` | required with `tunnel` (unless `cert_file`) | The names NeuBird gives you; the proxy mints its certificate for them |
+| `tunnel.tenant`, `tunnel.proxy` | no (both or neither) | Optional: the relay names the proxy from its records, by key (by the join token's record on first connect). Set, the minted certificate names them and the records must agree |
 | `tunnel.key_file` | required with `tunnel` | The tunnel key, from `neubird-proxy keygen`; NeuBird records its fingerprint |
 | `tunnel.cert_file` | none | A certificate for the key to present instead of minting one |
 | `tunnel.ca_file` | required with `tunnel` | CA that signs the relays' certificates, pinned |

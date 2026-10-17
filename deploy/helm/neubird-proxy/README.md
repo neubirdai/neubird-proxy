@@ -22,7 +22,6 @@ listens on a Service behind something you run (see Mode inbound).
 |---|---|
 | The image (shipped separately) | Load into your registry → `image.repository`, `image.digest` |
 | Relay address, e.g. `acme.tunnel.neubird.ai:443`, and its IPs | `tunnel.relays`; `networkPolicy.relayCIDRs`, firewall egress |
-| Your tenant name | `tunnel.tenant` |
 | `relay-ca.crt` (public) | `--set-file relayCA.cert=relay-ca.crt` |
 | A **join token** (secret, works once, expires) | `NEUBIRD_JOIN_TOKEN` in your env Secret |
 
@@ -124,7 +123,8 @@ startup.
 |---|---|---|
 | `image.repository`, `image.digest` (or `image.tag`) | yes | Where you loaded the image |
 | `mode` | default `tunnel` | `tunnel`: dial out to NeuBird's relay. `inbound`: listen on a Service behind your gateway |
-| `tunnel.relays`, `tunnel.tenant`, `tunnel.proxy` | mode `tunnel` | From NeuBird; `proxy` is your name for this deployment |
+| `tunnel.relays` | mode `tunnel` | From NeuBird |
+| `tunnel.tenant`, `tunnel.proxy` | no | Leave empty: the relay knows the proxy by its key (first, by its join token). Set both only to name them in the certificate; NeuBird's records must agree |
 | `relayCA.cert` or `relayCA.existingConfigMap` | mode `tunnel` | The relay CA NeuBird sent (key `relay-ca.crt`) |
 | `inbound.tls.existingSecret` | mode `inbound` | A `kubernetes.io/tls` Secret for the listener; or `inbound.allowPlainHTTP: true` |
 | `inbound.clientCA.cert` or `inbound.clientCA.existingConfigMap` | | Mode `inbound`: require client certificates this CA signed (key `ca.crt`) |

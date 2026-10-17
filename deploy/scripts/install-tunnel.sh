@@ -116,10 +116,12 @@ while [ $SECONDS -lt $end ]; do
       die "$r (ask NeuBird for a new join token)"
     fi
   fi
-  a=$(grep -oE 'relay refused the enrollment \(is [^ ]+ in NeuBird' <<<"$logs" | tail -1 | sed -E 's/.*\(is ([^ ]+) in NeuBird/\1/' || true)
+  # "(is metlife/aks in NeuBird's records?)" from a proxy naming itself,
+  # "(is this proxy's join token in ...)" from one that doesn't.
+  a=$(grep -oE "relay refused the enrollment \\(is [^(]+ in NeuBird" <<<"$logs" | tail -1 | sed -E 's/.*\(is (.+) in NeuBird/\1/' || true)
   if [ -n "$a" ] && [ -z "$enrolled" ]; then
     turned_away_at=${turned_away_at:-$SECONDS}
-    [ $((SECONDS - turned_away_at)) -ge 120 ] && die "the relay turns away $a at the handshake (not in its records, or the key is revoked): ask NeuBird to check that $a is recorded with this join token"
+    [ $((SECONDS - turned_away_at)) -ge 120 ] && die "the relay turns the enrollment away at the handshake ($a not in its records, or the key revoked): ask NeuBird to check the join token is recorded for this proxy"
   fi
   connected=$(grep -c '"msg":"tunnel connected"' <<<"$logs" || true)
   # Ready means the rollout finished: in tunnel mode a pod is ready only with

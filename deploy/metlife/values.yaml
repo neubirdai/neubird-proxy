@@ -12,8 +12,6 @@ replicaCount: 2
 mode: tunnel
 tunnel:
   relays: ["metlife-tunnel.cluster.neubird.ai:443"]
-  tenant: metlife
-  proxy: metlife
   joinTokenEnv: NEUBIRD_JOIN_TOKEN
 
 env:
