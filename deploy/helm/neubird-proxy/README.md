@@ -133,20 +133,57 @@ startup.
 | `config` | yes | `neubird_destinations` (the hosts NeuBird may reach), redaction, limits: see [configuration.md](docs/configuration.md). `${VAR}` comes from `env` |
 | `tunnel.joinTokenEnv` | default `NEUBIRD_JOIN_TOKEN` | Env var with NeuBird's join token; empty or missing means send the fingerprint instead |
 | `tunnelKey.generate` | default `true` | Key generated in a Secret at install, kept on upgrade and uninstall |
-| `tunnelKey.existingSecret` | | Bring your own key (`neubird-proxy keygen`), key `tunnel.key` |
+| `tunnelKey.existingSecret` | | Bring your own key, key `tunnel.key`: required with Argo CD or `helm template` (see below) |
 | `networkPolicy.enabled` | default `false` | Inbound only `metricsFrom` on 9090 (and mode `inbound`: `inboundFrom` on 8443, required); outbound only DNS, `relayCIDRs`:443 (mode `tunnel`), and your systems' ranges (`upstreams`) |
 | `networkPolicy.relayPorts` | default `[443]` | Mode `tunnel`: the relays' port(s) the policy allows |
 | `extraEnv` | | Extra non-secret environment (EnvVar list), e.g. `HTTPS_PROXY`/`NO_PROXY` for an outbound HTTP proxy; allow that proxy in `networkPolicy.upstreams` |
 | `replicaCount` | default `2` | NeuBird monitors `replicaCount × tunnel.connectionsPerRelay` tunnels |
 | `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `imagePullSecrets` | | As usual |
 
-With `helm template` or a GitOps tool that renders with it (Argo CD), the
-chart can't see the existing Secret, so it would generate a new key on every
-render and replace the one in use, dropping every tunnel; the key would also
-land in your rendered YAML. Use `tunnelKey.existingSecret` with a key made by
-`neubird-proxy keygen`. With `helm install`, the generated key is also stored
-in Helm's release record (`helm get manifest` shows it), so whoever can read
-Secrets in the namespace can read it either way.
+With `helm install`, the generated key is also stored in Helm's release
+record (`helm get manifest` shows it), so whoever can read Secrets in the
+namespace can read it either way.
+
+## Argo CD and `helm template`
+
+Argo CD (and any tool that runs `helm template`) renders the chart without
+reading the cluster, so the chart can't find the keys it made before. If it
+made them, every render would make new ones: a new tunnel key, which the
+relay refuses, dropping every tunnel; and a new HMAC key, which changes every
+masking code. Both would also land in the rendered YAML. So create the two
+Secrets once yourself, by hand or from your secret store (External Secrets,
+Sealed Secrets), and point the chart at them.
+
+1. The env Secret, as in Install step 1: `neubird-proxy-env` with
+   `NEUBIRD_JOIN_TOKEN` and `REDACTION_HMAC_KEY`.
+2. The tunnel key, a P-256 key in key `tunnel.key`:
+   ```sh
+   openssl ecparam -name prime256v1 -genkey -noout -out tunnel.key
+   kubectl -n neubird create secret generic neubird-proxy-tunnel-key --from-file=tunnel.key
+   rm tunnel.key
+   ```
+3. In the values Argo CD uses:
+   ```yaml
+   tunnelKey:
+     existingSecret: neubird-proxy-tunnel-key
+   env:
+     existingSecret: neubird-proxy-env
+   relayCA:
+     cert: |
+       -----BEGIN CERTIFICATE-----
+       ...                        # relay-ca.crt: public, fine in Git
+   ```
+   Don't set `joinToken` or `hmacKey`: they would go into Git and into the
+   rendered YAML.
+
+The chart then renders no Secrets, so Argo CD never changes or prunes them.
+Once the pods are Ready the key is enrolled: delete `NEUBIRD_JOIN_TOKEN`
+from the env Secret.
+
+**Moving a `helm install` to Argo CD:** the chart's Secrets are kept
+(`neubird-proxy-tunnel-key`, `neubird-proxy-env`, for release
+`neubird-proxy`), so skip steps 1 and 2 and point the values at them. The
+proxy keeps its key: no new join token, and the masking codes stay the same.
 
 ## Security properties
 

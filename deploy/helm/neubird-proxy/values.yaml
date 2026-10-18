@@ -70,9 +70,9 @@ joinToken: ""
 
 # hmac masking (config.redaction.mask: hmac) with the chart's own Secret: the
 # key is generated at install and kept across upgrades and reinstalls, so the
-# masking codes stay the same. Set it yourself only where the chart can't see
-# the existing Secret (helm template, Argo CD), or every render would make a
-# new key and change the codes.
+# masking codes stay the same. Where the chart can't see the existing Secret
+# (helm template, Argo CD), use env.existingSecret instead (README, Argo CD):
+# a key set here would go into your values and rendered YAML.
 hmacKey: ""
 
 # The relay CA certificate NeuBird sends you (public). The proxy only
@@ -93,9 +93,9 @@ upstreamCA:
 # send NeuBird only its fingerprint (see the install notes).
 tunnelKey:
   # Generate a P-256 key in a Secret at install, kept across upgrades and
-  # left in place on uninstall. With `helm template` or Argo CD, generate it
-  # yourself (neubird-proxy keygen) and use existingSecret: they can't see
-  # the existing Secret, so every render would replace the key (dropping the
+  # left in place on uninstall. With `helm template` or Argo CD, create it
+  # yourself and use existingSecret (README, Argo CD): they can't see the
+  # existing Secret, so every render would replace the key (dropping the
   # tunnels), and the key would land in your rendered YAML.
   generate: true
   existingSecret: ""      # a Secret with key tunnel.key
