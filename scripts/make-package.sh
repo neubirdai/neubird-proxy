@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build the install package NeuBird sends a customer for a tenant:
-# <tenant>-values.yaml, deploy/metlife/install.sh and its guide, <tenant>.env
-# with the relay preset, the relay CA, and a fresh join token for
-# <tenant>/<tenant> that is recorded on the tenant's relay first. The chart
-# isn't in it: the customer installs it from its registry (--chart), at the
-# version this commit's Chart.yaml names, which must be published and match
-# this commit's chart. NeuBird-internal; it isn't shipped.
+# Build the install package NeuBird sends a customer for a tenant: what a
+# helm install needs and nothing else. <tenant>-values.yaml (relay, relay
+# CA and image preset), a fresh join token for <tenant>/<tenant> that is
+# recorded on the tenant's relay first, and a README with the steps. The
+# chart isn't in it: the customer installs it from its registry (--chart), at
+# the version this commit's Chart.yaml names, which must be published and
+# match this commit's chart. NeuBird-internal; it isn't shipped.
 #
 #   scripts/make-package.sh -t <tenant>
 #
@@ -188,17 +188,17 @@ ok "$CHART $CHART_VERSION is this commit's chart"
 step "the proxy image"
 image=$(git -C "$repo" show "$sha:deploy/metlife/values.yaml" | python3 -c 'import sys,yaml; i=yaml.safe_load(sys.stdin)["image"]; print(i["repository"]+"@"+i["digest"])')
 [[ $image == *@sha256:* ]] || die "deploy/metlife/values.yaml at $sha doesn't pin the image by digest: $image"
-SYFT=anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02
 COSIGN=gcr.io/projectsigstore/cosign:v2.6.1@sha256:68839b7f13dac5a6744a5d8818e984dd39183374e37855c19e14d623d9bc9037
 ok "$image"
-# The signing key's public half, if this commit has one (cosign.pub at the
-# repo root); images published by CI are signed with it.
+# Check the image's signature with the signing key's public half, if this
+# commit has one (cosign.pub at the repo root; CI signs with it). The key
+# isn't shipped: a key in the same package as what it vouches for proves
+# nothing to the customer.
 cosign_pub=$(git -C "$repo" show "$sha:cosign.pub" 2>/dev/null || true)
-signed=
 if [ -n "$cosign_pub" ]; then
   kd=$(mktemp -d); printf '%s\n' "$cosign_pub" > "$kd/cosign.pub"; chmod 755 "$kd"; chmod 644 "$kd/cosign.pub"
   if docker run --rm -v "$kd:/k:ro" "$COSIGN" verify --key /k/cosign.pub "$image" >/dev/null 2>&1; then
-    signed=1; ok "signed with cosign.pub"
+    ok "signed with cosign.pub"
   else
     printf 'warn  %s has no valid signature from cosign.pub (images from before signing are unsigned)\n' "$image"
   fi
@@ -225,16 +225,17 @@ ok "made; expires $expires; in $WORK/join.token (never printed)"
 step "build the package"
 umask 022   # the package's files readable as usual; join.token stays 600
 B=$(mktemp -d); trap 'rm -rf "$B"' EXIT
+# P is the package: the values, the token and the README. S is what
+# install.sh needs to build the values (this commit's installer, the relay
+# preset, the CA); it isn't shipped.
 P=$B/$name; mkdir -p "$P"
-git -C "$repo" archive "$sha" deploy/metlife deploy/scripts | tar -x -C "$P"
-cp "$RELAY_CA" "$P/relay-ca.crt"; chmod 644 "$P/relay-ca.crt"
+S=$B/stage/$name; mkdir -p "$S"
+git -C "$repo" archive "$sha" deploy/metlife deploy/scripts | tar -x -C "$S"
+cp "$RELAY_CA" "$S/relay-ca.crt"
+install -m 600 "$WORK/join.token" "$S/join.token"
 install -m 600 "$WORK/join.token" "$P/join.token"
-# The image's SBOM (SPDX), for the customer's security review.
-docker run --rm "$SYFT" "$image" -q -o spdx-json > "$P/neubird-proxy-image.spdx.json" \
-  || die "couldn't make the image's SBOM (syft $image)"
-[ -z "$cosign_pub" ] || printf '%s\n' "$cosign_pub" > "$P/cosign.pub"
 until=$(python3 -c 'import sys,datetime; print(datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M UTC"))' "$expires")
-cat > "$P/$TENANT.env" <<EOF
+cat > "$S/$TENANT.env" <<EOF
 # Loaded by deploy/metlife/install.sh; you don't need to source it.
 
 # Preset by NeuBird for the $TENANT relay: don't change.
@@ -253,7 +254,7 @@ export JOIN_TOKEN_FILE=join.token
 
 EOF
 if [ "$MASK" = hmac ]; then
-  cat >> "$P/$TENANT.env" <<'EOF'
+  cat >> "$S/$TENANT.env" <<'EOF'
 # Masking: each sensitive value becomes a keyed code (HMAC), so NeuBird can
 # correlate values without seeing them. install.sh generates the key
 # (REDACTION_HMAC_KEY in the Secret) on first install; keep it, never send it.
@@ -261,22 +262,23 @@ if [ "$MASK" = hmac ]; then
 export MASK=hmac
 EOF
 else
-  cat >> "$P/$TENANT.env" <<'EOF'
+  cat >> "$S/$TENANT.env" <<'EOF'
 # Masking: each sensitive value becomes a label, e.g. <email>. --mask hmac
 # overrides this.
 export MASK=label
 EOF
 fi
-printf '\n# Everything else is an option of deploy/metlife/install.sh (see --help).\n' >> "$P/$TENANT.env"
 
-# <tenant>-values.yaml, for a plain helm install: the values install.sh would
-# build with the defaults (from a dry run of this package), with the relay CA
-# inline and the chart's own env Secret (join token and hmac key) instead of
-# one install.sh creates.
-G=$B/gen; mkdir -p "$G"; cp -Rp "$P" "$G/"
+# <tenant>-values.yaml, for a plain helm install: the values install.sh
+# builds with the defaults (from a dry run of the staged installer), with the
+# relay CA inline and the chart's own env Secret (join token and hmac key)
+# instead of one install.sh creates.
+G=$B/gen; mkdir -p "$G"; cp -Rp "$S" "$G/"
 out=$(cd "$G" && env -u KUBE_CONTEXT -u NAMESPACE -u MASK -u TENANT -u RELAY -u RELAY_IPS -u RELAY_CA -u JOIN_TOKEN_FILE -u HOSTS \
   "$G/$name/deploy/metlife/install.sh" -c values -n values --dry-run 2>&1) || die "couldn't build $TENANT-values.yaml (install.sh --dry-run): $out"
-python3 - "$G/neubird-proxy-values.yaml" "$P/relay-ca.crt" "$P/$TENANT-values.yaml" "$TENANT" "$CHART" "$CHART_VERSION" "$sha" <<'PY'
+grep -q "values for tenant $TENANT, proxy $PROXY, relay $RELAY" <<<"$out" || die "the values didn't pick up the relay preset: $out"
+grep -q "mask: $MASK" <<<"$out" || die "the values have the wrong mask: $out"
+python3 - "$G/neubird-proxy-values.yaml" "$S/relay-ca.crt" "$P/$TENANT-values.yaml" "$TENANT" "$CHART" "$CHART_VERSION" "$sha" <<'PY'
 import sys, yaml
 src, ca, out, tenant, chart, chart_version, sha = sys.argv[1:]
 v = yaml.safe_load(open(src))
@@ -308,34 +310,22 @@ open(out, "w").write(head + yaml.dump(v, Dumper=D, sort_keys=False, default_flow
 PY
 chmod 644 "$P/$TENANT-values.yaml"
 ips_text=$(sed 's/,/ and /g' <<<"$RELAY_IPS")
-mask_text=label; [ "$MASK" = label ] || mask_text=HMAC
 cat > "$P/README.md" <<EOF
 # neubird-proxy for $TENANT
 
 The proxy in tunnel mode for tenant \`$TENANT\`: it dials out to the
-$TENANT relay (\`$RELAY\`,
-$ips_text) and calls any host name it can reach, or only
-the ones you list in \`HOSTS\`. No proxy token.
+$TENANT relay (\`$RELAY\`, $ips_text); nothing connects in.
 
 | File | What |
 |---|---|
-| \`$TENANT-values.yaml\` | The chart's values for $TENANT: relay, CA and image preset; hosts and egress yours to set |
-| \`$TENANT.env\` | The relay, tenant and IPs, the chart, and $mask_text masking (preset); loaded by install.sh |
-| \`join.token\` | The join token (secret, single use) |
-| \`relay-ca.crt\` | The $TENANT relay CA (public) |
-| \`neubird-proxy-image.spdx.json\` | The proxy image's SBOM (SPDX JSON): \`$image\` |$( [ -z "$cosign_pub" ] || printf '\n| `cosign.pub` | NeuBird'"'"'s image signing key (public), for the check below |')
-| \`deploy/metlife/install.sh\` | The installer: builds the values, installs and confirms (\`--help\`) |
-| \`deploy/scripts/install-tunnel.sh\` | Called by install.sh: Secret, install, enrollment, tests |
-| \`deploy/scripts/values.sh\`, \`values-helper/\` | Used by both: YAML through helm (a chart that's never installed) |
+| \`$TENANT-values.yaml\` | The chart's values: relay, relay CA and image preset by NeuBird; the hosts NeuBird may reach, egress proxy, resources yours to set |
+| \`join.token\` | The join token (**secret**, single use, valid until $until) |
 
-The chart isn't in the package: helm installs it from NeuBird's registry,
-\`$CHART\` version \`$CHART_VERSION\`.
+The chart comes from NeuBird's registry: \`$CHART\` version \`$CHART_VERSION\`.
+The image is \`$image\`; its SBOM and provenance are attached to it in the
+registry (\`docker buildx imagetools inspect <image> --format '{{json .SBOM}}'\`).
 
-**This package includes a secret:** \`join.token\`, a single-use join token for
-\`$TENANT/$PROXY\`, valid until $until.
-\`$TENANT.env\` points \`JOIN_TOKEN_FILE\` at it. Don't share this package.
-
-## Install with helm
+## Install
 
 \`\`\`sh
 tar xzf $name-with-token.tgz && cd $name
@@ -347,57 +337,29 @@ helm test neubird-proxy --kube-context <context> -n neubird
 
 Always give \`--kube-context\` (\`kubectl config get-contexts\` lists them):
 without it helm uses whatever context is current, which could be any cluster.
+Requires helm 3.8 or later.
 
 First edit \`config.neubird_destinations.hosts\` in \`$TENANT-values.yaml\` if
-NeuBird should reach only some systems (default \`*\`: any host name). \`--wait\`
-returns once the proxy has enrolled its key and its tunnels are up (a pod is
-ready only with a tunnel up); \`helm test\` checks the tunnel and each listed host
-from inside the cluster (if it says "not in the tenant records" within a minute
-of NeuBird making this package, the relay hasn't loaded the token yet: run it
-again). The join token is spent after that: your next
-\`helm upgrade ... --kube-context <context> -f $TENANT-values.yaml\` (without \`--set-file joinToken\`) drops it.
-\`helm uninstall\` keeps the proxy's key and HMAC key (two Secrets), so a
-reinstall needs no new token.
+NeuBird should reach only some systems (default \`*\`: any host name).
+\`--wait\` returns once the proxy has enrolled its key and its tunnels are up;
+\`helm test\` checks the tunnel and each listed host from inside the cluster.
+If it says "not in the tenant records" within a minute of NeuBird making this
+package, the relay hasn't loaded the token yet: run it again.
 
-## Or the guided installer
+## After the install
+
+The join token is spent. Drop it from the chart's Secret:
 
 \`\`\`sh
-$name/deploy/metlife/install.sh --kube-context <context>
+helm upgrade neubird-proxy $CHART --version $CHART_VERSION \\
+  --kube-context <context> -n neubird -f $TENANT-values.yaml --wait
 \`\`\`
 
-\`--kube-context\` is required (\`--kube-context current\` for the current context); the namespace defaults to \`neubird\`
-(\`--namespace\` to choose another).
-
-Common options (all of them: \`install.sh --help\`):
-
-| Option | What |
-|---|---|
-| \`--hosts <host[:port]>,...\` | Limit what the proxy may call (default \`*\`, any host name) |
-| \`--egress-proxy <url>\` | Outbound HTTP proxy for the tunnel |
-| \`--dry-run\` | Build and render the values, install nothing |
-| \`--confirm-only\` | Re-check an existing install |
-| \`--uninstall\` | Remove the proxy; keeps its key and HMAC key, so a reinstall needs no new token |
-| \`--uninstall --purge\` | Also delete both keys (asks first) and print the key's fingerprint for NeuBird to revoke |
-
-The script waits for enrollment and the tunnels, tests the tunnel and each listed host,
-removes the spent join token from the Secret, then confirms the running proxy and
-prints its key fingerprint.
-
-Requires kubectl and helm 3.8 or later (for charts from a registry);
-nothing else (no Python).
+then delete this package. Later upgrades are the same command with the new
+\`--version\` or values. \`helm uninstall\` keeps the proxy's key and HMAC key
+(two Secrets), so a reinstall needs no new token; deleting them means a new
+token from NeuBird.
 EOF
-if [ -n "$signed" ]; then
-  cat >> "$P/README.md" <<EOF
-
-## Checking the image (optional)
-
-The image is signed by NeuBird. To check it, or a copy in your registry:
-
-\`\`\`sh
-cosign verify --key $name/cosign.pub $image
-\`\`\`
-EOF
-fi
 ok "assembled from $sha"
 
 # Checked before the token is recorded: a package that doesn't work leaves
@@ -405,11 +367,8 @@ ok "assembled from $sha"
 step "check the package"
 T=$B/check; mkdir -p "$T"
 cp -Rp "$P" "$T/"
-out=$(cd "$T" && env -u KUBE_CONTEXT -u NAMESPACE -u MASK -u TENANT -u RELAY -u RELAY_IPS -u RELAY_CA -u JOIN_TOKEN_FILE \
-  "$T/$name/deploy/metlife/install.sh" -c check -n check --dry-run 2>&1) || die "the package's dry run failed: $out"
-grep -q "values for tenant $TENANT, proxy $PROXY, relay $RELAY" <<<"$out" || die "the package's dry run didn't pick up its presets: $out"
-grep -q "mask: $MASK" <<<"$out" || die "the package's dry run has the wrong mask: $out"
-ok "a dry run from the package builds $TENANT's values (mask: $MASK)"
+[ "$(cd "$T/$name" && ls -A | sort | tr '\n' ' ')" = "README.md join.token $TENANT-values.yaml " ] \
+  || die "the package holds more than its values, token and README: $(cd "$T/$name" && ls -A | tr '\n' ' ')"
 out=$(helm template neubird-proxy "$CHART" --version "$CHART_VERSION" -n neubird -f "$T/$name/$TENANT-values.yaml" --set-file joinToken="$T/$name/join.token" 2>&1) \
   || die "the package's helm install wouldn't render: $out"
 grep -q 'name: neubird-proxy-env' <<<"$out" && grep -q "NEUBIRD_JOIN_TOKEN:" <<<"$out" \
