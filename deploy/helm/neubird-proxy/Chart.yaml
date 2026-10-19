@@ -6,7 +6,7 @@ description: >-
   your internal APIs through allow-listed, redacted connections. No inbound
   port.
 type: application
-version: 0.1.0
-appVersion: "b41d9ad"
+version: 1.0.0
+appVersion: "cc97e4f"
 kubeVersion: ">=1.25.0-0"
 home: https://neubird.ai
