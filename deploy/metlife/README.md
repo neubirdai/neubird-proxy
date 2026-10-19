@@ -45,7 +45,7 @@ The chart puts the join token (and, with hmac masking, a key it generates once a
 deploy/metlife/install.sh --kube-context <ctx> --namespace neubird --join-token-file join.token
 ```
 
-In a package from NeuBird, the relay, CA and join token are preset in its `<tenant>.env`, which the script loads itself: run `install.sh --kube-context <ctx>` from any directory (the namespace defaults to `neubird`; `--namespace` chooses another). `--kube-context` is always required: the current context is never used by default. `install.sh --help` lists every option.
+In a package from NeuBird, the relay, CA and join token are preset in its `<tenant>.env`, which the script loads itself: run `install.sh --kube-context <ctx>` from any directory (the namespace defaults to `neubird`; `--namespace` chooses another). `--kube-context` is always required: the current context is never used by default (`--kube-context current` chooses it, and the script prints its name). `install.sh --help` lists every option.
 
 The script builds the values, creates the namespace and Secret, installs the chart, waits until the key is enrolled and the tunnels are up, tests the tunnel and each listed system, and removes the spent join token from the Secret. It then confirms the running proxy and ends with a summary:
 
@@ -62,7 +62,7 @@ Send NeuBird the key fingerprint from that summary (it isn't secret): NeuBird ch
 
 | Option | Required / default | What |
 |---|---|---|
-| `-c`, `--kube-context` | yes | kubectl context of the cluster (`kubectl config get-contexts`); never the current one by default |
+| `-c`, `--kube-context` | yes | kubectl context of the cluster (`kubectl config get-contexts`), or `current` for the current context; never the current one by default |
 | `-n`, `--namespace` | `neubird` | Namespace to install in (created if missing) |
 | `--join-token-file` | first install | File holding the join token |
 | `--hosts` | no | The systems NeuBird may reach, comma-separated: `host[:port]`, `*.domain[:port]` or an IP; port 443 if omitted. Default `*`: any host name the proxy can reach (see Locking down the network) |

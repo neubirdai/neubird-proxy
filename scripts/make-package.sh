@@ -365,7 +365,7 @@ reinstall needs no new token.
 $name/deploy/metlife/install.sh --kube-context <context>
 \`\`\`
 
-\`--kube-context\` is required; the namespace defaults to \`neubird\`
+\`--kube-context\` is required (\`--kube-context current\` for the current context); the namespace defaults to \`neubird\`
 (\`--namespace\` to choose another).
 
 Common options (all of them: \`install.sh --help\`):
