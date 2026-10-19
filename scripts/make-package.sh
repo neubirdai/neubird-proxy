@@ -232,7 +232,7 @@ install -m 600 "$WORK/join.token" "$P/join.token"
 # The image's SBOM (SPDX), for the customer's security review.
 docker run --rm "$SYFT" "$image" -q -o spdx-json > "$P/neubird-proxy-image.spdx.json" \
   || die "couldn't make the image's SBOM (syft $image)"
-[ -z "$cosign_pub" ] || printf '%s\n' "$cosign_pub" > "$P/cosign.pub"
+[ -z "$signed" ] || printf '%s\n' "$cosign_pub" > "$P/cosign.pub"
 until=$(python3 -c 'import sys,datetime; print(datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M UTC"))' "$expires")
 cat > "$P/$TENANT.env" <<EOF
 # Loaded by deploy/metlife/install.sh; you don't need to source it.
@@ -323,7 +323,7 @@ the ones you list in \`HOSTS\`. No proxy token.
 | \`$TENANT.env\` | The relay, tenant and IPs, the chart, and $mask_text masking (preset); loaded by install.sh |
 | \`join.token\` | The join token (secret, single use) |
 | \`relay-ca.crt\` | The $TENANT relay CA (public) |
-| \`neubird-proxy-image.spdx.json\` | The proxy image's SBOM (SPDX JSON): \`$image\` |$( [ -z "$cosign_pub" ] || printf '\n| `cosign.pub` | NeuBird'"'"'s image signing key (public), for the check below |')
+| \`neubird-proxy-image.spdx.json\` | The proxy image's SBOM (SPDX JSON): \`$image\` |$( [ -z "$signed" ] || printf '\n| `cosign.pub` | NeuBird'"'"'s image signing key (public), for the check below |')
 | \`deploy/metlife/install.sh\` | The installer: builds the values, installs and confirms (\`--help\`) |
 | \`deploy/scripts/install-tunnel.sh\` | Called by install.sh: Secret, install, enrollment, tests |
 | \`deploy/scripts/values.sh\`, \`values-helper/\` | Used by both: YAML through helm (a chart that's never installed) |
@@ -391,11 +391,15 @@ if [ -n "$signed" ]; then
 
 ## Checking the image (optional)
 
-The image is signed by NeuBird. To check it, or a copy in your registry:
+The image is signed by NeuBird. To check it:
 
 \`\`\`sh
 cosign verify --key $name/cosign.pub $image
 \`\`\`
+
+The signature is stored next to the image in the registry. To check a copy in
+your own registry, copy the image with its signature (\`cosign copy $image
+<your registry>/neubird-proxy\`); \`az acr import\` and \`docker push\` don't copy it.
 EOF
 fi
 ok "assembled from $sha"
