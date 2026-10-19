@@ -26,7 +26,7 @@ Allow outbound TCP 443 to the relay IPs **without TLS inspection**: the tunnel i
 
 ## Install
 
-**With helm alone** (a package from NeuBird): it ships `<tenant>-values.yaml` with the relay, CA and image preset. Set `config.neubird_destinations.hosts` there if NeuBird should reach only some systems, then:
+**With helm alone** (a package from NeuBird): it holds only `<tenant>-values.yaml`, with the relay, CA and image preset, the single-use `join.token`, and a README with these steps. Set `config.neubird_destinations.hosts` there if NeuBird should reach only some systems, then:
 
 ```sh
 helm install neubird-proxy oci://ghcr.io/neubirdai/charts/neubird-proxy --version <version> \
@@ -45,7 +45,7 @@ The chart puts the join token (and, with hmac masking, a key it generates once a
 deploy/metlife/install.sh --kube-context <ctx> --namespace neubird --join-token-file join.token
 ```
 
-In a package from NeuBird, the relay, CA and join token are preset in its `<tenant>.env`, which the script loads itself: run `install.sh --kube-context <ctx>` from any directory (the namespace defaults to `neubird`; `--namespace` chooses another). `--kube-context` is always required: the current context is never used by default (`--kube-context current` chooses it, and the script prints its name). `install.sh --help` lists every option.
+NeuBird's packages are helm only and don't include the installer: it runs from a checkout of this repository, with the relay CA (`relay-ca.crt`) and a join token next to it. The namespace defaults to `neubird` (`--namespace` chooses another). `--kube-context` is always required: the current context is never used by default (`--kube-context current` chooses it, and the script prints its name). `install.sh --help` lists every option.
 
 The script builds the values, creates the namespace and Secret, installs the chart, waits until the key is enrolled and the tunnels are up, tests the tunnel and each listed system, and removes the spent join token from the Secret. It then confirms the running proxy and ends with a summary:
 
