@@ -195,6 +195,10 @@ if [ "${KUBE_CONTEXT:-}" = current ]; then
   KUBE_CONTEXT=$(kubectl config current-context 2>/dev/null) && [ -n "$KUBE_CONTEXT" ] \
     || die "--kube-context current: kubectl has no current context (kubectl config use-context <context>)"
   current_ctx=1
+  # apply runs again after a package's .env: keep the name, not "current".
+  for i in "${!opts[@]}"; do
+    [ "${opts[$i]}" != KUBE_CONTEXT=current ] || opts[$i]=KUBE_CONTEXT=$KUBE_CONTEXT
+  done
 fi
 [ -z "${DRY_RUN:-}" ] || [ -z "${CONFIRM_ONLY:-}" ] || bad "--dry-run and --confirm-only don't go together"
 [ -z "${PURGE:-}" ] || [ -n "${UNINSTALL:-}" ] || bad "--purge goes with --uninstall"
