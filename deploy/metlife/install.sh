@@ -54,7 +54,8 @@ Where:
                                  Required (not needed with --dry-run): never
                                  the current context by default, which could
                                  be any cluster. kubectl config get-contexts
-                                 lists them.
+                                 lists them. "current" chooses the current
+                                 context, by name, on the command line only.
   -n, --namespace <namespace>    namespace to install in, created if missing.
                                  Default: neubird
 
@@ -173,14 +174,31 @@ apply() {
 }
 apply
 # The cluster is always named (--kube-context): the current context could be
-# any cluster, including one this proxy must never run in. The namespace
-# defaults to neubird.
+# any cluster, including one this proxy must never run in. "current" names it
+# deliberately, and is resolved to the context's name here, so every command
+# below uses that name even if the current context changes meanwhile. The
+# namespace defaults to neubird.
 defaulted=
 [ -n "${NAMESPACE:-}" ] || { NAMESPACE=neubird; defaulted+=" NAMESPACE"; }
 if [ -z "${KUBE_CONTEXT:-}" ] && [ -z "${DRY_RUN:-}" ]; then
   ctxs=$(kubectl config get-contexts -o name 2>/dev/null | sed 's/^/  /' || true)
-  bad "--kube-context is required: the kubectl context of the cluster to install in (never the current one by default).${ctxs:+ kubectl has:
+  bad "--kube-context is required: the kubectl context of the cluster to install in, or current for the current one (never used by default).${ctxs:+ kubectl has:
 $ctxs}"
+fi
+current_ctx=
+if [ "${KUBE_CONTEXT:-}" = current ]; then
+  [[ $from_env != *" KUBE_CONTEXT"* ]] \
+    || bad "KUBE_CONTEXT=current in your environment: choose the current context on the command line (--kube-context current), or name the context"
+  command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
+  ! kubectl config get-contexts -o name 2>/dev/null | grep -qxF current \
+    || die "kubectl has a context named \"current\": --kube-context current is ambiguous; name the cluster's context instead"
+  KUBE_CONTEXT=$(kubectl config current-context 2>/dev/null) && [ -n "$KUBE_CONTEXT" ] \
+    || die "--kube-context current: kubectl has no current context (kubectl config use-context <context>)"
+  current_ctx=1
+  # apply runs again after a package's .env: keep the name, not "current".
+  for i in "${!opts[@]}"; do
+    [ "${opts[$i]}" != KUBE_CONTEXT=current ] || opts[$i]=KUBE_CONTEXT=$KUBE_CONTEXT
+  done
 fi
 [ -z "${DRY_RUN:-}" ] || [ -z "${CONFIRM_ONLY:-}" ] || bad "--dry-run and --confirm-only don't go together"
 [ -z "${PURGE:-}" ] || [ -n "${UNINSTALL:-}" ] || bad "--purge goes with --uninstall"
@@ -198,7 +216,8 @@ case ${MASK:-hmac} in label|hmac) ;; *) bad "--mask must be label or hmac" ;; es
 case ${TIMEOUT:-300} in ''|*[!0-9]*) bad "--timeout must be a number of seconds" ;; esac
 export KUBE_CONTEXT NAMESPACE
 origin() {
-  if [[ $from_env == *" $1"* ]]; then printf ' (from $%s in your environment)' "$1"
+  if [ "$1" = KUBE_CONTEXT ] && [ -n "$current_ctx" ]; then printf ' (the current context)'
+  elif [[ $from_env == *" $1"* ]]; then printf ' (from $%s in your environment)' "$1"
   elif [[ $defaulted == *" $1"* ]]; then
     printf ' (the default)'
   fi
