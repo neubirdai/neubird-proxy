@@ -39,6 +39,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build image
         run: make image VERSION=${{ github.sha }}
+      - name: Smoke test (as the chart runs it)
+        run: make image-check VERSION=${{ github.sha }}
       - name: Image size
         run: docker image ls neubird-proxy:${{ github.sha }} --format '{{.Size}}'
       - name: Scan image (fails on fixable HIGH or CRITICAL vulnerabilities)

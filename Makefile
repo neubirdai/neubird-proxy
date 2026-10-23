@@ -1,7 +1,7 @@
 IMAGE   ?= neubird-proxy
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: chart-check chart-package build test lint vuln fuzz bench image sbom scan check-config clean
+.PHONY: chart-check chart-package build test lint vuln fuzz bench image image-check sbom scan check-config clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/neubird-proxy ./cmd/neubird-proxy
@@ -27,6 +27,10 @@ bench:
 
 image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) .
+
+# Smoke-test the image as the chart runs it (scripts/image-check.sh).
+image-check:
+	scripts/image-check.sh $(IMAGE):$(VERSION) $(VERSION)
 
 # SPDX SBOM of the image, for MetLife's scan. Uses syft's container image
 # so nothing extra is installed locally.

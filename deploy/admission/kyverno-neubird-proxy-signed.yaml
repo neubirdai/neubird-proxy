@@ -1,0 +1,53 @@
+# Optional, for the customer's cluster: Kyverno admits a neubird-proxy pod
+# only if its image is signed with NeuBird's key (cosign.pub at the root of
+# this repository, copied below) and pinned by digest. Unsigned images,
+# images signed by anyone else, and tags are refused.
+#
+#   kubectl apply -f kyverno-neubird-proxy-signed.yaml
+#
+# Adjust before applying:
+# - namespaces: where the proxy runs.
+# - imageReferences: add your registry's copy if you mirror the image. Copy
+#   the signature with it (`cosign copy <docker.io ref> <your ref>`), or the
+#   copy is refused.
+# - ignoreTlog: true checks the signature against the key alone, so the
+#   cluster needs no access to Sigstore's public transparency log (Rekor).
+#   Set it to false to also require the log entry.
+#
+# Tested with Kyverno 1.19: the signed digest is admitted; an unsigned
+# digest, a different key and a tag are refused. kyverno.io/v1 ClusterPolicy
+# works from Kyverno 1.10; 1.19 warns that it's deprecated in favour of
+# ImageValidatingPolicy, but still enforces it.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: neubird-proxy-signed
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: neubird-proxy-signed
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [neubird]
+      verifyImages:
+        - imageReferences:
+            - "docker.io/neubirdai/neubird-proxy*"
+          required: true
+          verifyDigest: true
+          mutateDigest: false
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0VVFnlia4SS8DC9Fymwqe4YVKzFh
+                      bvEB2ki3TG2f/BtoSqAldZA1t/NafAg9AG3psVAG1I2C9ebghYHSCSqF6A==
+                      -----END PUBLIC KEY-----
+                    rekor:
+                      ignoreTlog: true
+                    ctlog:
+                      ignoreSCT: true
