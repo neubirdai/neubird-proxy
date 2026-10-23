@@ -716,6 +716,10 @@ To rotate the proxy token (inbound listener only; a tunnel-only proxy has none):
 - CI (`.github/workflows/ci.yml`) runs lint, race tests, `govulncheck`, a
   fuzz pass, the example-config check, the image build, and the SBOM. Its
   actions are pinned by commit SHA.
+- Every Monday, `rescan.yml` rescans the published images (`:latest` and
+  the digest MetLife's values pin) for vulnerabilities found since, and
+  opens an issue if one is fixable HIGH or CRITICAL. Dependabot proposes
+  weekly updates to Go modules, actions and the base images.
 - Dependencies are the Go standard library, `gopkg.in/yaml.v3`, and
   `golang.org/x/net` (from the Go team; HTTP/2 and outbound proxy settings
   for the tunnel).

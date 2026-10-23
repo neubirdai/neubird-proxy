@@ -1,0 +1,38 @@
+name: rescan
+
+# Weekly: vulnerabilities found since the images were published. Scans the
+# images customers run (:latest and the digest deploy/metlife/values.yaml
+# pins), each platform, and opens an issue (or comments on the open one)
+# when one has a fixable HIGH or CRITICAL vulnerability: fix it, publish,
+# and move the pinned digest.
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rescan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Scan the published images
+        id: scan
+        run: |
+          pinned=$(sed -n 's/^  digest: *\(sha256:[0-9a-f]\{64\}\).*/\1/p' deploy/metlife/values.yaml)
+          scripts/rescan.sh docker.io/neubirdai/neubird-proxy:latest ${pinned:+docker.io/neubirdai/neubird-proxy@$pinned}
+      - name: Open an issue
+        if: failure() && steps.scan.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          title="Weekly image scan: vulnerabilities found or scan failed"
+          body="Found by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          n=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then gh issue comment "$n" --body "$body"; else gh issue create --title "$title" --body "$body"; fi

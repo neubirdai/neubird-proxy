@@ -1,0 +1,13 @@
+# Weekly update PRs: Go modules, the pinned actions in the workflows, and
+# the Dockerfile's base images (pinned by digest). CI checks each PR.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /
+    schedule: {interval: weekly}
